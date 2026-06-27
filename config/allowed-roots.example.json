@@ -1,0 +1,17 @@
+﻿{
+  "allowedRoots": [
+    "C:\\Users\\<you>\\Projects\\<project>",
+    "C:\\Users\\<you>\\Projects\\<another-project>"
+  ],
+  "requireGitRoot": true,
+  "auditLog": "C:\\Users\\<you>\\Projects\\<project>\\logs\\audit.log",
+  "allowedCommands": [
+    "npm test",
+    "npm run lint",
+    "npm run typecheck",
+    "npm run build",
+    "git status",
+    "git diff"
+  ]
+}
+

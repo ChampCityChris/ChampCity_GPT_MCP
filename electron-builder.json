@@ -1,0 +1,41 @@
+{
+  "appId": "com.champcity.gpt.mcp.launcher",
+  "productName": "ChampCity GPT MCP Launcher",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/renderer/**/*",
+    "package.json",
+    "README.md",
+    "docs/**/*",
+    "examples/cloudflared-config.example.yml",
+    "scripts/tunnel-readiness.ps1",
+    "scripts/verify-public-endpoint.ps1",
+    "config/allowed-roots.example.json",
+    "!config/*.local.json",
+    "!logs/**/*",
+    "!generated/**/*",
+    "!release/**/*",
+    "!tests/**/*",
+    "!dist/tests/**/*",
+    "!package-lock.zip",
+    "!**/*.log",
+    "!**/*.pid",
+    "!**/*.status.json",
+    "!**/*.tsbuildinfo"
+  ],
+  "asar": true,
+  "win": {
+    "target": [
+      {
+        "target": "portable",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  }
+}

@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;"
+    />
+    <title>ChampCity GPT MCP Launcher</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <div id="setupWizard" class="setup-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
+        <section class="setup-panel">
+          <div class="setup-header">
+            <div>
+              <p class="eyebrow">First-run setup</p>
+              <h2 id="setupTitle">ChampCity GPT MCP Launcher</h2>
+            </div>
+            <span id="setupProgress">Step 1 of 8</span>
+          </div>
+
+          <div class="setup-step" data-step="0">
+            <h3>Welcome</h3>
+            <p>ChampCity GPT exposes selected local project tools to ChatGPT through MCP. Access is limited to allowed roots, public HTTP requires OAuth by default, and write mode starts off.</p>
+            <p>Local files stay local except for content requested by ChatGPT through the tools you approve.</p>
+          </div>
+
+          <div class="setup-step hidden" data-step="1">
+            <h3>Runtime Mode</h3>
+            <div class="setup-grid">
+              <p><strong>Mode:</strong> <span id="setupRuntimeMode">Loading...</span></p>
+              <p><strong>Config:</strong> <span id="setupConfigDir">Loading...</span></p>
+              <p><strong>Logs:</strong> <span id="setupLogsDir">Loading...</span></p>
+              <p><strong>Generated:</strong> <span id="setupGeneratedDir">Loading...</span></p>
+              <p><strong>Server resource:</strong> <span id="setupServerEntrypoint">Loading...</span></p>
+            </div>
+          </div>
+
+          <div class="setup-step hidden" data-step="2">
+            <h3>Allowed Roots</h3>
+            <p>Add one or more project folders. Avoid broad roots such as your user folder, Desktop, Documents, or a drive root unless you explicitly accept that scope.</p>
+            <div id="setupRootsList" class="roots-list setup-roots"></div>
+            <div class="inline-actions setup-inline">
+              <button id="setupAddRoot" type="button">Add Root</button>
+              <button id="setupAddExampleRoot" type="button">Use Placeholder Example</button>
+            </div>
+            <label class="toggle-row setup-toggle">
+              <input id="setupConfirmBroadRoots" type="checkbox" />
+              <span>I understand the risk of broad allowed roots.</span>
+            </label>
+            <div id="setupRootWarnings" class="warnings"></div>
+          </div>
+
+          <div class="setup-step hidden" data-step="3">
+            <h3>OAuth Setup</h3>
+            <p>ChatGPT uses OAuth with dynamic client registration and PKCE. Save an admin password locally to approve OAuth requests; only a hash is stored.</p>
+            <label class="field-label modal-label" for="setupOAuthPassword">OAuth admin password</label>
+            <input id="setupOAuthPassword" class="text-input modal-input" type="password" autocomplete="new-password" />
+            <label class="field-label modal-label" for="setupOAuthPasswordConfirm">Confirm password</label>
+            <input id="setupOAuthPasswordConfirm" class="text-input modal-input" type="password" autocomplete="new-password" />
+          </div>
+
+          <div class="setup-step hidden" data-step="4">
+            <h3>Public Endpoint</h3>
+            <label class="toggle-row setup-toggle">
+              <input id="setupLocalOnly" name="setupEndpointMode" type="radio" checked />
+              <span>Local-only testing</span>
+            </label>
+            <label class="toggle-row setup-toggle">
+              <input id="setupPublicEndpoint" name="setupEndpointMode" type="radio" />
+              <span>Public ChatGPT endpoint through HTTPS tunnel</span>
+            </label>
+            <label class="field-label modal-label" for="setupPublicBaseUrl">Public base URL</label>
+            <input id="setupPublicBaseUrl" class="text-input modal-input" type="url" value="https://mcp.example.com" />
+          </div>
+
+          <div class="setup-step hidden" data-step="5">
+            <h3>Cloudflare Tunnel</h3>
+            <p>Cloudflare is optional. If you use it, point the tunnel at local service <strong>http://127.0.0.1:3333</strong> and register <strong id="setupTunnelEndpoint">https://mcp.example.com/mcp</strong> in ChatGPT.</p>
+            <label class="toggle-row setup-toggle">
+              <input id="setupCloudflareGuide" name="setupCloudflareChoice" type="radio" checked />
+              <span>Show setup guidance</span>
+            </label>
+            <label class="toggle-row setup-toggle">
+              <input id="setupCloudflareSkip" name="setupCloudflareChoice" type="radio" />
+              <span>Skip tunnel guidance</span>
+            </label>
+            <button id="setupOpenCloudflareGuide" type="button">Open Cloudflare Guide</button>
+          </div>
+
+          <div class="setup-step hidden" data-step="6">
+            <h3>Write Mode</h3>
+            <p>Start with write mode off. Docs mode allows Markdown writes, patch mode applies only matching proposed patches, and elevated mode is high risk.</p>
+            <select id="setupWriteMode" class="text-input modal-input">
+              <option value="off" selected>off</option>
+              <option value="docs">docs</option>
+              <option value="patch">patch</option>
+              <option value="elevated">elevated</option>
+            </select>
+          </div>
+
+          <div class="setup-step hidden" data-step="7">
+            <h3>Finish</h3>
+            <div id="setupSummary" class="setup-grid"></div>
+            <p id="setupStatus" class="warnings"></p>
+          </div>
+
+          <div class="setup-footer">
+            <button id="setupBack" type="button">Back</button>
+            <button id="setupNext" type="button" class="primary">Next</button>
+            <button id="setupFinish" type="button" class="primary hidden">Save and Start App</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="hero-band">
+        <div>
+          <p class="eyebrow">ChatGPT.com HTTPS MCP endpoint</p>
+          <h1>ChampCity GPT MCP Launcher</h1>
+          <p class="subtitle">
+            Start a local Streamable HTTP MCP server, keep filesystem access narrow, and prepare an HTTPS endpoint ChatGPT can reach through a secure tunnel.
+          </p>
+        </div>
+        <div class="summary-grid" aria-label="Status summary">
+          <div>
+            <span>Local HTTP server</span>
+            <strong id="serverStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Local MCP endpoint</span>
+            <strong id="localHttpEndpoint">Loading...</strong>
+          </div>
+          <div>
+            <span>Health endpoint</span>
+            <strong id="localHealthEndpoint">Loading...</strong>
+          </div>
+          <div>
+            <span>Public endpoint</span>
+            <strong id="publicMcpEndpoint">Loading...</strong>
+          </div>
+          <div>
+            <span>OAuth issuer</span>
+            <strong id="oauthIssuer">Loading...</strong>
+          </div>
+          <div>
+            <span>OAuth admin configured</span>
+            <strong id="oauthAdminStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Registered clients</span>
+            <strong id="oauthClientsStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Active OAuth tokens</span>
+            <strong id="oauthTokensStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Public health endpoint</span>
+            <strong id="publicHealthEndpoint">Loading...</strong>
+          </div>
+          <div>
+            <span>Auth token configured</span>
+            <strong id="authTokenStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Unauth local HTTP</span>
+            <strong id="unauthLocalStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Tunnel readiness status</span>
+            <strong id="publicTunnelStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Local health passing</span>
+            <strong id="localHealthStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Write mode</span>
+            <strong id="writeToolsStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Elevated token configured</span>
+            <strong id="writeApprovalTokenStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Write readiness</span>
+            <strong id="writeReadinessStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Runtime mode</span>
+            <strong id="runtimeModeStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Config directory</span>
+            <strong id="runtimeConfigDirStatus">Loading...</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="notice-band">
+        <strong>Architecture correction:</strong>
+        ChatGPT.com needs an HTTPS-reachable MCP endpoint with OAuth. Local STDIO is retained for advanced local clients, but the ChatGPT path is local HTTP on 127.0.0.1 plus a secure tunnel for your public MCP hostname.
+      </section>
+
+      <section class="oauth-band" aria-label="ChatGPT OAuth Setup">
+        <div class="section-heading">
+          <h2>ChatGPT OAuth Setup</h2>
+          <span>OAuth is primary for ChatGPT.com; bearer auth is legacy/manual testing.</span>
+        </div>
+        <div class="oauth-grid">
+          <p><strong>Public issuer:</strong> <span id="oauthIssuerInline">Loading...</span></p>
+          <p><strong>MCP endpoint:</strong> <span id="oauthMcpEndpointInline">Loading...</span></p>
+          <p><strong>Write mode:</strong> <span id="oauthWriteToolsInline">Loading...</span></p>
+          <p><strong>OAuth files.write granted:</strong> <span id="oauthFilesWriteInline">Loading...</span></p>
+          <p><strong>Tunnel readiness:</strong> <span id="oauthTunnelInline">Loading...</span></p>
+          <p><strong>DCR client registered:</strong> <span id="oauthDcrRegisteredInline">Loading...</span></p>
+          <p><strong>Last authorize error:</strong> <span id="oauthLastAuthorizeErrorInline">Loading...</span></p>
+          <p><strong>PKCE challenge received:</strong> <span id="oauthPkceReceivedInline">Loading...</span></p>
+          <p><strong>PKCE method received:</strong> <span id="oauthPkceMethodInline">Loading...</span></p>
+        </div>
+        <div class="inline-actions oauth-actions">
+          <button id="configureOAuthAdmin">Configure OAuth Admin Password</button>
+          <button id="resetOAuthClients">Reset OAuth Clients</button>
+          <button id="revokeOAuthTokens">Revoke All OAuth Tokens</button>
+          <button id="openOAuthMetadata">Open OAuth Metadata</button>
+          <button id="openProtectedResourceMetadata">Open Protected Resource Metadata</button>
+          <button id="copyOAuthMcpUrl">Copy MCP Server URL</button>
+          <button id="generateOAuthNotes">Generate ChatGPT OAuth Setup Notes</button>
+        </div>
+      </section>
+
+      <section class="oauth-band" aria-label="OAuth Sessions">
+        <div class="section-heading">
+          <h2>OAuth Sessions</h2>
+          <span>Refresh tokens keep ChatGPT connected while access tokens stay short-lived.</span>
+        </div>
+        <div class="oauth-grid">
+          <p><strong>Active OAuth clients:</strong> <span id="oauthActiveClientsInline">Loading...</span></p>
+          <p><strong>Active refresh sessions:</strong> <span id="oauthRefreshSessionsInline">Loading...</span></p>
+          <p><strong>Expired sessions:</strong> <span id="oauthExpiredSessionsInline">Loading...</span></p>
+          <p><strong>Revoked sessions:</strong> <span id="oauthRevokedSessionsInline">Loading...</span></p>
+          <p><strong>Access token TTL:</strong> <span id="oauthAccessTtlInline">Loading...</span></p>
+          <p><strong>Refresh token TTL:</strong> <span id="oauthRefreshTtlInline">Loading...</span></p>
+        </div>
+        <div class="inline-actions oauth-actions">
+          <button id="revokeAllOAuthSessions">Revoke All OAuth Sessions</button>
+          <button id="revokeChatGptOAuthSessions">Revoke ChatGPT Sessions</button>
+          <button id="clearExpiredOAuthSessions">Clear Expired Sessions</button>
+          <button id="openOAuthSessionDocs">Open OAuth Session Docs</button>
+        </div>
+      </section>
+
+      <section class="write-access-band" aria-label="Write Access">
+        <div class="section-heading">
+          <h2>Write Access</h2>
+          <span>Use docs for planning artifacts, patch for proposed code changes, elevated only rarely.</span>
+        </div>
+        <div class="oauth-grid">
+          <p><strong>Current write mode:</strong> <span id="writeAccessToolsEnabled">Loading...</span></p>
+          <p><strong>Docs writes:</strong> <span id="writeAccessDocsAllowed">Loading...</span></p>
+          <p><strong>Patch writes:</strong> <span id="writeAccessPatchAllowed">Loading...</span></p>
+          <p><strong>Elevated operations:</strong> <span id="writeAccessElevatedAllowed">Loading...</span></p>
+          <p><strong>Pending patch proposals:</strong> <span id="writeAccessPendingPatches">Loading...</span></p>
+          <p><strong>Elevated approval token configured:</strong> <span id="writeAccessTokenConfigured">Loading...</span></p>
+          <p><strong>Elevated approval token source:</strong> <span id="writeAccessTokenSource">Loading...</span></p>
+          <p><strong>OAuth files.write granted:</strong> <span id="writeAccessOAuthGranted">Loading...</span></p>
+          <p><strong>Public write readiness:</strong> <span id="writeAccessReadiness">Loading...</span></p>
+          <p><strong>Write config:</strong> <span id="writeAccessConfigPath">Loading...</span></p>
+        </div>
+        <p class="band-warning">
+          Architect Docs lets ChatGPT create Markdown files inside allowed roots when OAuth files.write is granted. Controlled Patch applies only matching patch proposals. Elevated still needs local elevated approval.
+        </p>
+        <div class="inline-actions oauth-actions">
+          <button id="setWriteModeOff">Set Write Mode: Off</button>
+          <button id="setWriteModeDocs">Set Write Mode: Architect Docs</button>
+          <button id="setWriteModePatch">Set Write Mode: Controlled Patch</button>
+          <button id="setWriteModeElevated">Set Write Mode: Elevated</button>
+          <button id="clearPendingPatchProposals">Clear Pending Patch Proposals</button>
+          <button id="configureWriteToken">Configure Elevated Approval Token</button>
+          <button id="rotateWriteToken">Rotate Elevated Approval Token</button>
+          <button id="generateWriteToken">Generate Strong Elevated Token</button>
+          <button id="clearWriteToken">Clear Elevated Approval Token</button>
+        </div>
+      </section>
+
+      <section class="toolbar-band" aria-label="Actions">
+        <button id="runDoctor">Run Doctor</button>
+        <button id="installDeps">Install Dependencies</button>
+        <button id="buildServer">Build MCP Server</button>
+        <button id="startServer">Start Local HTTP MCP Server</button>
+        <button id="stopServer">Stop Local HTTP MCP Server</button>
+        <button id="openHealth">Open Local Health Check</button>
+        <button id="copyLocalEndpoint">Copy Local MCP Endpoint</button>
+        <button id="copyPublicEndpoint">Copy Public MCP Endpoint</button>
+        <button id="copyPublicHealthEndpoint">Copy Public Health Endpoint</button>
+        <button id="runTunnelReadiness">Run Tunnel Readiness Check</button>
+        <button id="openCloudflareGuide">Open Cloudflare Tunnel Setup Guide</button>
+        <button id="openCloudflareDashboard">Open Cloudflare Dashboard</button>
+        <button id="openCloudflaredConfig">Open Generated Cloudflare Config Template</button>
+        <button id="generateConfigs">Generate ChatGPT Setup Notes</button>
+        <button id="configureAuthToken">Configure HTTP Auth Token</button>
+        <button id="enableUnauthLocal">Enable Local Unauthenticated Test Mode</button>
+        <button id="disableUnauthLocal">Disable Local Unauthenticated Test Mode</button>
+        <button id="openChatGptGuide">Open ChatGPT Connection Guide</button>
+        <button id="openDomainGuide">Open Domain/Tunnel Guide</button>
+        <button id="openGenerated">Open Generated Folder</button>
+        <button id="openAudit">Open Audit Log</button>
+        <button id="openLogs">Open Logs Folder</button>
+      </section>
+
+      <div id="authModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="authModalTitle">
+        <section class="modal-panel">
+          <div class="section-heading">
+            <h2 id="authModalTitle">Configure HTTP Auth Token</h2>
+            <span id="authModalStatus">Loading...</span>
+          </div>
+          <div class="modal-body">
+            <p class="modal-warning">
+              This token protects the HTTP MCP endpoint. Do not share it. Do not tunnel the server without a token.
+            </p>
+            <label class="field-label modal-label" for="authTokenInput">Password/token input field</label>
+            <div class="token-input-row">
+              <input id="authTokenInput" class="text-input modal-input" type="password" autocomplete="off" spellcheck="false" />
+              <button id="toggleAuthTokenVisibility" type="button">Show</button>
+            </div>
+            <div class="inline-actions modal-actions">
+              <button id="generateAuthToken" type="button">Generate Strong Token</button>
+              <button id="saveAuthToken" type="button" class="primary">Save Token</button>
+              <button id="clearAuthToken" type="button">Clear Token</button>
+              <button id="cancelAuthToken" type="button">Cancel</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="writeTokenModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="writeTokenModalTitle">
+        <section class="modal-panel">
+          <div class="section-heading">
+            <h2 id="writeTokenModalTitle">Configure Elevated Approval Token</h2>
+            <span id="writeTokenModalStatus">Local token hash only</span>
+          </div>
+          <div class="modal-body">
+            <p class="modal-warning">
+              Save this token somewhere temporary. ChatGPT only needs it for elevated operations such as scripts or elevated patch fallback. Rotate it after use.
+            </p>
+            <label class="field-label modal-label" for="writeTokenInput">Elevated approval token input field</label>
+            <div class="token-input-row">
+              <input id="writeTokenInput" class="text-input modal-input" type="password" autocomplete="off" spellcheck="false" />
+              <button id="toggleWriteTokenVisibility" type="button">Show</button>
+            </div>
+            <div class="inline-actions modal-actions">
+              <button id="generateWriteTokenInModal" type="button">Generate Strong Elevated Token</button>
+              <button id="copyTemporaryWriteToken" type="button">Copy Temporary Elevated Token</button>
+              <button id="saveWriteToken" type="button" class="primary">Save Token</button>
+              <button id="cancelWriteToken" type="button">Cancel</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="oauthModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="oauthModalTitle">
+        <section class="modal-panel">
+          <div class="section-heading">
+            <h2 id="oauthModalTitle">Configure OAuth Admin Password</h2>
+            <span id="oauthModalStatus">Local password hash only</span>
+          </div>
+          <div class="modal-body">
+            <p class="modal-warning">
+              This password approves ChatGPT OAuth authorization requests. It is stored only as a local hash and is never shown in generated notes.
+            </p>
+            <label class="field-label modal-label" for="oauthPasswordInput">Password input field</label>
+            <input id="oauthPasswordInput" class="text-input modal-input" type="password" autocomplete="new-password" spellcheck="false" />
+            <label class="field-label modal-label" for="oauthPasswordConfirmInput">Confirm password input field</label>
+            <input id="oauthPasswordConfirmInput" class="text-input modal-input" type="password" autocomplete="new-password" spellcheck="false" />
+            <div class="inline-actions modal-actions">
+              <button id="saveOAuthPassword" type="button" class="primary">Save Password</button>
+              <button id="cancelOAuthPassword" type="button">Cancel</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="content-grid">
+        <section class="panel checklist-panel">
+          <div class="section-heading">
+            <h2>Cloudflare / public endpoint</h2>
+            <span>Read-only first, then carefully enable writes.</span>
+          </div>
+          <ol class="wizard-list">
+            <li>Configure an HTTP auth token</li>
+            <li>Keep unauthenticated local mode disabled</li>
+            <li>Keep write mode Off for first testing</li>
+            <li>Start the local HTTP MCP server on 127.0.0.1:3333</li>
+            <li>Configure Cloudflare Tunnel for your public MCP hostname</li>
+            <li>Verify the public endpoint before ChatGPT registration</li>
+            <li>Register the public MCP endpoint in ChatGPT Connectors/Create</li>
+          </ol>
+          <div class="endpoint-list">
+            <p><strong>Public MCP endpoint:</strong> <span id="cloudflarePublicMcpEndpoint">Loading...</span></p>
+            <p><strong>Public health endpoint:</strong> <span id="cloudflarePublicHealthEndpoint">Loading...</span></p>
+          </div>
+        </section>
+
+        <section class="panel checklist-panel">
+          <div class="section-heading">
+            <h2>Doctor Checklist</h2>
+            <span id="checklistMeta">Run doctor for current results.</span>
+          </div>
+          <div id="checklist" class="checklist"></div>
+        </section>
+
+        <section class="panel roots-panel">
+          <div class="section-heading">
+            <h2>Allowed Roots Manager</h2>
+            <span id="configPath">config/allowed-roots.local.json</span>
+          </div>
+          <div id="rootsList" class="roots-list"></div>
+          <div class="inline-actions">
+            <button id="addRoot">Add Root</button>
+            <button id="resetRoots">Reset Defaults</button>
+            <button id="saveConfig" class="primary">Save Config</button>
+          </div>
+          <label class="toggle-row">
+            <input id="requireGitRoot" type="checkbox" />
+            <span>Require allowed roots to be git repositories</span>
+          </label>
+          <label class="field-label" for="auditLog">Audit log path</label>
+          <input id="auditLog" class="text-input" type="text" />
+          <label class="field-label" for="allowedCommands">Allowed commands</label>
+          <textarea id="allowedCommands" class="textarea small" spellcheck="false"></textarea>
+          <div id="rootWarnings" class="warnings"></div>
+        </section>
+
+        <section class="panel client-panel">
+          <div class="section-heading">
+            <h2>Generated Setup Notes</h2>
+            <span>ChatGPT first; STDIO is advanced/local.</span>
+          </div>
+          <div class="tab-row" role="tablist" aria-label="Config previews">
+            <button class="tab active" data-preview="chatgptNotes">ChatGPT HTTPS</button>
+            <button class="tab" data-preview="generic">Generic STDIO</button>
+            <button class="tab" data-preview="codex">Codex STDIO</button>
+            <button class="tab" data-preview="claude">Claude Desktop</button>
+          </div>
+          <pre id="configPreview" class="code-preview"></pre>
+        </section>
+
+        <section class="panel advanced-panel">
+          <details>
+            <summary>Advanced: Settings and Local STDIO Clients</summary>
+            <p>
+              STDIO remains available with node .\dist\src\index.js or node .\dist\src\index.js --transport stdio for trusted local clients that launch the process themselves.
+            </p>
+            <button id="copyGeneric">Copy Generic STDIO Config</button>
+            <button id="openDocs">Open Desktop App Docs</button>
+            <button id="resetSetupWizard">Reset Setup Wizard</button>
+          </details>
+        </section>
+
+        <section class="panel logs-panel">
+          <div class="section-heading">
+            <h2>Logs / Output</h2>
+            <span>Doctor, build, install, HTTP start/stop, and errors</span>
+          </div>
+          <pre id="outputLog" class="output-log"></pre>
+        </section>
+      </div>
+    </main>
+    <script type="module" src="../../dist/electron/renderer/renderer.js"></script>
+  </body>
+</html>

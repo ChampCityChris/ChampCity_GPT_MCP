@@ -1,0 +1,11 @@
+{
+  "publicBaseUrl": "https://mcp.example.com",
+  "accessTokenTtlSeconds": 7200,
+  "refreshTokenTtlSeconds": 2592000,
+  "adminPassword": "<set-locally-never-commit>",
+  "localStores": [
+    "config/oauth-admin.local.json",
+    "config/oauth-clients.local.json",
+    "config/oauth-tokens.local.json"
+  ]
+}

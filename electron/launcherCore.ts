@@ -1,0 +1,716 @@
+import fs from "node:fs";
+import path from "node:path";
+
+import { getHttpAuthStatus, type HttpAuthTokenSource } from "../src/httpAuthConfig.js";
+import {
+  createAuthorizationServerMetadata,
+  createProtectedResourceMetadata,
+  clearExpiredOAuthTokens,
+  formatOAuthDuration,
+  getOAuthAccessTokenTtlSeconds,
+  getOAuthPublicBaseUrl,
+  getOAuthPublicMcpUrl,
+  getOAuthRefreshTokenTtlSeconds,
+  getOAuthStatus,
+  resetOAuthClients,
+  revokeChatGptOAuthTokens,
+  revokeAllOAuthTokens,
+  saveOAuthAdminPassword
+} from "../src/oauth.js";
+import {
+  clearWriteApprovalToken,
+  generateWriteApprovalToken,
+  getWriteAccessConfigPath,
+  getWriteAccessStatus,
+  saveWriteApprovalToken,
+  setHttpWriteToolsEnabled,
+  setWriteMode,
+  type WriteApprovalTokenSource,
+  type WriteMode,
+  type WriteModeSource
+} from "../src/writeAccess.js";
+import { clearPendingPatchProposals, getPendingPatchProposalCount } from "../src/pendingPatches.js";
+import { getRuntimeConfigFilePath, getRuntimeGeneratedDir, getRuntimeLogDir, getRuntimeServerEntrypoint } from "../src/runtimePaths.js";
+
+export const DEFAULT_REPO_ROOT = path.resolve(process.cwd());
+export const PROJECTS_ROOT = path.dirname(DEFAULT_REPO_ROOT);
+export const MCP_ENTRYPOINT_RELATIVE = path.join("dist", "src", "index.js");
+export const LOCAL_CONFIG_FILE = "allowed-roots.local.json";
+export const SETUP_CONFIG_FILE = "setup.local.json";
+export const GENERATED_RELATIVE = "generated";
+export const LOGS_RELATIVE = "logs";
+export const AUDIT_LOG_FILE = "audit.log";
+export const LOCAL_HTTP_HOST = "127.0.0.1";
+export const LOCAL_HTTP_PORT = 3333;
+export const LOCAL_HTTP_MCP_ENDPOINT = `http://${LOCAL_HTTP_HOST}:${LOCAL_HTTP_PORT}/mcp`;
+export const LOCAL_HTTP_HEALTH_ENDPOINT = `http://${LOCAL_HTTP_HOST}:${LOCAL_HTTP_PORT}/health`;
+export const CLOUDFLARE_TUNNEL_GUIDE_RELATIVE = path.join("docs", "CLOUDFLARE_TUNNEL_SETUP.md");
+export const CLOUDFLARED_CONFIG_TEMPLATE_RELATIVE = path.join("examples", "cloudflared-config.example.yml");
+export const TUNNEL_READINESS_SCRIPT_RELATIVE = path.join("scripts", "tunnel-readiness.ps1");
+
+export const DEFAULT_ALLOWED_ROOTS = [DEFAULT_REPO_ROOT];
+
+export const DEFAULT_ALLOWED_COMMANDS = [
+  "npm test",
+  "npm run lint",
+  "npm run typecheck",
+  "npm run build",
+  "git status",
+  "git diff"
+];
+
+export interface LocalLauncherConfig {
+  allowedRoots: string[];
+  requireGitRoot: boolean;
+  auditLog: string;
+  allowedCommands: string[];
+}
+
+export interface SetupState {
+  setupComplete: boolean;
+  completedAt?: string;
+  appVersion?: string;
+  publicBaseUrl?: string;
+  localOnly?: boolean;
+  cloudflareChoice?: "guide" | "skip";
+}
+
+export interface ConfigWriteValidation {
+  config: LocalLauncherConfig;
+  warnings: string[];
+  outsideProjectsRoots: string[];
+}
+
+export interface GeneratedClientConfigs {
+  generic: string;
+  codex: string;
+  claude: string;
+  chatgptNotes: string;
+}
+
+export interface GeneratedClientConfigFiles {
+  directory: string;
+  files: Record<string, string>;
+  previews: GeneratedClientConfigs;
+}
+
+export interface LauncherHttpAuthStatus {
+  configured: boolean;
+  source: HttpAuthTokenSource;
+}
+
+export interface LauncherOAuthStatus {
+  adminPasswordConfigured: boolean;
+  registeredClientsCount: number;
+  activeOAuthClientsCount: number;
+  activeTokensCount: number;
+  activeWriteTokensCount: number;
+  activeRefreshSessionsCount: number;
+  expiredSessionsCount: number;
+  revokedSessionsCount: number;
+  accessTokenTtlSeconds: number;
+  refreshTokenTtlSeconds: number;
+  accessTokenTtlLabel: string;
+  refreshTokenTtlLabel: string;
+  lastAuthorizeError?: {
+    occurredAt: string;
+    requestPath: string;
+    error: string;
+    requiredFieldsPresent: {
+      response_type: boolean;
+      client_id: boolean;
+      redirect_uri: boolean;
+      code_challenge: boolean;
+      code_challenge_method: boolean;
+    };
+    codeChallengeMethod?: string;
+    clientIdPrefix?: string;
+    redirectUriLocation?: string;
+  };
+}
+
+export interface LauncherWriteAccessStatus {
+  writeMode: WriteMode;
+  writeModeSource: WriteModeSource;
+  docsWritesAllowed: boolean;
+  patchWritesAllowed: boolean;
+  elevatedOperationsAllowed: boolean;
+  legacyApprovalTokenConfigured: boolean;
+  legacyApprovalTokenSource: WriteApprovalTokenSource;
+  legacyApprovalTokenCreatedAt?: string;
+  legacyApprovalTokenUpdatedAt?: string;
+  pendingPatchProposalCount: number;
+  oauthFilesWriteGranted: boolean;
+  publicWriteReadiness: "READY" | "NOT_READY";
+  publicWriteReadinessReason: string;
+  configPath: string;
+}
+
+export function repoPath(...parts: string[]): string {
+  return path.join(DEFAULT_REPO_ROOT, ...parts);
+}
+
+export function getEntrypointPath(repoRoot: string): string {
+  return getRuntimeServerEntrypoint(repoRoot);
+}
+
+export function getLocalConfigPath(repoRoot: string): string {
+  return getRuntimeConfigFilePath(repoRoot, LOCAL_CONFIG_FILE);
+}
+
+export function getGeneratedDir(repoRoot: string): string {
+  return getRuntimeGeneratedDir(repoRoot);
+}
+
+export function getLogsDir(repoRoot: string): string {
+  return getRuntimeLogDir(repoRoot);
+}
+
+export function getAuditLogPath(repoRoot: string): string {
+  return path.join(getLogsDir(repoRoot), AUDIT_LOG_FILE);
+}
+
+export function getSetupStatePath(repoRoot: string): string {
+  return getRuntimeConfigFilePath(repoRoot, SETUP_CONFIG_FILE);
+}
+
+export function getPublicOAuthIssuer(): string {
+  return getOAuthPublicBaseUrl();
+}
+
+export function getPublicMcpEndpoint(): string {
+  return getOAuthPublicMcpUrl(getPublicOAuthIssuer());
+}
+
+export function getPublicOAuthAuthorizationServerMetadata(): string {
+  return `${getPublicOAuthIssuer()}/.well-known/oauth-authorization-server`;
+}
+
+export function getPublicOAuthProtectedResourceMetadata(): string {
+  return `${getPublicOAuthIssuer()}/.well-known/oauth-protected-resource`;
+}
+
+export function getPublicHealthEndpoint(): string {
+  return `${getPublicOAuthIssuer()}/health`;
+}
+
+export function readSetupState(repoRoot: string): SetupState {
+  const setupPath = getSetupStatePath(repoRoot);
+  if (!fs.existsSync(setupPath)) {
+    return { setupComplete: false };
+  }
+
+  const parsed = JSON.parse(fs.readFileSync(setupPath, "utf8")) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { setupComplete: false };
+  }
+
+  const state = parsed as Partial<SetupState>;
+  return {
+    setupComplete: state.setupComplete === true,
+    completedAt: typeof state.completedAt === "string" ? state.completedAt : undefined,
+    appVersion: typeof state.appVersion === "string" ? state.appVersion : undefined,
+    publicBaseUrl: typeof state.publicBaseUrl === "string" ? state.publicBaseUrl : undefined,
+    localOnly: state.localOnly === true,
+    cloudflareChoice: state.cloudflareChoice === "guide" || state.cloudflareChoice === "skip" ? state.cloudflareChoice : undefined
+  };
+}
+
+export function writeSetupState(repoRoot: string, state: SetupState): SetupState {
+  const setupPath = getSetupStatePath(repoRoot);
+  const persisted: SetupState = {
+    ...state,
+    setupComplete: true,
+    completedAt: state.completedAt ?? new Date().toISOString()
+  };
+  fs.mkdirSync(path.dirname(setupPath), { recursive: true });
+  fs.writeFileSync(setupPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+  return persisted;
+}
+
+export function resetSetupState(repoRoot: string): void {
+  fs.rmSync(getSetupStatePath(repoRoot), { force: true });
+}
+
+export function normalizeWindowsPathForConfig(value: string): string {
+  return path.resolve(value);
+}
+
+export function isUnderProjectsRoot(value: string): boolean {
+  const normalized = normalizeWindowsPathForConfig(value).toLowerCase();
+  const projectsRoot = path.resolve(PROJECTS_ROOT).toLowerCase();
+  return normalized === projectsRoot || normalized.startsWith(`${projectsRoot}${path.sep}`);
+}
+
+export function createDefaultLocalConfig(repoRoot: string): LocalLauncherConfig {
+  return {
+    allowedRoots: DEFAULT_ALLOWED_ROOTS.map(normalizeWindowsPathForConfig),
+    requireGitRoot: true,
+    auditLog: getAuditLogPath(repoRoot),
+    allowedCommands: [...DEFAULT_ALLOWED_COMMANDS]
+  };
+}
+
+function assertStringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error(`${label} must be an array of strings.`);
+  }
+
+  return value;
+}
+
+export function validateLocalConfig(rawConfig: unknown, repoRoot: string): ConfigWriteValidation {
+  if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
+    throw new Error("Local config must be a JSON object.");
+  }
+
+  const input = rawConfig as Record<string, unknown>;
+  const allowedRoots = assertStringArray(input.allowedRoots, "allowedRoots").map((root) => {
+    if (!path.isAbsolute(root)) {
+      throw new Error(`Allowed root must be absolute: ${root}`);
+    }
+
+    return normalizeWindowsPathForConfig(root);
+  });
+
+  if (typeof input.requireGitRoot !== "boolean") {
+    throw new Error("requireGitRoot must be a boolean.");
+  }
+
+  if (typeof input.auditLog !== "string" || !path.isAbsolute(input.auditLog)) {
+    throw new Error("auditLog must be an absolute path.");
+  }
+
+  const allowedCommands = assertStringArray(input.allowedCommands, "allowedCommands");
+  const outsideProjectsRoots = allowedRoots.filter((root) => !isUnderProjectsRoot(root));
+  const warnings = [
+    ...outsideProjectsRoots.map((root) => `Allowed root is outside ${PROJECTS_ROOT}: ${root}`),
+    ...allowedRoots.filter((root) => !fs.existsSync(root)).map((root) => `Allowed root does not exist: ${root}`)
+  ];
+
+  return {
+    config: {
+      allowedRoots,
+      requireGitRoot: input.requireGitRoot,
+      auditLog: normalizeWindowsPathForConfig(input.auditLog),
+      allowedCommands: [...allowedCommands]
+    },
+    warnings,
+    outsideProjectsRoots
+  };
+}
+
+export function readLocalConfig(repoRoot: string): LocalLauncherConfig {
+  const configPath = getLocalConfigPath(repoRoot);
+  if (!fs.existsSync(configPath)) {
+    return createDefaultLocalConfig(repoRoot);
+  }
+
+  const parsed = JSON.parse(fs.readFileSync(configPath, "utf8")) as unknown;
+  return validateLocalConfig(parsed, repoRoot).config;
+}
+
+export function writeLocalConfig(repoRoot: string, rawConfig: unknown): ConfigWriteValidation {
+  const validation = validateLocalConfig(rawConfig, repoRoot);
+  const configPath = getLocalConfigPath(repoRoot);
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, `${JSON.stringify(validation.config, null, 2)}\n`, "utf8");
+  return validation;
+}
+
+function configObject(repoRoot: string): Record<string, unknown> {
+  const localConfig = readLocalConfig(repoRoot);
+  return {
+    command: "node",
+    args: [getEntrypointPath(repoRoot)],
+    cwd: repoRoot,
+    env: {
+      CHAMPCITY_GPT_ALLOWED_ROOTS: localConfig.allowedRoots.join(";"),
+      CHAMPCITY_GPT_REQUIRE_GIT_ROOT: String(localConfig.requireGitRoot)
+    }
+  };
+}
+
+export function getLauncherHttpAuthStatus(repoRoot: string, env: NodeJS.ProcessEnv = process.env): LauncherHttpAuthStatus {
+  return getHttpAuthStatus(repoRoot, env);
+}
+
+export function isHttpAuthTokenConfigured(repoRoot: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return getLauncherHttpAuthStatus(repoRoot, env).configured;
+}
+
+export function isUnauthenticatedLocalHttpAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP ?? "").trim().toLowerCase() === "true";
+}
+
+export function isHttpWriteToolsEnabled(repoRoot = DEFAULT_REPO_ROOT, env: NodeJS.ProcessEnv = process.env): boolean {
+  return getWriteAccessStatus(repoRoot, env).writeMode !== "off";
+}
+
+export function isPublicTunnelReady(repoRoot: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return getLauncherOAuthStatus(repoRoot).adminPasswordConfigured && !isUnauthenticatedLocalHttpAllowed(env) && !isHttpWriteToolsEnabled(repoRoot, env);
+}
+
+export function getLauncherOAuthStatus(repoRoot: string): LauncherOAuthStatus {
+  const status = getOAuthStatus(repoRoot);
+  return {
+    ...status,
+    accessTokenTtlLabel: formatOAuthDuration(status.accessTokenTtlSeconds),
+    refreshTokenTtlLabel: formatOAuthDuration(status.refreshTokenTtlSeconds)
+  };
+}
+
+export function getLauncherWriteAccessStatus(repoRoot: string, env: NodeJS.ProcessEnv = process.env): LauncherWriteAccessStatus {
+  const writeStatus = getWriteAccessStatus(repoRoot, env);
+  const oauthStatus = getLauncherOAuthStatus(repoRoot);
+  const oauthFilesWriteGranted = oauthStatus.activeWriteTokensCount > 0;
+  let publicWriteReadinessReason = "READY";
+  if (!writeStatus.docsWritesAllowed && !writeStatus.patchWritesAllowed && !writeStatus.elevatedOperationsAllowed) {
+    publicWriteReadinessReason = "write mode off";
+  } else if (writeStatus.elevatedOperationsAllowed && !writeStatus.legacyApprovalTokenConfigured) {
+    publicWriteReadinessReason = "elevated approval token not configured";
+  } else if (!oauthFilesWriteGranted) {
+    publicWriteReadinessReason = "OAuth files.write not granted or unknown";
+  }
+
+  return {
+    ...writeStatus,
+    pendingPatchProposalCount: getPendingPatchProposalCount(repoRoot),
+    oauthFilesWriteGranted,
+    publicWriteReadiness: publicWriteReadinessReason === "READY" ? "READY" : "NOT_READY",
+    publicWriteReadinessReason,
+    configPath: getWriteAccessConfigPath(repoRoot)
+  };
+}
+
+export function setLauncherHttpWriteToolsEnabled(repoRoot: string, enabled: boolean): LauncherWriteAccessStatus {
+  setHttpWriteToolsEnabled(repoRoot, enabled);
+  return getLauncherWriteAccessStatus(repoRoot);
+}
+
+export function setLauncherWriteMode(repoRoot: string, writeMode: WriteMode): LauncherWriteAccessStatus {
+  setWriteMode(repoRoot, writeMode);
+  return getLauncherWriteAccessStatus(repoRoot);
+}
+
+export function clearLauncherPendingPatchProposals(repoRoot: string): LauncherWriteAccessStatus {
+  clearPendingPatchProposals(repoRoot);
+  return getLauncherWriteAccessStatus(repoRoot);
+}
+
+export function saveLauncherWriteApprovalToken(repoRoot: string, token: string): LauncherWriteAccessStatus {
+  saveWriteApprovalToken(repoRoot, token);
+  return getLauncherWriteAccessStatus(repoRoot);
+}
+
+export function clearLauncherWriteApprovalToken(repoRoot: string): LauncherWriteAccessStatus {
+  clearWriteApprovalToken(repoRoot);
+  return getLauncherWriteAccessStatus(repoRoot);
+}
+
+export function generateLauncherWriteApprovalToken(): string {
+  return generateWriteApprovalToken();
+}
+
+export function configureOAuthAdminPassword(repoRoot: string, password: string): LauncherOAuthStatus {
+  saveOAuthAdminPassword(repoRoot, password);
+  return getLauncherOAuthStatus(repoRoot);
+}
+
+export function resetLauncherOAuthClients(repoRoot: string): LauncherOAuthStatus {
+  resetOAuthClients(repoRoot);
+  return getLauncherOAuthStatus(repoRoot);
+}
+
+export function revokeLauncherOAuthTokens(repoRoot: string): LauncherOAuthStatus {
+  revokeAllOAuthTokens(repoRoot);
+  return getLauncherOAuthStatus(repoRoot);
+}
+
+export function revokeLauncherChatGptOAuthTokens(repoRoot: string): LauncherOAuthStatus {
+  revokeChatGptOAuthTokens(repoRoot);
+  return getLauncherOAuthStatus(repoRoot);
+}
+
+export function clearLauncherExpiredOAuthTokens(repoRoot: string): LauncherOAuthStatus {
+  clearExpiredOAuthTokens(repoRoot);
+  return getLauncherOAuthStatus(repoRoot);
+}
+
+export function createOAuthMetadataPreview(): string {
+  return JSON.stringify(createAuthorizationServerMetadata(getPublicOAuthIssuer()), null, 2);
+}
+
+export function createProtectedResourceMetadataPreview(): string {
+  return JSON.stringify(createProtectedResourceMetadata(getPublicOAuthIssuer()), null, 2);
+}
+
+export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv = process.env): string {
+  const localConfig = readLocalConfig(repoRoot);
+  const authStatus = getLauncherHttpAuthStatus(repoRoot, env);
+  const oauthStatus = getLauncherOAuthStatus(repoRoot);
+  const writeAccessStatus = getLauncherWriteAccessStatus(repoRoot, env);
+  const unauthLocalAllowed = isUnauthenticatedLocalHttpAllowed(env);
+  const writeMode = writeAccessStatus.writeMode;
+  const tunnelReady = isPublicTunnelReady(repoRoot, env);
+  const publicOAuthIssuer = getPublicOAuthIssuer();
+  const publicMcpEndpoint = getPublicMcpEndpoint();
+  const publicAuthorizationMetadata = getPublicOAuthAuthorizationServerMetadata();
+  const publicProtectedResourceMetadata = getPublicOAuthProtectedResourceMetadata();
+  const publicHealthEndpoint = getPublicHealthEndpoint();
+
+  return `# ChampCity GPT ChatGPT Setup Notes
+
+## Endpoints
+
+- Local MCP endpoint: ${LOCAL_HTTP_MCP_ENDPOINT}
+- Local health endpoint: ${LOCAL_HTTP_HEALTH_ENDPOINT}
+- MCP Server URL: ${publicMcpEndpoint}
+- Public issuer: ${publicOAuthIssuer}
+- CHAMPCITY_GPT_PUBLIC_BASE_URL for ChatGPT mode: ${publicOAuthIssuer}
+- OAuth authorization server metadata: ${publicAuthorizationMetadata}
+- OAuth protected resource metadata: ${publicProtectedResourceMetadata}
+- Intended public health endpoint: ${publicHealthEndpoint}
+
+## Authentication
+
+- Authentication: OAuth
+- ChatGPT.com custom MCP apps use OAuth. Static bearer tokens were useful for manual testing, but they are not sufficient for ChatGPT's OAuth connector flow.
+- Dynamic client registration endpoint: ${publicOAuthIssuer}/oauth/register
+- Authorization endpoint: ${publicOAuthIssuer}/oauth/authorize
+- Token endpoint: ${publicOAuthIssuer}/oauth/token
+- Access token TTL: ${formatOAuthDuration(getOAuthAccessTokenTtlSeconds(env))} (${getOAuthAccessTokenTtlSeconds(env)} seconds)
+- Refresh token TTL: ${formatOAuthDuration(getOAuthRefreshTokenTtlSeconds(env))} (${getOAuthRefreshTokenTtlSeconds(env)} seconds)
+- Refresh tokens keep ChatGPT connected between short-lived access-token renewals and are stored only as local hashes.
+- Refresh sessions can be revoked from the launcher.
+- During ChatGPT setup, approve only files.read first.
+- Do not use unauthenticated mode.
+- Do not paste tokens into ChatGPT manually unless the UI requests OAuth setup through the browser flow.
+- Legacy/manual bearer auth configured: ${authStatus.configured ? "yes" : "no"} (${authStatus.source})
+- Bearer token value: not displayed or written by the launcher.
+
+## Security State
+
+- OAuth admin password configured: ${oauthStatus.adminPasswordConfigured ? "yes" : "no"}
+- Registered OAuth clients: ${oauthStatus.registeredClientsCount}
+- Active OAuth tokens: ${oauthStatus.activeTokensCount}
+- Active OAuth clients: ${oauthStatus.activeOAuthClientsCount}
+- Active refresh sessions: ${oauthStatus.activeRefreshSessionsCount}
+- Expired OAuth sessions: ${oauthStatus.expiredSessionsCount}
+- Revoked OAuth sessions: ${oauthStatus.revokedSessionsCount}
+- OAuth required for public /mcp: yes
+- Unauthenticated local HTTP allowed: ${unauthLocalAllowed ? "yes" : "no"}
+- Public tunnel readiness: ${tunnelReady ? "READY" : "NOT READY"}
+- ${oauthStatus.adminPasswordConfigured ? "OAuth admin password is configured, but not displayed or written by the launcher." : `Not ready for ${publicOAuthIssuer} tunnel until OAuth admin password is configured.`}
+- ${unauthLocalAllowed ? "Local unauthenticated mode is not safe for tunneling." : "Unauthenticated local mode is disabled."}
+- Write mode: ${writeMode} (${writeAccessStatus.writeModeSource})
+- Docs writes: ${writeAccessStatus.docsWritesAllowed ? "allowed" : "blocked"}
+- Patch writes: ${writeAccessStatus.patchWritesAllowed ? "allowed" : "blocked"}
+- Elevated operations: ${writeAccessStatus.elevatedOperationsAllowed ? "allowed" : "blocked"}
+- Pending patch proposals: ${writeAccessStatus.pendingPatchProposalCount}
+- Elevated approval token configured: ${writeAccessStatus.legacyApprovalTokenConfigured ? "yes" : "no"}
+- Elevated approval token source: ${writeAccessStatus.legacyApprovalTokenSource}
+- Elevated approval token value: not displayed or written by the launcher.
+- In Architect Docs mode, ChatGPT can create Markdown planning artifacts without approvalToken.
+- Markdown artifact writes do not require approvalToken in docs, patch, or elevated mode.
+- In Controlled Patch mode, ChatGPT must use propose_patch first, then apply the matching proposal.
+- Elevated operations may still require a local elevated approval token.
+- Elevated approval is still required for scripts and elevated fallback operations.
+- Write mode off for first ChatGPT test: ${writeMode === "off" ? "yes" : "no - set off before first test"}
+- Write mode defaults to off: yes
+- Audit log: ${localConfig.auditLog}
+- Require git root: ${localConfig.requireGitRoot ? "yes" : "no"}
+
+## Scope Mapping
+
+- files.read: list_project_files, read_project_file, search_project_files, git_status, git_diff, get_write_access_status, and tools/list.
+- files.write: propose_patch, write_markdown_artifact, apply_approved_patch, and run_allowed_script.
+- write_markdown_artifact requires writeMode docs, patch, or elevated.
+- apply_approved_patch requires writeMode patch or elevated and a matching pending proposal unless elevated approval is supplied in elevated mode.
+- run_allowed_script requires writeMode elevated, an allowlisted command, and the elevated approval token.
+
+## DNS / Tunnel Checklist
+
+- Cloudflare setup guide: docs/CLOUDFLARE_TUNNEL_SETUP.md
+- ${new URL(publicOAuthIssuer).hostname} routes to the Cloudflare Tunnel hostname.
+- Cloudflare Tunnel service target is http://127.0.0.1:3333.
+- Local endpoint stays ${LOCAL_HTTP_MCP_ENDPOINT}; do not bind to 0.0.0.0.
+- Public endpoint for ChatGPT registration: ${publicMcpEndpoint}
+- Do not tunnel unauthenticated local mode.
+- Keep the local server bound to ${LOCAL_HTTP_HOST}.
+- Verify metadata in a browser before ChatGPT registration:
+  - ${publicProtectedResourceMetadata}
+  - ${publicAuthorizationMetadata}
+
+## Allowed Roots
+
+${localConfig.allowedRoots.map((root) => `- ${root}`).join("\n")}
+
+## ChatGPT Setup Checklist
+
+1. Configure allowed roots narrowly.
+2. Configure the OAuth admin password in the desktop app.
+3. Confirm ${LOCAL_HTTP_HEALTH_ENDPOINT} returns status ok.
+4. Confirm OAuth metadata endpoints load through ${publicOAuthIssuer}.
+5. Configure Cloudflare Tunnel and DNS for ${new URL(publicOAuthIssuer).hostname}.
+6. Run .\\scripts\\tunnel-readiness.ps1.
+7. In ChatGPT, use Settings -> Connectors -> Create if available.
+8. Register ${publicMcpEndpoint}, not the local STDIO command.
+9. Approve the OAuth browser flow with files.read first.
+10. Keep CHAMPCITY_GPT_WRITE_MODE=off until read-only is validated.
+11. Use docs for Markdown planning docs, patch for proposed code patches, and elevated only for rare approval-gated script operations.
+`;
+}
+
+export function createClientConfigPreviews(repoRoot: string): GeneratedClientConfigs {
+  const serverConfig = configObject(repoRoot);
+  const generic = JSON.stringify({ mcpServers: { "champcity-gpt": serverConfig } }, null, 2);
+  const codex = JSON.stringify({ mcpServers: { "champcity-gpt": serverConfig } }, null, 2);
+  const claude = JSON.stringify({ mcpServers: { "champcity-gpt": serverConfig } }, null, 2);
+  const chatgptNotes = createChatGptSetupNotes(repoRoot);
+
+  return {
+    generic,
+    codex,
+    claude,
+    chatgptNotes
+  };
+}
+
+export function writeClientConfigFiles(repoRoot: string): GeneratedClientConfigFiles {
+  const generatedDir = getGeneratedDir(repoRoot);
+  const previews = createClientConfigPreviews(repoRoot);
+  const files = {
+    "generic-stdio-mcp-config.example.json": previews.generic,
+    "codex-mcp-config.example.json": previews.codex,
+    "claude-desktop-mcp-config.example.json": previews.claude,
+    "chatgpt-connection-notes.md": previews.chatgptNotes,
+    "chatgpt-champcity-net-setup.md": previews.chatgptNotes
+  };
+
+  fs.mkdirSync(generatedDir, { recursive: true });
+  for (const [fileName, content] of Object.entries(files)) {
+    fs.writeFileSync(path.join(generatedDir, fileName), `${content.trimEnd()}\n`, "utf8");
+  }
+
+  return {
+    directory: generatedDir,
+    files,
+    previews
+  };
+}
+
+function normalizeCommandName(command: string): string {
+  const baseName = path.win32.basename(command).toLowerCase();
+  return baseName.endsWith(".cmd") || baseName.endsWith(".exe") ? baseName.replace(/\.(cmd|exe)$/u, "") : baseName;
+}
+
+export function isAllowedLauncherCommand(command: string, args: readonly string[], repoRoot: string): boolean {
+  const normalizedCommand = normalizeCommandName(command);
+  const normalizedArgs = [...args];
+  const entrypoint = getEntrypointPath(repoRoot);
+
+  if (normalizedCommand === "npm") {
+    return (
+      normalizedArgs.length === 1 && normalizedArgs[0] === "--version"
+    ) || (
+      normalizedArgs.length === 1 && normalizedArgs[0] === "install"
+    ) || (
+      normalizedArgs.length === 2 && normalizedArgs[0] === "run" && normalizedArgs[1] === "build"
+    ) || (
+      normalizedArgs.length === 1 && normalizedArgs[0] === "test"
+    );
+  }
+
+  if (normalizedCommand === "node") {
+    return isAllowedNodeEntrypointArgs(normalizedArgs, repoRoot);
+  }
+
+  if (path.resolve(command) === path.resolve(process.execPath)) {
+    return isAllowedNodeEntrypointArgs(normalizedArgs, repoRoot);
+  }
+
+  return false;
+}
+
+function isAllowedNodeEntrypointArgs(normalizedArgs: string[], repoRoot: string): boolean {
+    const httpArgs = [
+      getEntrypointPath(repoRoot),
+      "--transport",
+      "http",
+      "--host",
+      LOCAL_HTTP_HOST,
+      "--port",
+      String(LOCAL_HTTP_PORT)
+    ];
+  const entrypoint = getEntrypointPath(repoRoot);
+
+  return (
+    normalizedArgs.length === 1 && normalizedArgs[0] === "--version"
+  ) || (
+    normalizedArgs.length === 1 && path.resolve(repoRoot, normalizedArgs[0]) === entrypoint
+  ) || (
+    normalizedArgs.length === httpArgs.length &&
+    normalizedArgs.every((arg, index) => (index === 0 ? path.resolve(repoRoot, arg) === httpArgs[index] : arg === httpArgs[index]))
+  );
+}
+
+export function assertAllowedLauncherCommand(command: string, args: readonly string[], repoRoot: string): void {
+  if (!isAllowedLauncherCommand(command, args, repoRoot)) {
+    throw new Error(`Refusing to run non-allowlisted launcher command: ${command} ${args.join(" ")}`);
+  }
+}
+
+export function findStaleEntrypointReferences(repoRoot: string): string[] {
+  const staleReferences: string[] = [];
+  const rootsToScan = ["README.md", "docs", "examples", "package.json"];
+  const staleNeedles = ["dist/index.js", "dist\\index.js"];
+
+  function scanFile(filePath: string): void {
+    const content = fs.readFileSync(filePath, "utf8");
+    const lines = content.split(/\r?\n/u);
+    lines.forEach((line, index) => {
+      if (line.includes("old top-level")) {
+        return;
+      }
+
+      for (const needle of staleNeedles) {
+        if (line.includes(needle)) {
+          staleReferences.push(`${filePath}:${index + 1}`);
+          break;
+        }
+      }
+    });
+  }
+
+  function walk(target: string): void {
+    if (!fs.existsSync(target)) {
+      return;
+    }
+
+    const stats = fs.statSync(target);
+    if (stats.isFile()) {
+      scanFile(target);
+      return;
+    }
+
+    for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name === "dist") {
+        continue;
+      }
+
+      const child = path.join(target, entry.name);
+      if (entry.isDirectory()) {
+        walk(child);
+      } else if (/\.(json|md|ts|html|css)$/iu.test(entry.name)) {
+        scanFile(child);
+      }
+    }
+  }
+
+  for (const root of rootsToScan) {
+    walk(path.join(repoRoot, root));
+  }
+
+  return staleReferences;
+}

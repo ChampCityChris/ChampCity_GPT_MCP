@@ -1,0 +1,10 @@
+﻿# Example only. Do not commit real tunnel UUIDs, credentials paths, account IDs, or tokens.
+#
+# For CLI-managed tunnels, copy this to your local cloudflared config location,
+# then add your own tunnel identifier and credentials-file path outside this repo.
+
+ingress:
+  - hostname: mcp.example.com
+    service: http://127.0.0.1:3333
+  - service: http_status:404
+

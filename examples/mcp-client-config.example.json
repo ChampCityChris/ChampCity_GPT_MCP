@@ -1,0 +1,16 @@
+﻿{
+  "mcpServers": {
+    "champcity-gpt": {
+      "command": "node",
+      "args": ["C:\\Users\\<you>\\Projects\\<project>\\dist\\src\\index.js"],
+      "cwd": "C:\\Users\\<you>\\Projects\\<project>",
+      "env": {
+        "CHAMPCITY_GPT_ALLOWED_ROOTS": "C:\\Users\\<you>\\Projects\\<project>;C:\\Users\\<you>\\Projects\\<another-project>",
+        "CHAMPCITY_GPT_AUDIT_LOG": "C:\\Users\\<you>\\Projects\\<project>\\logs\\audit.log",
+        "CHAMPCITY_GPT_REQUIRE_GIT_ROOT": "true",
+        "CHAMPCITY_GPT_ALLOWED_COMMANDS": "npm test;npm run lint;npm run typecheck;npm run build;git status;git diff"
+      }
+    }
+  }
+}
+

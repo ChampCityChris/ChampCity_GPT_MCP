@@ -1,12 +1,12 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
 import { type AppConfig } from "../config.js";
-import { registerTools } from "./registerTools.js";
+import { registerTools, type ToolExposureOptions } from "./registerTools.js";
 
 export const MCP_SERVER_NAME = "champcity-gpt";
 export const MCP_SERVER_DISPLAY_NAME = "ChampCity GPT MCP";
 
-export function createMcpServer(config: AppConfig, version: string): Server {
+export function createMcpServer(config: AppConfig, version: string, toolExposureOptions: ToolExposureOptions = {}): Server {
   const server = new Server(
     {
       name: MCP_SERVER_NAME,
@@ -14,11 +14,13 @@ export function createMcpServer(config: AppConfig, version: string): Server {
     },
     {
       capabilities: {
-        tools: {}
+        tools: {},
+        resources: {},
+        prompts: {}
       }
     }
   );
 
-  registerTools(server, config);
+  registerTools(server, config, toolExposureOptions);
   return server;
 }

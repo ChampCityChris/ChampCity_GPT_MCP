@@ -82,6 +82,14 @@ export interface OAuthStatus {
   revokedSessionsCount: number;
   accessTokenTtlSeconds: number;
   refreshTokenTtlSeconds: number;
+  clientRegistryPath: string;
+  tokenRegistryPath: string;
+  adminConfigPath: string;
+  authorizeErrorPath: string;
+  authorizationServerMetadataPath: string;
+  protectedResourceMetadataPath: string;
+  registrationEndpointPath: string;
+  dynamicClientRegistrationEnabled: boolean;
   lastAuthorizeError?: OAuthAuthorizeErrorDiagnostic;
 }
 
@@ -255,6 +263,21 @@ export function createAuthorizationServerMetadata(publicBaseUrl = getOAuthPublic
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
     scopes_supported: OAUTH_SCOPES
+  };
+}
+
+export function getOAuthEndpointPaths(publicBaseUrl = getOAuthPublicBaseUrl()) {
+  const issuer = normalizeOAuthPublicBaseUrl(publicBaseUrl);
+  return {
+    issuer,
+    mcp: `${issuer}/mcp`,
+    authorizationServerMetadata: `${issuer}/.well-known/oauth-authorization-server`,
+    authorizationServerMetadataForMcp: `${issuer}/.well-known/oauth-authorization-server/mcp`,
+    protectedResourceMetadata: `${issuer}/.well-known/oauth-protected-resource`,
+    protectedResourceMetadataForMcp: `${issuer}/.well-known/oauth-protected-resource/mcp`,
+    registrationEndpoint: `${issuer}/oauth/register`,
+    authorizationEndpoint: `${issuer}/oauth/authorize`,
+    tokenEndpoint: `${issuer}/oauth/token`
   };
 }
 
@@ -572,6 +595,7 @@ export function validateOAuthAccessToken(repoRoot: string, accessToken: string):
 }
 
 export function getOAuthStatus(repoRoot: string): OAuthStatus {
+  const endpointPaths = getOAuthEndpointPaths();
   const clients = readOAuthClientStore(repoRoot).clients.length;
   const tokenStore = readOAuthTokenStore(repoRoot);
   const now = Date.now();
@@ -594,6 +618,14 @@ export function getOAuthStatus(repoRoot: string): OAuthStatus {
     revokedSessionsCount,
     accessTokenTtlSeconds: getOAuthAccessTokenTtlSeconds(),
     refreshTokenTtlSeconds: getOAuthRefreshTokenTtlSeconds(),
+    clientRegistryPath: getOAuthClientsPath(repoRoot),
+    tokenRegistryPath: getOAuthTokensPath(repoRoot),
+    adminConfigPath: getOAuthAdminPath(repoRoot),
+    authorizeErrorPath: getOAuthAuthorizeErrorPath(repoRoot),
+    authorizationServerMetadataPath: endpointPaths.authorizationServerMetadata,
+    protectedResourceMetadataPath: endpointPaths.protectedResourceMetadata,
+    registrationEndpointPath: endpointPaths.registrationEndpoint,
+    dynamicClientRegistrationEnabled: true,
     lastAuthorizeError: readLastOAuthAuthorizeError(repoRoot)
   };
 }

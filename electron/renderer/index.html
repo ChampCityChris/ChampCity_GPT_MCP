@@ -35,7 +35,8 @@
               <p><strong>Config:</strong> <span id="setupConfigDir">Loading...</span></p>
               <p><strong>Logs:</strong> <span id="setupLogsDir">Loading...</span></p>
               <p><strong>Generated:</strong> <span id="setupGeneratedDir">Loading...</span></p>
-              <p><strong>Server resource:</strong> <span id="setupServerEntrypoint">Loading...</span></p>
+              <p><strong>Server runtime:</strong> <span id="setupServerRuntime">Loading...</span></p>
+              <p><strong>Developer CLI:</strong> <span id="setupServerEntrypoint">Loading...</span></p>
             </div>
           </div>
 
@@ -194,8 +195,28 @@
             <strong id="runtimeModeStatus">Loading...</strong>
           </div>
           <div>
+            <span>Server runtime</span>
+            <strong id="runtimeServerRuntimeStatus">Loading...</strong>
+          </div>
+          <div>
             <span>Config directory</span>
             <strong id="runtimeConfigDirStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Logs directory</span>
+            <strong id="runtimeLogsDirStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Generated directory</span>
+            <strong id="runtimeGeneratedDirStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Developer Node executable</span>
+            <strong id="runtimeNodeStatus">Loading...</strong>
+          </div>
+          <div>
+            <span>Developer CLI entrypoint</span>
+            <strong id="runtimeServerEntrypointStatus">Loading...</strong>
           </div>
         </div>
       </section>
@@ -213,13 +234,21 @@
         <div class="oauth-grid">
           <p><strong>Public issuer:</strong> <span id="oauthIssuerInline">Loading...</span></p>
           <p><strong>MCP endpoint:</strong> <span id="oauthMcpEndpointInline">Loading...</span></p>
+          <p><strong>OAuth metadata:</strong> <span id="oauthMetadataInline">Loading...</span></p>
+          <p><strong>DCR endpoint:</strong> <span id="oauthRegistrationEndpointInline">Loading...</span></p>
           <p><strong>Write mode:</strong> <span id="oauthWriteToolsInline">Loading...</span></p>
           <p><strong>OAuth files.write granted:</strong> <span id="oauthFilesWriteInline">Loading...</span></p>
           <p><strong>Tunnel readiness:</strong> <span id="oauthTunnelInline">Loading...</span></p>
-          <p><strong>DCR client registered:</strong> <span id="oauthDcrRegisteredInline">Loading...</span></p>
+          <p><strong>Dynamic Client Registration:</strong> <span id="oauthDcrStatusInline">Loading...</span></p>
+          <p><strong>Registered clients:</strong> <span id="oauthDcrRegisteredInline">Loading...</span></p>
+          <p><strong>Client registry:</strong> <span id="oauthClientRegistryInline">Loading...</span></p>
+          <p><strong>ChatGPT reconnect:</strong> <span id="oauthReconnectInline">Loading...</span></p>
+          <p><strong>Delete/recreate connector:</strong> <span id="oauthRecreateInline">Loading...</span></p>
           <p><strong>Last authorize error:</strong> <span id="oauthLastAuthorizeErrorInline">Loading...</span></p>
           <p><strong>PKCE challenge received:</strong> <span id="oauthPkceReceivedInline">Loading...</span></p>
           <p><strong>PKCE method received:</strong> <span id="oauthPkceMethodInline">Loading...</span></p>
+          <p><strong>Internal MCP tools:</strong> <span id="internalToolsInline">Loading...</span></p>
+          <p><strong>ChatGPT-exposed tools:</strong> <span id="exposedToolsInline">Loading...</span></p>
         </div>
         <div class="inline-actions oauth-actions">
           <button id="configureOAuthAdmin">Configure OAuth Admin Password</button>
@@ -286,10 +315,52 @@
         </div>
       </section>
 
+      <section class="figma-band" aria-label="Figma Handoff">
+        <div class="section-heading">
+          <h2>Figma Handoff</h2>
+          <span>Setup and debug status only; ChatGPT runs Make handoff through the MCP tool.</span>
+        </div>
+        <div class="oauth-grid">
+          <p><strong>Figma token configured:</strong> <span id="figmaTokenConfigured">Loading...</span></p>
+          <p><strong>Figma token source:</strong> <span id="figmaTokenSource">Loading...</span></p>
+          <p><strong>Figma config:</strong> <span id="figmaConfigPath">Loading...</span></p>
+          <p><strong>MCP Make handoff tool:</strong> <span id="figmaMakeToolStatus">Loading...</span></p>
+          <p><strong>Figma MCP endpoint:</strong> <span id="figmaMcpEndpoint">Loading...</span></p>
+          <p><strong>Figma MCP mode:</strong> <span id="figmaMcpMode">Loading...</span></p>
+          <p><strong>Figma MCP connection:</strong> <span id="figmaMcpConnection">Loading...</span></p>
+          <p><strong>Figma MCP auth:</strong> <span id="figmaMcpAuth">Loading...</span></p>
+          <p><strong>Make resource retrieval:</strong> <span id="figmaMcpMakeAvailability">Loading...</span></p>
+          <p><strong>Last parsed node:</strong> <span id="figmaParsedNode">None</span></p>
+        </div>
+        <div class="figma-form">
+          <label class="field-label" for="figmaTokenInput">Figma access token</label>
+          <div class="token-input-row inline-token-row">
+            <input id="figmaTokenInput" class="text-input modal-input" type="password" autocomplete="off" spellcheck="false" />
+            <button id="saveFigmaToken" type="button">Save</button>
+          </div>
+          <label class="field-label" for="figmaUrlInput">Figma Design file or frame URL</label>
+          <input id="figmaUrlInput" class="text-input" type="url" spellcheck="false" />
+          <label class="field-label" for="figmaTargetAreaInput">Target UI area</label>
+          <input id="figmaTargetAreaInput" class="text-input" type="text" value="ChampCity GPT launcher UI" />
+          <label class="field-label" for="figmaOutputDirInput">Handoff output directory</label>
+          <input id="figmaOutputDirInput" class="text-input" type="text" value="design/figma-handoff" />
+          <label class="field-label" for="figmaPromptFileInput">Codex prompt file</label>
+          <input id="figmaPromptFileInput" class="text-input" type="text" value="docs/handoffs/CODEX_UI_REDESIGN_HANDOFF.md" />
+        </div>
+        <div class="inline-actions oauth-actions">
+          <button id="clearFigmaToken">Clear Figma Token</button>
+          <button id="testFigmaConnection">Test Figma Connection</button>
+          <button id="parseFigmaUrl">Parse Figma URL</button>
+          <button id="createFigmaHandoffPackage">Create Figma Handoff Package</button>
+          <button id="createCodexUiHandoffPrompt">Create Codex UI Handoff Prompt</button>
+        </div>
+      </section>
+
       <section class="toolbar-band" aria-label="Actions">
         <button id="runDoctor">Run Doctor</button>
-        <button id="installDeps">Install Dependencies</button>
-        <button id="buildServer">Build MCP Server</button>
+        <button id="runRuntimePathCheck">Run Runtime Path Check</button>
+        <button id="installDeps">Developer: Install Dependencies</button>
+        <button id="buildServer">Developer: Build MCP Server</button>
         <button id="startServer">Start Local HTTP MCP Server</button>
         <button id="stopServer">Stop Local HTTP MCP Server</button>
         <button id="openHealth">Open Local Health Check</button>
@@ -410,6 +481,26 @@
             <span id="checklistMeta">Run doctor for current results.</span>
           </div>
           <div id="checklist" class="checklist"></div>
+        </section>
+
+        <section class="panel checklist-panel">
+          <div class="section-heading">
+            <h2>Last ChatGPT MCP Discovery</h2>
+            <span id="discoveryTimestamp">none recorded</span>
+          </div>
+          <div class="oauth-grid">
+            <p><strong>Request path:</strong> <span id="discoveryPath">none</span></p>
+            <p><strong>JSON-RPC methods:</strong> <span id="discoveryMethods">none</span></p>
+            <p><strong>Auth subject:</strong> <span id="discoveryAuth">none</span></p>
+            <p><strong>OAuth scopes:</strong> <span id="discoveryScopes">none</span></p>
+            <p><strong>Tool counts:</strong> <span id="discoveryToolCounts">none</span></p>
+            <p><strong>Final tools:</strong> <span id="discoveryFinalTools">none</span></p>
+            <p><strong>Filtered tools:</strong> <span id="discoveryFilteredTools">none</span></p>
+            <p><strong>Schema notes:</strong> <span id="discoverySchemaIssues">none</span></p>
+            <p><strong>Response:</strong> <span id="discoveryResponse">none</span></p>
+            <p><strong>Transport route:</strong> <span id="discoveryRoute">none</span></p>
+            <p><strong>Recent methods:</strong> <span id="discoveryRecentMethods">none</span></p>
+          </div>
         </section>
 
         <section class="panel roots-panel">

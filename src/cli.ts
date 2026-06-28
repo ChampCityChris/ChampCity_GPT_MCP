@@ -5,7 +5,7 @@ import { ensureConfiguredRootsExist, loadConfig } from "./config.js";
 import { getHttpAuthTokenConfig } from "./httpAuthConfig.js";
 import { getOAuthPublicBaseUrl } from "./oauth.js";
 import { createMcpServer } from "./server/createMcpServer.js";
-import { runHttpTransport } from "./transports/httpTransport.js";
+import { startHttpMcpServer } from "./server/serverLifecycle.js";
 import { runStdioTransport } from "./transports/stdioTransport.js";
 
 export type McpTransportMode = "stdio" | "http";
@@ -107,17 +107,20 @@ export async function runCli(args = process.argv.slice(2), env: NodeJS.ProcessEn
     return;
   }
 
-  const handle = await runHttpTransport(() => createMcpServer(config, version), config, {
+  const handle = await startHttpMcpServer({
+    repoRoot: cwd,
     host: cliOptions.host,
     port: cliOptions.port,
     version,
     authToken: cliOptions.authToken,
     allowNonlocalHttp: cliOptions.allowNonlocalHttp,
-    allowUnauthLocalHttp: cliOptions.allowUnauthLocalHttp
+    allowUnauthLocalHttp: cliOptions.allowUnauthLocalHttp,
+    env,
+    ensureRootsExist: true
   });
 
-  console.error(`ChampCity GPT MCP HTTP server listening on ${handle.url}`);
-  console.error(`Health endpoint: ${handle.healthUrl}`);
+  console.error(`ChampCity GPT MCP HTTP server listening on ${handle.mcpEndpoint}`);
+  console.error(`Health endpoint: ${handle.healthEndpoint}`);
   console.error(`Write mode: ${config.writeMode} (${config.writeModeSource})`);
   console.error(`HTTP auth token configured: ${cliOptions.authToken ? "yes" : "no"}`);
   console.error(`HTTP auth token source: ${cliOptions.authTokenSource}`);
@@ -128,7 +131,7 @@ export async function runCli(args = process.argv.slice(2), env: NodeJS.ProcessEn
     const shutdown = async () => {
       process.off("SIGINT", shutdown);
       process.off("SIGTERM", shutdown);
-      await handle.close();
+      await handle.stop();
       resolve();
     };
 

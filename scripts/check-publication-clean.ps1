@@ -85,6 +85,8 @@ foreach ($file in $scanFiles) {
 $tokenFilePatterns = @('^config/', '^docs/', '^examples/', '^README\.md$', '^\.env\.example$')
 $tokenRegexes = @(
   '(?i)(token|secret|client_secret|refresh_token|access_token|api[_-]?key)["'']?\s*[:=]\s*["''][A-Za-z0-9_\-\.]{24,}["'']',
+  'figmaAccessToken["'']?\s*:\s*["''](?!<FIGMA_ACCESS_TOKEN>)[A-Za-z0-9_\-\.]{24,}["'']',
+  'figd_[A-Za-z0-9_\-]{20,}',
   '(?i)bearer\s+[A-Za-z0-9_\-\.]{24,}',
   'eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}'
 )

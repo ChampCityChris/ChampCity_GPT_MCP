@@ -1,21 +1,22 @@
 ﻿# Desktop App Setup
 
-ChampCity GPT MCP Launcher is a Windows desktop wrapper for this local STDIO MCP filesystem harness. It gives you a double-clickable app for setup, diagnostics, allowed-root configuration, generated MCP client examples, logs, and optional diagnostic server start/stop.
+ChampCity GPT MCP Launcher is a self-contained Windows desktop app for the ChampCity GPT MCP filesystem harness. It gives end users a double-clickable app for setup, allowed-root configuration, OAuth administration, generated MCP client examples, logs, and local HTTP MCP server start/stop.
 
-The launcher does not create a public network server, open firewall ports, add telemetry, or weaken the MCP server's existing filesystem and command restrictions.
+The packaged launcher runs the HTTP MCP server in-process from Electron. End users do not need Node.js, npm, command-line startup, or a source checkout after installing or unpacking the app. The launcher does not create a public network server, open firewall ports, add telemetry, or weaken the MCP server's existing filesystem and command restrictions.
 
 ## What The App Does
 
-- Shows the repo path, MCP entrypoint, config state, diagnostic server state, and last doctor result.
-- Runs a setup checklist for Node.js, npm, dependencies, build output, allowed roots, logs, stale entrypoint references, and entrypoint startup.
+- Shows runtime mode, server runtime, config state, HTTP server state, endpoint URLs, and last doctor result.
+- Runs a setup checklist for runtime config, allowed roots, logs, public/OAuth readiness, and developer diagnostics.
 - Lets you view, add, remove, reset, and save `config/allowed-roots.local.json`.
 - Warns before saving roots outside `C:\Users\<you>\Projects`.
 - Generates MCP client config examples under `generated\`.
 - Copies the generic STDIO MCP config to the clipboard.
 - Opens the generated config folder, audit log, logs folder, and documentation.
-- Starts and stops only the known local HTTP MCP server entrypoint.
+- Starts and stops the local HTTP MCP server in-process from Electron.
 - Configures ChatGPT OAuth setup: admin password, client reset, token revocation, metadata links, MCP URL copy, and OAuth setup notes.
 - Configures the HTTP auth token through a desktop modal instead of the browser prompt API.
+- Configures a local Figma token and creates Figma design handoff packages/prompts.
 - Shows runtime mode and runtime-local config/log/generated directories.
 - Runs a first-run setup wizard when required runtime config is missing.
 
@@ -60,13 +61,29 @@ Portable mode activates when a `data` folder exists next to the executable:
 <exeDir>\data\generated
 ```
 
-The server receives these paths through:
+The Electron main process passes these paths directly into the server lifecycle and mirrors them into process environment variables for shared config helpers:
 
 ```text
 CHAMPCITY_GPT_CONFIG_DIR
 CHAMPCITY_GPT_LOG_DIR
 CHAMPCITY_GPT_GENERATED_DIR
 ```
+
+Installed and portable mode must not depend on `C:\Users\<you>\Projects\ChampCity_GPT` or any other source repo path.
+
+## Packaged Runtime
+
+The packaged app uses:
+
+- Runtime mode: `installed` or `portable`.
+- Server runtime: `in-process`.
+- Config path: Electron `userData\config` for installed mode or `data\config` beside the executable for portable mode.
+- Logs path: Electron `userData\logs` or `data\logs`.
+- Generated path: Electron `userData\generated` or `data\generated`.
+
+`Start Local HTTP MCP Server` imports the bundled server lifecycle module and calls `startHttpMcpServer(...)` directly. It does not spawn `node.exe`, does not spawn `dist/src/index.js`, and never treats the launcher executable as the server process.
+
+Node.js and npm checks are developer diagnostics only. In packaged mode, `Install Dependencies` and `Build MCP Server` are hidden or marked developer-only.
 
 ## Development Mode
 
@@ -79,6 +96,13 @@ npm run app:dev
 ```
 
 `app:dev` compiles TypeScript and launches Electron from the repo. The renderer uses a preload bridge; it does not have unrestricted Node.js or shell access.
+
+The CLI server remains available for developer and advanced local-client use after building:
+
+```powershell
+node .\dist\src\index.js --transport stdio
+node .\dist\src\index.js --transport http --host 127.0.0.1 --port 3333
+```
 
 ## Build And Package
 
@@ -243,6 +267,41 @@ Recommended workflow:
 4. Use `Elevated` rarely for scripts or legacy fallback, with the elevated token.
 5. Set write mode back to `Off`.
 
+## Figma Handoff
+
+Use the `Figma Handoff` section to save the Figma token once and monitor Figma handoff status. For Figma Make, the primary online workflow is ChatGPT calling `run_figma_make_handoff`; the local exported-package fallback is ChatGPT calling `run_figma_make_file_handoff` with a `.make` path under an allowed root. The URL fields and buttons can remain useful for manual Design-file debugging.
+
+Status fields:
+
+- Figma token configured: yes/no
+- Figma token source: env/local-file/dev-local-file/none
+- Figma config path
+- MCP Make handoff tool: available/unavailable
+- Last parsed node
+
+Actions:
+
+- `Save`: saves the masked Figma token to runtime-local `figma.local.json`.
+- `Clear Figma Token`: removes only the local token file. If the token source is `env`, change `CHAMPCITY_GPT_FIGMA_ACCESS_TOKEN` outside the app.
+- `Test Figma Connection`: fetches a compact file summary only after a Figma file key or URL is entered.
+- `Parse Figma URL`: extracts file key, normalized node ID, and URL type without a network call.
+- `Create Figma Handoff Package`: writes `design\figma-handoff` by default.
+- `Create Codex UI Handoff Prompt`: writes `docs\handoffs\CODEX_UI_REDESIGN_HANDOFF.md` by default.
+
+The local token file shape is:
+
+```json
+{
+  "figmaAccessToken": "<FIGMA_ACCESS_TOKEN>"
+}
+```
+
+The launcher never displays the token after saving and does not include it in generated setup notes. Figma handoff/package writes still require the configured MCP write mode to allow docs-style writes. Generated handoffs may include screenshots and metadata from private Figma files, so review them before committing or sharing.
+
+After the token is saved, ChatGPT can pass a Figma `/make/` URL to `run_figma_make_handoff`. The tool writes `design\figma-handoff\make` and `docs\handoffs\CODEX_FIGMA_MAKE_UI_HANDOFF.md` by default, returns artifact paths and warnings, and does not require the user to fill the launcher URL field or click `Create Figma Handoff Package`.
+
+If the user exports a `.make` package from Figma Make, places it under the repo or another configured allowed root, and gives ChatGPT that path, ChatGPT can call `run_figma_make_file_handoff`. The tool writes `design\figma-handoff\make-file` and `docs\handoffs\CODEX_FIGMA_MAKE_FILE_HANDOFF.md` by default. This fallback parses the local package directly, copies assets, preserves important raw package files, parses Make chat history, reconstructs source where deterministic, and is not a screenshot or browser-scraping workflow.
+
 ## Legacy HTTP Auth Token
 
 Use `Configure HTTP Auth Token` only for legacy/manual HTTP testing. The app opens a real Electron modal titled `Configure HTTP Auth Token` with a masked password/token field, Show/Hide, `Generate Strong Token`, `Save Token`, `Clear Token`, and `Cancel`.
@@ -282,13 +341,13 @@ Generated files:
 - `claude-desktop-mcp-config.example.json`
 - `chatgpt-connection-notes.md`
 
-Development JSON configs launch:
+Development STDIO JSON configs launch:
 
 ```text
 C:\Users\<you>\Projects\<project>\dist\src\index.js
 ```
 
-Packaged app server launch uses the bundled `dist\src\index.js` from app resources.
+Packaged app HTTP server launch is internal to Electron and does not use these STDIO config snippets.
 
 Copy the generated snippet into the MCP client location documented by that client, then restart or reload the client as required.
 
@@ -298,49 +357,35 @@ Many local MCP clients launch STDIO servers themselves. For those clients, gener
 
 That means you usually do not need a persistent background process for Codex-style or Claude Desktop-style STDIO MCP.
 
-## Diagnostic Server
+## Local HTTP MCP Server
 
-In development, `Start Local HTTP MCP Server` starts only:
+`Start Local HTTP MCP Server` starts the HTTP server in-process from Electron and keeps the handle in Electron main memory. The same server code is still available to developers through the CLI:
 
 ```powershell
 node .\dist\src\index.js --transport http --host 127.0.0.1 --port 3333
 ```
 
-In packaged mode, the launcher starts the bundled server entrypoint from app resources with Electron's node runtime and the runtime config/log/generated directories.
-
 For ChatGPT OAuth mode, configure the OAuth admin password first. The server can then start without a legacy bearer token because `/mcp` is protected by OAuth access tokens. A legacy auth token from `CHAMPCITY_GPT_HTTP_AUTH_TOKEN` or `config\http-auth.local.json` can still start manual bearer-auth testing. If neither OAuth admin password nor legacy token is configured, startup is refused unless you explicitly enable local unauthenticated test mode.
 
 Unauthenticated local mode remains clearly labeled `LOCAL TEST ONLY - DO NOT TUNNEL.` Do not tunnel it.
 
-Launcher status files are written under the runtime logs directory:
+Launcher status metadata is written under the runtime logs directory:
 
 ```text
-champcity-gpt-mcp-http.pid
 champcity-gpt-mcp-http.status.json
 ```
 
-Diagnostic output:
-
-```text
-champcity-gpt-mcp-http.out.log
-champcity-gpt-mcp-http.err.log
-```
-
-`Stop MCP Diagnostic Server` stops only the tracked PID when its launcher metadata matches this repo and entrypoint. It does not kill arbitrary `node.exe` processes.
+`Stop Local HTTP MCP Server` calls `handle.stop()` for the in-process server. If a legacy child-process PID file from an older development run is present, the launcher still refuses to stop unknown processes and only cleans up matching stale metadata.
 
 ## Troubleshooting
 
-- Node or npm missing: install Node.js 20.10 or newer, then reopen the app.
-- If PowerShell shows npm but the app says npm is missing, the app should detect `C:\Program Files\nodejs\npm.cmd`.
-- Close and reopen the app after installing Node.js.
-- If npm detection still fails, run Doctor and check the output panel.
-- npm must be invoked as `npm.cmd` on Windows from packaged Electron.
-- Dependencies missing: click `Install Dependencies`.
-- Build output missing: click `Build MCP Server`.
+- Node or npm missing: packaged runtime does not need them. Install Node.js 20.10 or newer only when building from source.
+- Dependencies missing: use `Developer: Install Dependencies` in development mode.
+- Build output missing: use `Developer: Build MCP Server` in development mode.
 - Local config missing: use `Reset Defaults`, review roots, then `Save Config`.
 - A root warning appears: keep roots under `C:\Users\<you>\Projects` unless you intentionally confirm a narrower external path.
 - Generated config does not connect: verify your MCP client config location and restart behavior.
-- Diagnostic server appears stale: click `Stop Local HTTP MCP Server` to clean up stale launcher status files.
+- Local HTTP server appears stale: click `Stop Local HTTP MCP Server` to clean up stale launcher status files.
 
 ## Safety Notes
 

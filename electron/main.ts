@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell, type WebContents } from "electron";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -17,6 +17,7 @@ import {
   getAuditLogPath,
   getEntrypointPath,
   getGeneratedDir,
+  getLauncherFigmaStatus,
   getLauncherHttpAuthStatus,
   getLauncherOAuthStatus,
   getLauncherWriteAccessStatus,
@@ -27,6 +28,7 @@ import {
   getPublicOAuthAuthorizationServerMetadata,
   getPublicOAuthIssuer,
   getPublicOAuthProtectedResourceMetadata,
+  getPublicOAuthRegistrationEndpoint,
   getSetupStatePath,
   isPublicTunnelReady,
   isHttpWriteToolsEnabled,
@@ -42,14 +44,17 @@ import {
   revokeLauncherOAuthTokens,
   readSetupState,
   clearLauncherExpiredOAuthTokens,
+  clearLauncherFigmaAccessToken,
   clearLauncherWriteApprovalToken,
   generateLauncherWriteApprovalToken,
   readLocalConfig,
+  saveLauncherFigmaAccessToken,
   saveLauncherWriteApprovalToken,
   setLauncherHttpWriteToolsEnabled,
   setLauncherWriteMode,
   clearLauncherPendingPatchProposals,
   TUNNEL_READINESS_SCRIPT_RELATIVE,
+  parseLauncherFigmaUrl,
   resetSetupState,
   validateLocalConfig,
   writeSetupState,
@@ -58,8 +63,17 @@ import {
 } from "./launcherCore.js";
 import { buildMcpServer, installDependencies, type OperationResult } from "./runtimeOperations.js";
 import { detectRuntimes } from "./runtimeDetection.js";
-import { ensureRuntimeDirectories, resolveElectronRuntimePaths } from "./runtimePaths.js";
-import type { RuntimePathInfo } from "../src/runtimePaths.js";
+import { ensureRuntimeDirectories, migrateLegacyRuntimeConfig, resolveElectronRuntimePaths } from "./runtimePaths.js";
+import { loadConfig } from "../src/config.js";
+import { createCodexUiHandoffPrompt } from "../src/figma/codexUiPrompt.js";
+import { fetchFigmaFile } from "../src/figma/figmaClient.js";
+import { requireFigmaAccessToken } from "../src/figma/figmaConfig.js";
+import { extractFigmaDesignSummary } from "../src/figma/figmaExtract.js";
+import { createFigmaHandoffPackage } from "../src/figma/figmaHandoff.js";
+import { validateRuntimePaths, type RuntimePathInfo } from "../src/runtimePaths.js";
+import { getMcpServerStatus, startMcpServer, stopMcpServer } from "../src/server/serverLifecycle.js";
+import { readLastMcpDiscoveryTrace, type McpDiscoveryTrace } from "../src/server/discoveryTrace.js";
+import { getToolExposureDiagnostics } from "../src/server/registerTools.js";
 import {
   clearLocalHttpAuthToken,
   generateHttpAuthToken,
@@ -84,10 +98,25 @@ interface DoctorResult {
   completedAt: string;
 }
 
+interface EndpointProbeResult {
+  url: string;
+  ok: boolean;
+  status: number | null;
+  contentType: string;
+  body: string;
+  error?: string;
+}
+
+type LastMcpDiscoveryTrace = McpDiscoveryTrace;
+
 interface DiagnosticStatus {
   state: ServerState;
   pid: number | null;
   detail: string;
+  serverRuntime: "in-process" | "cli-child-process";
+  startedAt?: string;
+  healthEndpoint?: string;
+  mcpEndpoint?: string;
   statusFile: string;
   stdoutLog: string;
   stderrLog: string;
@@ -105,11 +134,84 @@ interface SetupSavePayload {
   writeMode: "off" | "docs" | "patch" | "elevated";
 }
 
+interface FigmaTestPayload {
+  figmaUrlOrFileKey: string;
+}
+
+interface LauncherFigmaHandoffPayload {
+  root?: string;
+  figmaUrl: string;
+  targetArea: string;
+  frameNames?: string[];
+  nodeIds?: string[];
+  relativeOutputDir?: string;
+  overwrite?: boolean;
+}
+
+interface LauncherCodexPromptPayload {
+  root?: string;
+  handoffPath: string;
+  targetFile?: string;
+  targetArea?: string;
+  overwrite?: boolean;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let mainWindow: BrowserWindow | null = null;
 let lastDoctorResult: DoctorResult | null = null;
+let quitAfterServerShutdown = false;
+let shutdownPromise: Promise<void> | null = null;
+const textContextMenuWebContents = new WeakSet<WebContents>();
+
+function attachTextContextMenu(webContents: WebContents): void {
+  if (textContextMenuWebContents.has(webContents)) {
+    return;
+  }
+
+  textContextMenuWebContents.add(webContents);
+  webContents.on("context-menu", (_event, params) => {
+    const hasSelection = params.selectionText.length > 0 || params.editFlags.canCopy;
+    const hasClipboardText = clipboard.readText().length > 0;
+
+    if (params.isEditable) {
+      const menu = Menu.buildFromTemplate([
+        {
+          role: "cut",
+          enabled: params.editFlags.canCut
+        },
+        {
+          role: "copy",
+          enabled: params.editFlags.canCopy
+        },
+        {
+          role: "paste",
+          enabled: params.editFlags.canPaste && hasClipboardText
+        },
+        { type: "separator" },
+        {
+          role: "selectAll",
+          enabled: true
+        }
+      ]);
+
+      menu.popup({ window: BrowserWindow.fromWebContents(webContents) ?? undefined });
+      return;
+    }
+
+    if (hasSelection && params.editFlags.canCopy) {
+      const menu = Menu.buildFromTemplate([
+        {
+          role: "copy",
+          enabled: true
+        }
+      ]);
+
+      menu.popup({ window: BrowserWindow.fromWebContents(webContents) ?? undefined });
+    }
+  });
+}
 
 function resolveRepoRoot(): string {
   const envRoot = process.env.CHAMPCITY_GPT_REPO_ROOT;
@@ -117,12 +219,15 @@ function resolveRepoRoot(): string {
     return path.resolve(envRoot);
   }
 
+  const exeDir = path.dirname(app.getPath("exe"));
   const candidates = [
     process.cwd(),
     DEFAULT_REPO_ROOT,
+    path.resolve(exeDir, "..", ".."),
+    path.resolve(exeDir, ".."),
     path.resolve(__dirname, "..", ".."),
-    path.dirname(app.getPath("exe")),
-    path.resolve(path.dirname(app.getPath("exe")), "..")
+    exeDir,
+    app.getAppPath()
   ];
 
   for (const candidate of candidates) {
@@ -144,6 +249,8 @@ function resolveRepoRoot(): string {
 const repoRoot = resolveRepoRoot();
 const runtimePaths = resolveElectronRuntimePaths(repoRoot);
 ensureRuntimeDirectories(runtimePaths);
+const migratedRuntimeConfigFiles = migrateLegacyRuntimeConfig(path.join(repoRoot, "config"), runtimePaths.configDir);
+process.env.CHAMPCITY_GPT_SERVER_ENTRYPOINT = runtimePaths.serverEntrypoint;
 process.env.CHAMPCITY_GPT_CONFIG_DIR = runtimePaths.configDir;
 process.env.CHAMPCITY_GPT_LOG_DIR = runtimePaths.logsDir;
 process.env.CHAMPCITY_GPT_GENERATED_DIR = runtimePaths.generatedDir;
@@ -156,7 +263,17 @@ if (initialSetupState.publicBaseUrl && !process.env.CHAMPCITY_GPT_PUBLIC_BASE_UR
 function appendOutput(channel: string, message: string): void {
   const timestamp = new Date().toISOString();
   const line = `[${timestamp}] ${channel}: ${message}`;
+  try {
+    fs.mkdirSync(runtimePaths.logsDir, { recursive: true });
+    fs.appendFileSync(path.join(runtimePaths.logsDir, "launcher.log"), `${line}${os.EOL}`, "utf8");
+  } catch {
+    // Keep UI logging alive even if the log file cannot be written.
+  }
   mainWindow?.webContents.send("launcher:log", line);
+}
+
+if (migratedRuntimeConfigFiles.length > 0) {
+  appendOutput("runtime", `Migrated ${migratedRuntimeConfigFiles.length} legacy local config file(s) to ${runtimePaths.configDir}.`);
 }
 
 function commandOutputToString(chunks: Buffer[]): string {
@@ -191,11 +308,28 @@ function clearDiagnosticStatusFiles(): void {
 
 function getDiagnosticServerStatus(): DiagnosticStatus {
   const { pidFile, statusFile, stdoutLog, stderrLog } = getDiagnosticPaths();
+  const lifecycleStatus = getMcpServerStatus();
+  if (lifecycleStatus.state !== "stopped") {
+    return {
+      state: lifecycleStatus.state === "stopping" ? "running" : lifecycleStatus.state,
+      pid: lifecycleStatus.pid,
+      detail: lifecycleStatus.detail,
+      serverRuntime: "in-process",
+      startedAt: lifecycleStatus.startedAt,
+      healthEndpoint: lifecycleStatus.healthEndpoint,
+      mcpEndpoint: lifecycleStatus.mcpEndpoint,
+      statusFile,
+      stdoutLog,
+      stderrLog
+    };
+  }
+
   if (!fs.existsSync(pidFile)) {
     return {
       state: "stopped",
       pid: null,
       detail: "No local HTTP MCP PID file is present.",
+      serverRuntime: "in-process",
       statusFile,
       stdoutLog,
       stderrLog
@@ -208,6 +342,7 @@ function getDiagnosticServerStatus(): DiagnosticStatus {
       state: "stale",
       pid: null,
       detail: "Local HTTP MCP PID file is invalid.",
+      serverRuntime: "cli-child-process",
       statusFile,
       stdoutLog,
       stderrLog
@@ -220,6 +355,7 @@ function getDiagnosticServerStatus(): DiagnosticStatus {
       state: "stale",
       pid,
       detail: `PID ${pid} is no longer running.`,
+      serverRuntime: "cli-child-process",
       statusFile,
       stdoutLog,
       stderrLog
@@ -232,7 +368,8 @@ function getDiagnosticServerStatus(): DiagnosticStatus {
       return {
         state: "unknown",
         pid,
-      detail: "Tracked HTTP PID exists, but status metadata does not match this repo and entrypoint.",
+        detail: "Tracked HTTP PID exists, but status metadata does not match this repo and entrypoint.",
+        serverRuntime: "cli-child-process",
         statusFile,
         stdoutLog,
         stderrLog
@@ -243,6 +380,7 @@ function getDiagnosticServerStatus(): DiagnosticStatus {
       state: "unknown",
       pid,
       detail: "Tracked HTTP PID exists, but status metadata could not be read.",
+      serverRuntime: "cli-child-process",
       statusFile,
       stdoutLog,
       stderrLog
@@ -252,7 +390,8 @@ function getDiagnosticServerStatus(): DiagnosticStatus {
   return {
     state: "running",
     pid,
-    detail: `Local HTTP MCP server PID ${pid} is running.`,
+    detail: `Legacy child-process HTTP MCP server PID ${pid} is running.`,
+    serverRuntime: "cli-child-process",
     statusFile,
     stdoutLog,
     stderrLog
@@ -262,11 +401,46 @@ function getDiagnosticServerStatus(): DiagnosticStatus {
 function runtimePathStatus(paths: RuntimePathInfo) {
   return {
     mode: paths.mode,
+    serverRuntime: paths.serverRuntime,
+    appRoot: paths.appRoot,
     configDir: paths.configDir,
     logsDir: paths.logsDir,
     generatedDir: paths.generatedDir,
     resourceRoot: paths.resourceRoot,
-    serverEntrypoint: paths.serverEntrypoint
+    serverEntrypoint: paths.serverEntrypoint,
+    nodeExecutable: paths.nodeExecutable
+  };
+}
+
+function runRuntimePathCheck(): OperationResult & { diagnostics: ReturnType<typeof runtimePathStatus>; errors: string[] } {
+  const validation = validateRuntimePaths(runtimePaths, {
+    launcherExecutable: process.execPath,
+    requireNodeExecutable: runtimePaths.mode === "development",
+    requireServerEntrypoint: runtimePaths.mode === "development"
+  });
+  const diagnostics = runtimePathStatus(validation.diagnostics);
+  const lines = [
+    `Runtime mode: ${diagnostics.mode}`,
+    `Server runtime: ${diagnostics.serverRuntime}`,
+    `Config directory: ${diagnostics.configDir}`,
+    `Logs directory: ${diagnostics.logsDir}`,
+    `Generated directory: ${diagnostics.generatedDir}`,
+    `App root: ${diagnostics.appRoot}`,
+    `Resources root: ${diagnostics.resourceRoot}`,
+    `Developer Node executable: ${diagnostics.nodeExecutable}`,
+    `Developer CLI entrypoint: ${diagnostics.serverEntrypoint}`
+  ];
+  if (!validation.ok) {
+    lines.push(...validation.errors.map((error) => `FAIL ${error}`));
+  }
+
+  const output = lines.join(os.EOL);
+  appendOutput("runtime", output);
+  return {
+    ok: validation.ok,
+    output: validation.ok ? `${output}${os.EOL}Runtime path check passed.` : output,
+    diagnostics,
+    errors: validation.errors
   };
 }
 
@@ -290,6 +464,84 @@ function applyPublicBaseUrl(publicBaseUrl?: string, localOnly = false): void {
   }
 
   process.env.CHAMPCITY_GPT_PUBLIC_BASE_URL = publicBaseUrl.trim().replace(/\/+$/u, "");
+}
+
+function currentAppConfig() {
+  return loadConfig(process.env, repoRoot, { defaultWriteToolsEnabled: false });
+}
+
+function readLastDiscoveryTraceSafe(): LastMcpDiscoveryTrace | null {
+  try {
+    return readLastMcpDiscoveryTrace(currentAppConfig());
+  } catch (error) {
+    appendOutput("doctor", `Could not read last MCP discovery trace: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+function parseFigmaFileKey(value: string): string {
+  const trimmed = value.trim();
+  if (/^https?:\/\//iu.test(trimmed)) {
+    return parseLauncherFigmaUrl(trimmed).fileKey;
+  }
+
+  if (!/^[A-Za-z0-9_-]{6,}$/u.test(trimmed)) {
+    throw new Error("Enter a Figma file key or a full Figma URL.");
+  }
+
+  return trimmed;
+}
+
+async function testFigmaConnection(payload: FigmaTestPayload) {
+  const fileKey = parseFigmaFileKey(payload.figmaUrlOrFileKey);
+  const token = requireFigmaAccessToken(repoRoot);
+  const rawFile = await fetchFigmaFile(fileKey, { token });
+  const summary = extractFigmaDesignSummary(rawFile, 25);
+  return {
+    ok: true,
+    output: `Fetched Figma file "${summary.fileName}" with ${summary.pages.length} page(s) and ${summary.topLevelFrames.length} top-level frame(s) in the summary.`,
+    summary: {
+      fileName: summary.fileName,
+      pages: summary.pages,
+      topLevelFrames: summary.topLevelFrames,
+      componentsCount: summary.components.length,
+      stylesCount: summary.styles.length
+    }
+  };
+}
+
+async function createLauncherFigmaHandoffPackage(payload: LauncherFigmaHandoffPayload) {
+  const token = requireFigmaAccessToken(repoRoot);
+  const root = payload.root?.trim() || repoRoot;
+  const output = await createFigmaHandoffPackage(
+    {
+      root,
+      figmaUrl: payload.figmaUrl,
+      targetArea: payload.targetArea,
+      frameNames: payload.frameNames,
+      nodeIds: payload.nodeIds,
+      relativeOutputDir: payload.relativeOutputDir,
+      overwrite: payload.overwrite
+    },
+    currentAppConfig(),
+    { token }
+  );
+  return { ok: true, output: `Created Figma handoff package at ${output.handoffDir}.`, result: output };
+}
+
+async function createLauncherCodexUiHandoffPrompt(payload: LauncherCodexPromptPayload) {
+  const root = payload.root?.trim() || repoRoot;
+  const output = await createCodexUiHandoffPrompt(
+    {
+      root,
+      handoffPath: payload.handoffPath,
+      targetFile: payload.targetFile,
+      targetArea: payload.targetArea,
+      overwrite: payload.overwrite
+    },
+    currentAppConfig()
+  );
+  return { ok: true, output: `Created Codex UI handoff prompt at ${output.targetFile}.`, result: output };
 }
 
 function isSetupComplete(): boolean {
@@ -408,6 +660,11 @@ async function runDoctor(): Promise<DoctorResult> {
   const entrypoint = getEntrypointPath(repoRoot);
   const configPath = getLocalConfigPath(repoRoot);
   const logsDir = getLogsDir(repoRoot);
+  const oauthStatus = getLauncherOAuthStatus(repoRoot);
+  const writeAccessStatus = getLauncherWriteAccessStatus(repoRoot);
+  const localHealthPassing = await probeLocalHealth();
+  const toolDiagnostics = getToolExposureDiagnostics(currentAppConfig());
+  const lastDiscoveryTrace = readLastDiscoveryTraceSafe();
 
   appendOutput("doctor", "Checking Node.js...");
   appendOutput("doctor", "Checking npm...");
@@ -423,15 +680,23 @@ async function runDoctor(): Promise<DoctorResult> {
   }
 
   checks.push({
-    name: "Node.js installed",
-    status: runtime.node.found ? "PASS" : "FAIL",
-    detail: runtime.node.found && runtime.node.path ? `${runtime.node.path}${runtime.node.version ? ` (${runtime.node.version})` : ""}` : "node is not installed or not on PATH."
+    name: app.isPackaged ? "Developer Node.js installed" : "Node.js installed",
+    status: runtime.node.found ? "PASS" : app.isPackaged ? "WARN" : "FAIL",
+    detail: runtime.node.found && runtime.node.path
+      ? `${runtime.node.path}${runtime.node.version ? ` (${runtime.node.version})` : ""}`
+      : app.isPackaged
+        ? "Node.js is only needed to build from source. Packaged runtime uses Electron's bundled runtime."
+        : "node is not installed or not on PATH."
   });
 
   checks.push({
-    name: "npm installed",
-    status: runtime.npm.found ? "PASS" : "FAIL",
-    detail: runtime.npm.found && runtime.npm.path ? `${runtime.npm.path}${runtime.npm.version ? ` (${runtime.npm.version})` : ""}` : "npm is not installed or not on PATH."
+    name: app.isPackaged ? "Developer npm installed" : "npm installed",
+    status: runtime.npm.found ? "PASS" : app.isPackaged ? "WARN" : "FAIL",
+    detail: runtime.npm.found && runtime.npm.path
+      ? `${runtime.npm.path}${runtime.npm.version ? ` (${runtime.npm.version})` : ""}`
+      : app.isPackaged
+        ? "npm is only needed to build from source. Packaged runtime starts the MCP server in-process."
+        : "npm is not installed or not on PATH."
   });
 
   checks.push({
@@ -447,9 +712,9 @@ async function runDoctor(): Promise<DoctorResult> {
   });
 
   checks.push({
-    name: "MCP server built",
-    status: fs.existsSync(entrypoint) ? "PASS" : "FAIL",
-    detail: entrypoint
+    name: app.isPackaged ? "MCP server bundled" : "MCP server built",
+    status: app.isPackaged || fs.existsSync(entrypoint) ? "PASS" : "FAIL",
+    detail: app.isPackaged ? "HTTP MCP server starts in-process from bundled Electron modules." : entrypoint
   });
 
   if (fs.existsSync(configPath)) {
@@ -486,6 +751,172 @@ async function runDoctor(): Promise<DoctorResult> {
     });
   }
 
+  checks.push({
+    name: "Public MCP base URL",
+    status: getPublicOAuthIssuer().includes("mcp.example.com") ? "WARN" : "PASS",
+    detail: getPublicOAuthIssuer()
+  });
+
+  checks.push({
+    name: "Local MCP URL",
+    status: "PASS",
+    detail: LOCAL_HTTP_MCP_ENDPOINT
+  });
+
+  checks.push({
+    name: "OAuth client registry path",
+    status: "PASS",
+    detail: oauthStatus.clientRegistryPath
+  });
+
+  checks.push({
+    name: "Registered OAuth client count",
+    status: "PASS",
+    detail: String(oauthStatus.registeredClientsCount)
+  });
+
+  checks.push({
+    name: "Active OAuth access token count",
+    status: "PASS",
+    detail: String(oauthStatus.activeTokensCount)
+  });
+
+  checks.push({
+    name: "Dynamic Client Registration advertised",
+    status: oauthStatus.dynamicClientRegistrationEnabled ? "PASS" : "FAIL",
+    detail: oauthStatus.dynamicClientRegistrationEnabled ? `registration_endpoint=${oauthStatus.registrationEndpointPath}` : "DCR disabled"
+  });
+
+  checks.push({
+    name: "OAuth metadata paths served",
+    status: "PASS",
+    detail: [
+      oauthStatus.authorizationServerMetadataPath,
+      `${getPublicOAuthIssuer()}/.well-known/oauth-authorization-server/mcp`,
+      oauthStatus.protectedResourceMetadataPath,
+      `${getPublicOAuthIssuer()}/.well-known/oauth-protected-resource/mcp`,
+      oauthStatus.registrationEndpointPath,
+      `${getPublicOAuthIssuer()}/oauth/authorize`,
+      `${getPublicOAuthIssuer()}/oauth/token`
+    ].join(", ")
+  });
+
+  checks.push({
+    name: "Local health status",
+    status: localHealthPassing ? "PASS" : "WARN",
+    detail: localHealthPassing ? `${LOCAL_HTTP_HEALTH_ENDPOINT} returned status ok.` : `${LOCAL_HTTP_HEALTH_ENDPOINT} is not responding. Start the local HTTP MCP server before public ChatGPT connection.`
+  });
+
+  const publicMetadata = await probeEndpoint(getPublicOAuthAuthorizationServerMetadata());
+  checks.push({
+    name: "Public OAuth metadata status",
+    status: publicMetadata.ok && publicMetadata.body.includes("registration_endpoint") ? "PASS" : "FAIL",
+    detail: publicMetadata.status === null
+      ? `${publicMetadata.url}: ${publicMetadata.error ?? "request failed"}`
+      : `${publicMetadata.url}: HTTP ${publicMetadata.status}; ${publicMetadata.body}`
+  });
+
+  const publicProtectedResource = await probeEndpoint(getPublicOAuthProtectedResourceMetadata());
+  checks.push({
+    name: "Public protected resource metadata status",
+    status: publicProtectedResource.ok && publicProtectedResource.body.includes("authorization_servers") ? "PASS" : "FAIL",
+    detail: publicProtectedResource.status === null
+      ? `${publicProtectedResource.url}: ${publicProtectedResource.error ?? "request failed"}`
+      : `${publicProtectedResource.url}: HTTP ${publicProtectedResource.status}; ${publicProtectedResource.body}`
+  });
+
+  const publicRegistration = await probeRegistrationEndpoint(getPublicOAuthRegistrationEndpoint());
+  checks.push({
+    name: "Public Dynamic Client Registration status",
+    status: publicRegistration.status === 201 && publicRegistration.body.includes("client_id") ? "PASS" : "FAIL",
+    detail: publicRegistration.status === null
+      ? `${publicRegistration.url}: ${publicRegistration.error ?? "request failed"}`
+      : `${publicRegistration.url}: HTTP ${publicRegistration.status}; ${publicRegistration.body}`
+  });
+
+  checks.push({
+    name: "Last OAuth error",
+    status: oauthStatus.lastAuthorizeError ? "WARN" : "PASS",
+    detail: oauthStatus.lastAuthorizeError
+      ? `${oauthStatus.lastAuthorizeError.error} at ${oauthStatus.lastAuthorizeError.occurredAt}`
+      : "none recorded"
+  });
+
+  checks.push({
+    name: "ChatGPT reconnect should work",
+    status: oauthStatus.adminPasswordConfigured && localHealthPassing && publicMetadata.ok && publicRegistration.status === 201 ? "PASS" : "FAIL",
+    detail: oauthStatus.adminPasswordConfigured && localHealthPassing && publicMetadata.ok && publicRegistration.status === 201
+      ? "OAuth admin password, local health, public metadata, and public DCR are all available."
+      : "Reconnect is not ready until OAuth admin password, local health, public metadata, and public DCR all pass."
+  });
+
+  checks.push({
+    name: "ChatGPT delete/recreate connector required",
+    status: publicRegistration.status === 201 && oauthStatus.registeredClientsCount > 0 ? "WARN" : "PASS",
+    detail: publicRegistration.status === 201 && oauthStatus.registeredClientsCount > 0
+      ? "Reconnect should work for clients in this registry; delete/recreate once if ChatGPT cached a client_id from an older registry path."
+      : "No one-time delete/recreate is indicated by the local registry state."
+  });
+
+  checks.push({
+    name: "OAuth files.write grant",
+    status: writeAccessStatus.oauthFilesWriteGranted ? "PASS" : "WARN",
+    detail: writeAccessStatus.oauthFilesWriteGranted
+      ? "At least one active OAuth access token includes files.write."
+      : "No active OAuth access token with files.write is currently stored; this is separate from local write mode."
+  });
+
+  checks.push({
+    name: "MCP tools registered internally",
+    status: toolDiagnostics.internalToolNames.length > 0 ? "PASS" : "FAIL",
+    detail: `${toolDiagnostics.internalRegisteredToolCount} registered: ${toolDiagnostics.internalToolNames.join(", ")}`
+  });
+
+  checks.push({
+    name: "MCP tool schemas valid",
+    status: toolDiagnostics.invalidToolSchemas.length === 0 ? "PASS" : "FAIL",
+    detail: toolDiagnostics.invalidToolSchemas.length === 0
+      ? `${toolDiagnostics.schemaValidToolCount} schema-valid tool definition(s).`
+      : toolDiagnostics.invalidToolSchemas.map((tool) => `${tool.name}: ${tool.reason}`).join("; ")
+  });
+
+  checks.push({
+    name: "MCP tools filtered by scope/local gate",
+    status: "PASS",
+    detail: toolDiagnostics.scopeFilteredTools.length === 0
+      ? "No schema-valid tools were filtered for scope files.read files.write and current local write mode."
+      : `${toolDiagnostics.scopeFilteredToolCount} filtered: ${toolDiagnostics.scopeFilteredTools.map((tool) => `${tool.name}: ${tool.reason}`).join("; ")}`
+  });
+
+  checks.push({
+    name: "MCP tools exposed through ChatGPT-facing server",
+    status: toolDiagnostics.exposedToolNames.length > 0 ? "PASS" : "FAIL",
+    detail: `${toolDiagnostics.schemaValidExposedToolCount} exposed for scope ${toolDiagnostics.scope}: ${toolDiagnostics.exposedToolNames.join(", ")}`
+  });
+
+  checks.push({
+    name: "Last ChatGPT MCP Discovery",
+    status: lastDiscoveryTrace ? lastDiscoveryTrace.tools.finalToolCountReturned > 0 ? "PASS" : "WARN" : "WARN",
+    detail: lastDiscoveryTrace
+      ? [
+        `${lastDiscoveryTrace.timestamp} ${lastDiscoveryTrace.request.httpMethod} ${lastDiscoveryTrace.request.path}`,
+        `methods=${lastDiscoveryTrace.jsonRpc.methods.join(", ") || "none"}`,
+        `auth=${lastDiscoveryTrace.auth.kind} subject=${lastDiscoveryTrace.auth.subject}`,
+        `scopes=${lastDiscoveryTrace.auth.scope || "none"}`,
+        `tools=${lastDiscoveryTrace.tools.finalToolCountReturned}: ${lastDiscoveryTrace.tools.finalToolNamesReturned.join(", ") || "none"}`,
+        `response=HTTP ${lastDiscoveryTrace.response.statusCode} ${lastDiscoveryTrace.response.contentType || "no content-type"} ${lastDiscoveryTrace.response.kind}`,
+        `route=${lastDiscoveryTrace.response.transportRoute}`,
+        `recentMethods=${lastDiscoveryTrace.recentDiscoverySequence.methodsObserved.join(", ") || "none"}`
+      ].join("; ")
+      : "No real /mcp discovery trace has been recorded yet. Reconnect ChatGPT or start a new ChatGPT chat after starting the public endpoint."
+  });
+
+  checks.push({
+    name: "Write-readiness diagnostics",
+    status: writeAccessStatus.publicWriteReadiness === "READY" ? "PASS" : "WARN",
+    detail: `OAuth files.write granted=${writeAccessStatus.oauthFilesWriteGranted ? "yes" : "no"}; local write mode=${writeAccessStatus.writeMode}; readiness=${writeAccessStatus.publicWriteReadinessReason}; locally blocked write tools=${toolDiagnostics.writeToolNamesBlockedByLocalMode.join(", ") || "none"}`
+  });
+
   const staleRefs = findStaleEntrypointReferences(repoRoot);
   checks.push({
     name: "stale dist/index.js references absent",
@@ -493,7 +924,15 @@ async function runDoctor(): Promise<DoctorResult> {
     detail: staleRefs.length === 0 ? "No stale top-level dist/index.js references found." : staleRefs.join(", ")
   });
 
-  checks.push(await probeEntrypoint(app.isPackaged ? process.execPath : runtime.node.path));
+  if (app.isPackaged) {
+    checks.push({
+      name: "Developer CLI entrypoint probe",
+      status: "WARN",
+      detail: "Skipped in packaged runtime. The normal server path is in-process; CLI probing is for build-from-source diagnostics."
+    });
+  } else {
+    checks.push(await probeEntrypoint(runtimePaths.nodeExecutable));
+  }
 
   const status: CheckStatus = checks.some((check) => check.status === "FAIL") ? "FAIL" : checks.some((check) => check.status === "WARN") ? "WARN" : "PASS";
   const completedAt = new Date().toISOString();
@@ -517,11 +956,14 @@ async function getAppStatus() {
   }
 
   const httpAuthStatus = getLauncherHttpAuthStatus(repoRoot);
+  const figmaStatus = getLauncherFigmaStatus(repoRoot);
   const oauthStatus = getLauncherOAuthStatus(repoRoot);
   const writeAccessStatus = getLauncherWriteAccessStatus(repoRoot);
   const unauthenticatedLocalHttpAllowed = isUnauthenticatedLocalHttpAllowed();
   const writeToolsEnabled = isHttpWriteToolsEnabled(repoRoot);
   const localHealthPassing = await probeLocalHealth();
+  const toolDiagnostics = getToolExposureDiagnostics(currentAppConfig());
+  const lastDiscoveryTrace = readLastDiscoveryTraceSafe();
   const tunnelReadinessStatus = getTunnelReadinessStatus({
     oauthAdminPasswordConfigured: oauthStatus.adminPasswordConfigured,
     unauthenticatedLocalHttpAllowed,
@@ -544,11 +986,12 @@ async function getAppStatus() {
       complete: isSetupComplete()
     },
     firstRunRequired: !isSetupComplete(),
-    buildExists: fs.existsSync(entrypoint),
+    buildExists: runtimePaths.mode !== "development" || fs.existsSync(entrypoint),
     diagnosticStatus: getDiagnosticServerStatus(),
     lastDoctorResult,
     generatedPreviews: createClientConfigPreviews(repoRoot),
     http: {
+      serverRuntime: runtimePaths.serverRuntime,
       localEndpoint: LOCAL_HTTP_MCP_ENDPOINT,
       localHealthEndpoint: LOCAL_HTTP_HEALTH_ENDPOINT,
       publicEndpoint: getPublicMcpEndpoint(),
@@ -556,6 +999,10 @@ async function getAppStatus() {
       oauthIssuer: getPublicOAuthIssuer(),
       oauthAuthorizationServerMetadata: getPublicOAuthAuthorizationServerMetadata(),
       oauthProtectedResourceMetadata: getPublicOAuthProtectedResourceMetadata(),
+      oauthRegistrationEndpoint: getPublicOAuthRegistrationEndpoint(),
+      oauthDynamicClientRegistrationEnabled: oauthStatus.dynamicClientRegistrationEnabled,
+      oauthClientRegistryPath: oauthStatus.clientRegistryPath,
+      oauthTokenRegistryPath: oauthStatus.tokenRegistryPath,
       oauthAdminPasswordConfigured: oauthStatus.adminPasswordConfigured,
       oauthRegisteredClientsCount: oauthStatus.registeredClientsCount,
       oauthActiveClientsCount: oauthStatus.activeOAuthClientsCount,
@@ -569,6 +1016,19 @@ async function getAppStatus() {
       oauthAccessTokenTtlLabel: oauthStatus.accessTokenTtlLabel,
       oauthRefreshTokenTtlLabel: oauthStatus.refreshTokenTtlLabel,
       oauthLastAuthorizeError: oauthStatus.lastAuthorizeError,
+      chatGptReconnectShouldWork: oauthStatus.adminPasswordConfigured && localHealthPassing && oauthStatus.dynamicClientRegistrationEnabled,
+      chatGptDeleteRecreateConnectorRequired: oauthStatus.lastAuthorizeError?.error === "Invalid client_id.",
+      internalToolNames: toolDiagnostics.internalToolNames,
+      exposedToolNames: toolDiagnostics.exposedToolNames,
+      internalRegisteredToolCount: toolDiagnostics.internalRegisteredToolCount,
+      schemaValidToolCount: toolDiagnostics.schemaValidToolCount,
+      schemaValidExposedToolCount: toolDiagnostics.schemaValidExposedToolCount,
+      scopeFilteredToolCount: toolDiagnostics.scopeFilteredToolCount,
+      invalidToolSchemas: toolDiagnostics.invalidToolSchemas,
+      scopeFilteredTools: toolDiagnostics.scopeFilteredTools,
+      serializedToolsListPayload: toolDiagnostics.serializedToolsListPayload,
+      lastMcpDiscoveryTrace: lastDiscoveryTrace,
+      writeToolNamesBlockedByLocalMode: toolDiagnostics.writeToolNamesBlockedByLocalMode,
       authTokenConfigured: httpAuthStatus.configured,
       authTokenSource: httpAuthStatus.source,
       unauthenticatedLocalHttpAllowed,
@@ -592,6 +1052,13 @@ async function getAppStatus() {
       oauthFilesWriteGranted: writeAccessStatus.oauthFilesWriteGranted,
       publicWriteReadiness: writeAccessStatus.publicWriteReadiness,
       publicWriteReadinessReason: writeAccessStatus.publicWriteReadinessReason
+    },
+    figma: {
+      configured: figmaStatus.configured,
+      source: figmaStatus.source,
+      configPath: figmaStatus.configPath,
+      makeHandoffToolAvailable: figmaStatus.makeHandoffToolAvailable,
+      figmaMcp: figmaStatus.figmaMcp
     }
   };
 }
@@ -606,9 +1073,15 @@ async function startDiagnosticServer(): Promise<OperationResult & { status: Diag
     clearDiagnosticStatusFiles();
   }
 
-  const entrypoint = getEntrypointPath(repoRoot);
-  if (!fs.existsSync(entrypoint)) {
-    return { ok: false, output: `Entrypoint is missing: ${entrypoint}`, status: getDiagnosticServerStatus() };
+  const runtimeValidation = validateRuntimePaths(runtimePaths, {
+    launcherExecutable: process.execPath,
+    requireNodeExecutable: false,
+    requireServerEntrypoint: false
+  });
+  if (!runtimeValidation.ok) {
+    const output = runtimeValidation.errors.join(os.EOL);
+    appendOutput("http", output);
+    return { ok: false, output, status: getDiagnosticServerStatus() };
   }
 
   const authConfig = getHttpAuthTokenConfig(repoRoot);
@@ -632,78 +1105,63 @@ async function startDiagnosticServer(): Promise<OperationResult & { status: Diag
     appendOutput("http", "LOCAL TEST ONLY - DO NOT TUNNEL.");
   }
 
-  const httpArgs = [entrypoint, "--transport", "http", "--host", LOCAL_HTTP_HOST, "--port", String(LOCAL_HTTP_PORT)];
-  let command = process.execPath;
-  let serverEnv: NodeJS.ProcessEnv = {};
-  if (app.isPackaged) {
-    appendOutput("http", "Starting bundled server with Electron node runtime.");
-    serverEnv = { ELECTRON_RUN_AS_NODE: "1" };
-  } else {
-    appendOutput("http", "Checking Node.js...");
-    const runtime = await detectRuntimes();
-    if (!runtime.node.found || !runtime.node.path) {
-      const output = "node not found. Install Node.js LTS and restart the app.";
-      appendOutput("http", output);
-      return { ok: false, output, status: getDiagnosticServerStatus() };
-    }
-    command = runtime.node.path;
-    appendOutput("http", `Found node: ${runtime.node.path}`);
-  }
-  assertAllowedLauncherCommand(command, httpArgs, repoRoot);
-  const { logsDir, pidFile, statusFile, stdoutLog, stderrLog } = getDiagnosticPaths();
+  appendOutput("http", `Runtime mode: ${runtimePaths.mode}`);
+  appendOutput("http", `Server runtime: ${runtimePaths.serverRuntime}`);
+
+  const { logsDir, statusFile } = getDiagnosticPaths();
   fs.mkdirSync(logsDir, { recursive: true });
-  const stdoutFd = fs.openSync(stdoutLog, "a");
-  const stderrFd = fs.openSync(stderrLog, "a");
+  fs.mkdirSync(runtimePaths.generatedDir, { recursive: true });
 
-  const child = spawn(command, httpArgs, {
-    cwd: repoRoot,
-    detached: true,
-    stdio: ["ignore", stdoutFd, stderrFd],
-    windowsHide: true,
-    shell: false,
-    env: {
-      ...process.env,
-      ...serverEnv,
-      CHAMPCITY_GPT_CONFIG_DIR: runtimePaths.configDir,
-      CHAMPCITY_GPT_LOG_DIR: runtimePaths.logsDir,
-      CHAMPCITY_GPT_GENERATED_DIR: runtimePaths.generatedDir,
-      CHAMPCITY_GPT_TRANSPORT: "http",
-      CHAMPCITY_GPT_HTTP_HOST: LOCAL_HTTP_HOST,
-      CHAMPCITY_GPT_HTTP_PORT: String(LOCAL_HTTP_PORT),
-      CHAMPCITY_GPT_PUBLIC_BASE_URL: getPublicOAuthIssuer(),
-      CHAMPCITY_GPT_HTTP_AUTH_TOKEN: authConfig.token ?? "",
-      CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP: authTokenConfigured ? "false" : String(unauthenticatedLocalHttpAllowed),
-      CHAMPCITY_GPT_WRITE_MODE: getLauncherWriteAccessStatus(repoRoot).writeMode
-    }
-  });
+  const writeAccessStatus = getLauncherWriteAccessStatus(repoRoot);
+  let serverHandle: Awaited<ReturnType<typeof startMcpServer>>;
+  try {
+    serverHandle = await startMcpServer({
+      repoRoot,
+      host: LOCAL_HTTP_HOST,
+      port: LOCAL_HTTP_PORT,
+      version: app.getVersion(),
+      configDir: runtimePaths.configDir,
+      logDir: runtimePaths.logsDir,
+      generatedDir: runtimePaths.generatedDir,
+      publicBaseUrl: getPublicOAuthIssuer(),
+      writeMode: writeAccessStatus.writeMode,
+      authToken: authConfig.token,
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: authTokenConfigured ? false : unauthenticatedLocalHttpAllowed,
+      env: process.env,
+      log: (message) => appendOutput("http", message)
+    });
+  } catch (error) {
+    const output = `Failed to start local HTTP MCP server: ${error instanceof Error ? error.message : String(error)}`;
+    appendOutput("http", output);
+    appendOutput("http", error instanceof Error && error.stack ? error.stack : output);
+    return { ok: false, output, status: getDiagnosticServerStatus() };
+  }
 
-  fs.closeSync(stdoutFd);
-  fs.closeSync(stderrFd);
-  child.unref();
-
-  fs.writeFileSync(pidFile, String(child.pid), "ascii");
   fs.writeFileSync(
     statusFile,
     `${JSON.stringify(
       {
-        pid: child.pid,
-        startedAt: new Date().toISOString(),
-        entrypoint,
+        pid: process.pid,
+        startedAt: serverHandle.startedAt,
         repoRoot,
         runtimeMode: runtimePaths.mode,
+        serverRuntime: "in-process",
+        appRoot: runtimePaths.appRoot,
+        resourceRoot: runtimePaths.resourceRoot,
         configDir: runtimePaths.configDir,
         logsDir: runtimePaths.logsDir,
         generatedDir: runtimePaths.generatedDir,
         mode: "http",
-        localEndpoint: LOCAL_HTTP_MCP_ENDPOINT,
-        healthEndpoint: LOCAL_HTTP_HEALTH_ENDPOINT,
+        localEndpoint: serverHandle.mcpEndpoint,
+        healthEndpoint: serverHandle.healthEndpoint,
         publicBaseUrl: getPublicOAuthIssuer(),
         authTokenConfigured,
         authTokenSource: authConfig.source,
         oauthAdminPasswordConfigured: oauthStatus.adminPasswordConfigured,
         unauthenticatedLocalHttpAllowed,
         publicTunnelReady: isPublicTunnelReady(repoRoot),
-        writeMode: getLauncherWriteAccessStatus(repoRoot).writeMode,
+        writeMode: writeAccessStatus.writeMode,
         writeToolsEnabled: isHttpWriteToolsEnabled(repoRoot)
       },
       null,
@@ -713,11 +1171,28 @@ async function startDiagnosticServer(): Promise<OperationResult & { status: Diag
   );
 
   const status = getDiagnosticServerStatus();
-  appendOutput("http", `Started PID ${child.pid}`);
-  return { ok: true, output: `Started local HTTP MCP server PID ${child.pid}.`, status };
+  appendOutput("http", `Started in-process MCP server at ${serverHandle.mcpEndpoint}`);
+  return { ok: true, output: `Started in-process local HTTP MCP server at ${serverHandle.mcpEndpoint}.`, status };
 }
 
-function stopDiagnosticServer(): OperationResult & { status: DiagnosticStatus } {
+async function stopDiagnosticServer(): Promise<OperationResult & { status: DiagnosticStatus }> {
+  const lifecycleStatus = getMcpServerStatus();
+  if (lifecycleStatus.state !== "stopped") {
+    try {
+      const stoppedEndpoint = lifecycleStatus.mcpEndpoint ?? LOCAL_HTTP_MCP_ENDPOINT;
+      await stopMcpServer({ log: (message) => appendOutput("http", message) });
+      clearDiagnosticStatusFiles();
+      appendOutput("http", `Stopped in-process MCP server at ${stoppedEndpoint}`);
+      return { ok: true, output: `Stopped in-process local HTTP MCP server at ${stoppedEndpoint}.`, status: getDiagnosticServerStatus() };
+    } catch (error) {
+      return {
+        ok: false,
+        output: error instanceof Error ? error.message : String(error),
+        status: getDiagnosticServerStatus()
+      };
+    }
+  }
+
   const status = getDiagnosticServerStatus();
   if (status.state === "stopped") {
     return { ok: true, output: status.detail, status };
@@ -762,6 +1237,53 @@ async function probeLocalHealth(): Promise<boolean> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function probeEndpoint(url: string, init: RequestInit = {}): Promise<EndpointProbeResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: controller.signal
+    });
+    const body = (await response.text()).replace(/\s+/gu, " ").slice(0, 500);
+    return {
+      url,
+      ok: response.ok,
+      status: response.status,
+      contentType: response.headers.get("content-type") ?? "",
+      body
+    };
+  } catch (error) {
+    return {
+      url,
+      ok: false,
+      status: null,
+      contentType: "",
+      body: "",
+      error: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function probeRegistrationEndpoint(url: string): Promise<EndpointProbeResult> {
+  return probeEndpoint(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      redirect_uris: ["https://chatgpt.com/connector/oauth/champcity-doctor"],
+      client_name: "ChampCity Doctor DCR Probe",
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+      scope: "files.read"
+    })
+  });
 }
 
 function getTunnelReadinessStatus(options: {
@@ -823,6 +1345,7 @@ function registerIpcHandlers(): void {
     return { ok: true, output: "Setup wizard reset. Existing local config, OAuth clients, tokens, and write settings were left in place." };
   });
   ipcMain.handle("runDoctor", () => runDoctor());
+  ipcMain.handle("runRuntimePathCheck", () => runRuntimePathCheck());
   ipcMain.handle("installDependencies", () => installDependencies({ repoRoot, appendOutput, rerunDoctor: runDoctor }));
   ipcMain.handle("buildMcpServer", () => buildMcpServer({ repoRoot, appendOutput, rerunDoctor: runDoctor }));
   ipcMain.handle("readLocalConfig", () => ({
@@ -946,6 +1469,28 @@ function registerIpcHandlers(): void {
     return { ok: true, output: "Pending patch proposals cleared.", status };
   });
   ipcMain.handle("getWriteAccessStatus", () => getLauncherWriteAccessStatus(repoRoot));
+  ipcMain.handle("getFigmaStatus", () => getLauncherFigmaStatus(repoRoot));
+  ipcMain.handle("saveFigmaAccessToken", (_event, token: string) => {
+    const status = saveLauncherFigmaAccessToken(repoRoot, token);
+    return { ok: true, output: "Figma access token saved locally.", status };
+  });
+  ipcMain.handle("clearFigmaAccessToken", () => {
+    const current = getLauncherFigmaStatus(repoRoot);
+    if (current.source === "env") {
+      return {
+        ok: false,
+        output: "Figma access token is configured via CHAMPCITY_GPT_FIGMA_ACCESS_TOKEN. Change or remove the environment variable outside the app.",
+        status: current
+      };
+    }
+
+    const status = clearLauncherFigmaAccessToken(repoRoot);
+    return { ok: true, output: "Local Figma access token cleared.", status };
+  });
+  ipcMain.handle("parseFigmaUrl", (_event, url: string) => parseLauncherFigmaUrl(url));
+  ipcMain.handle("testFigmaConnection", (_event, payload: FigmaTestPayload) => testFigmaConnection(payload));
+  ipcMain.handle("createFigmaHandoffPackage", (_event, payload: LauncherFigmaHandoffPayload) => createLauncherFigmaHandoffPackage(payload));
+  ipcMain.handle("createCodexUiHandoffPrompt", (_event, payload: LauncherCodexPromptPayload) => createLauncherCodexUiHandoffPrompt(payload));
   ipcMain.handle("saveWriteApprovalToken", (_event, token: string) => {
     const status = saveLauncherWriteApprovalToken(repoRoot, token);
     return { ok: true, output: "Local elevated approval token saved as a hash.", status };
@@ -1008,6 +1553,42 @@ function registerIpcHandlers(): void {
   ipcMain.handle("getDiagnosticServerStatus", () => getDiagnosticServerStatus());
 }
 
+async function stopOwnedServerForShutdown(reason: string): Promise<void> {
+  if (!shutdownPromise) {
+    appendOutput("http", `Stopping owned MCP server during ${reason}.`);
+    shutdownPromise = stopMcpServer({
+      log: (message) => appendOutput("http", message)
+    })
+      .then(() => {
+        clearDiagnosticStatusFiles();
+      })
+      .catch((error) => {
+        appendOutput("http", `Failed to stop owned MCP server during ${reason}: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        shutdownPromise = null;
+      });
+  }
+
+  await shutdownPromise;
+}
+
+function shouldDeferQuitForServerShutdown(): boolean {
+  return !quitAfterServerShutdown && getMcpServerStatus().state !== "stopped";
+}
+
+function deferQuitUntilServerStopped(event: Electron.Event, reason: string): void {
+  if (!shouldDeferQuitForServerShutdown()) {
+    return;
+  }
+
+  event.preventDefault();
+  void stopOwnedServerForShutdown(reason).finally(() => {
+    quitAfterServerShutdown = true;
+    app.quit();
+  });
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1220,
@@ -1024,17 +1605,32 @@ function createWindow(): void {
     }
   });
 
+  attachTextContextMenu(mainWindow.webContents);
+
   const htmlPath = fs.existsSync(path.join(repoRoot, "electron", "renderer", "index.html"))
     ? path.join(repoRoot, "electron", "renderer", "index.html")
     : path.resolve(__dirname, "..", "..", "electron", "renderer", "index.html");
 
   mainWindow.loadFile(htmlPath);
+  mainWindow.on("close", (event) => {
+    if (process.platform !== "darwin" && shouldDeferQuitForServerShutdown()) {
+      event.preventDefault();
+      void stopOwnedServerForShutdown("main window close").finally(() => {
+        quitAfterServerShutdown = true;
+        mainWindow?.close();
+      });
+    }
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
 }
 
 registerIpcHandlers();
+
+app.on("web-contents-created", (_event, webContents) => {
+  attachTextContextMenu(webContents);
+});
 
 app.whenReady().then(() => {
   createWindow();
@@ -1049,4 +1645,24 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+app.on("before-quit", (event) => {
+  deferQuitUntilServerStopped(event, "app before-quit");
+});
+
+app.on("will-quit", (event) => {
+  deferQuitUntilServerStopped(event, "app will-quit");
+});
+
+process.on("SIGINT", () => {
+  void stopOwnedServerForShutdown("SIGINT").finally(() => {
+    process.exit(0);
+  });
+});
+
+process.on("SIGTERM", () => {
+  void stopOwnedServerForShutdown("SIGTERM").finally(() => {
+    process.exit(0);
+  });
 });

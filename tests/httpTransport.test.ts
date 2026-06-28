@@ -4,7 +4,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
+import { LATEST_PROTOCOL_VERSION, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { type AppConfig, loadConfig } from "../src/config.js";
 import {
@@ -19,7 +19,8 @@ import {
   writeOAuthTokenStore
 } from "../src/oauth.js";
 import { createMcpServer } from "../src/server/createMcpServer.js";
-import { assertWriteToolEnabled } from "../src/server/registerTools.js";
+import { readLastMcpDiscoveryTrace } from "../src/server/discoveryTrace.js";
+import { assertWriteToolEnabled, getToolExposureDiagnostics } from "../src/server/registerTools.js";
 import { runHttpTransport, validateHttpBinding } from "../src/transports/httpTransport.js";
 
 let tempRoot: string;
@@ -58,6 +59,10 @@ function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     writeApprovalToken: { source: "env", token: "test-write-token" },
     ...overrides
   };
+}
+
+function createScopedMcpServerFactory(config: AppConfig) {
+  return (auth?: { scope: string }) => createMcpServer(config, "0.1.0-test", { scope: auth?.scope });
 }
 
 interface McpPostResult {
@@ -194,6 +199,33 @@ function firstResult(messages: Array<Record<string, unknown>>, id: number): Reco
   return message.result as Record<string, unknown>;
 }
 
+async function initializeOAuthMcpSession(handleUrl: string, scope: string): Promise<Record<string, string>> {
+  const accessToken = await issueTestAccessToken(handleUrl, scope);
+  const authHeader = { authorization: `Bearer ${accessToken}` };
+  const initialize = await postMcp(
+    handleUrl,
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: LATEST_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "champcity-http-test", version: "0.0.0" }
+      }
+    },
+    authHeader
+  );
+  assert.equal(initialize.response.status, 200);
+  firstResult(initialize.messages, 1);
+  const sessionId = initialize.response.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+  return {
+    ...authHeader,
+    "mcp-session-id": sessionId
+  };
+}
+
 describe("HTTP MCP transport safety", () => {
   it("refuses nonlocal hosts unless explicitly allowed", () => {
     assert.throws(
@@ -257,7 +289,13 @@ describe("HTTP MCP transport safety", () => {
   it("refuses guarded write tools when write mode is insufficient", () => {
     assert.throws(() => assertWriteToolEnabled("apply_approved_patch", testConfig()), /writeMode patch or elevated/i);
     assert.throws(() => assertWriteToolEnabled("write_markdown_artifact", testConfig()), /writeMode docs, patch, or elevated/i);
+    assert.throws(() => assertWriteToolEnabled("create_figma_handoff_package", testConfig()), /writeMode docs, patch, or elevated/i);
+    assert.throws(() => assertWriteToolEnabled("run_figma_make_handoff", testConfig()), /writeMode docs, patch, or elevated/i);
+    assert.throws(() => assertWriteToolEnabled("run_figma_make_file_handoff", testConfig()), /writeMode docs, patch, or elevated/i);
     assert.throws(() => assertWriteToolEnabled("run_allowed_script", testConfig()), /writeMode elevated/i);
+    assert.throws(() => assertWriteToolEnabled("safe_stage_changes", testConfig()), /writeMode elevated/i);
+    assert.throws(() => assertWriteToolEnabled("commit_validated_changes", testConfig()), /writeMode elevated/i);
+    assert.throws(() => assertWriteToolEnabled("push_current_branch", testConfig()), /writeMode elevated/i);
     assert.doesNotThrow(() => assertWriteToolEnabled("read_project_file", testConfig()));
   });
 
@@ -340,6 +378,7 @@ describe("HTTP MCP transport safety", () => {
         const metadata = await authorizationServer.json();
         assert.deepEqual(metadata, createAuthorizationServerMetadata("https://mcp.example.com"));
         assert.deepEqual((metadata as { grant_types_supported: string[] }).grant_types_supported, ["authorization_code", "refresh_token"]);
+        assert.equal((metadata as { registration_endpoint: string }).registration_endpoint, "https://mcp.example.com/oauth/register");
       }
 
       for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"]) {
@@ -423,8 +462,63 @@ describe("HTTP MCP transport safety", () => {
       assert.equal(json.scope, "files.read");
       assert.equal(json.token_endpoint_auth_method, "none");
       assert.equal(fs.existsSync(getOAuthClientsPath(tempRoot)), true);
+      assert.equal(readOAuthClientStore(tempRoot).clients[0]?.client_id, json.client_id);
     } finally {
       await handle.close();
+    }
+  });
+
+  it("keeps a dynamically registered client_id valid after a simulated restart", async () => {
+    const config = testConfig({ writeToolsEnabled: false });
+    const firstHandle = await runHttpTransport(() => createMcpServer(config, "0.1.0-test"), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    const redirectUri = "https://chatgpt.com/connector/oauth/restart-test";
+    let clientId = "";
+    try {
+      const response = await fetch(new URL("/oauth/register", firstHandle.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          redirect_uris: [redirectUri],
+          client_name: "ChatGPT Restart Test",
+          token_endpoint_auth_method: "none",
+          scope: "files.read"
+        })
+      });
+      assert.equal(response.status, 201);
+      clientId = ((await response.json()) as { client_id: string }).client_id;
+      assert.equal(readOAuthClientStore(tempRoot).clients.some((client) => client.client_id === clientId), true);
+    } finally {
+      await firstHandle.close();
+    }
+
+    const secondHandle = await runHttpTransport(() => createMcpServer(config, "0.1.0-test"), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const authorization = await fetch(new URL(`/oauth/authorize?${new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        response_type: "code",
+        code_challenge: "a".repeat(43),
+        code_challenge_method: "S256",
+        scope: "files.read"
+      })}`, secondHandle.url));
+      assert.equal(authorization.status, 503);
+      assert.match(await authorization.text(), /OAuth admin password is not configured/i);
+    } finally {
+      await secondHandle.close();
     }
   });
 
@@ -442,6 +536,10 @@ describe("HTTP MCP transport safety", () => {
       const base = new URL(handle.url);
       const invalidClient = await fetch(new URL("/oauth/authorize?client_id=missing&redirect_uri=https%3A%2F%2Fchat.openai.com%2Faip%2Fcallback&response_type=code&code_challenge=abc&code_challenge_method=S256", base));
       assert.equal(invalidClient.status, 400);
+      assert.deepEqual(await invalidClient.json(), {
+        error: "invalid_request",
+        error_description: "Invalid client_id."
+      });
 
       const registration = await fetch(new URL("/oauth/register", base), {
         method: "POST",
@@ -927,7 +1025,7 @@ describe("HTTP MCP transport safety", () => {
   it("accepts valid files.read OAuth tokens for tools/list and read tools", async () => {
     fs.writeFileSync(path.join(tempRoot, "alpha.md"), "# Alpha\n", "utf8");
     const config = testConfig({ writeToolsEnabled: false });
-    const handle = await runHttpTransport(() => createMcpServer(config, "0.1.0-test"), config, {
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
       host: "127.0.0.1",
       port: 0,
       version: "0.1.0-test",
@@ -972,7 +1070,13 @@ describe("HTTP MCP transport safety", () => {
         sessionHeaders
       );
       assert.equal(toolsList.response.status, 200);
-      firstResult(toolsList.messages, 2);
+      const toolsResult = firstResult(toolsList.messages, 2);
+      assert.doesNotThrow(() => ListToolsResultSchema.parse(toolsResult));
+      const toolNames = (toolsResult.tools as Array<{ name: string }>).map((entry) => entry.name);
+      assert.ok(toolNames.includes("list_project_files"));
+      assert.ok(toolNames.includes("read_project_file"));
+      assert.ok(toolNames.includes("search_project_files"));
+      assert.equal(toolNames.includes("write_markdown_artifact"), false);
 
       const read = await postMcp(
         handle.url,
@@ -993,6 +1097,233 @@ describe("HTTP MCP transport safety", () => {
       );
       assert.equal(read.response.status, 200);
       firstResult(read.messages, 3);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("does not hide read-only tools when an OAuth token lacks files.write", async () => {
+    const config = testConfig({ writeMode: "docs" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read");
+      const toolsList = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/list"
+        },
+        sessionHeaders
+      );
+      assert.equal(toolsList.response.status, 200);
+      const toolsResult = firstResult(toolsList.messages, 2);
+      assert.doesNotThrow(() => ListToolsResultSchema.parse(toolsResult));
+      const toolNames = (toolsResult.tools as Array<{ name: string }>).map((entry) => entry.name);
+
+      assert.ok(toolNames.includes("list_project_files"));
+      assert.ok(toolNames.includes("read_project_file"));
+      assert.ok(toolNames.includes("search_project_files"));
+      assert.ok(toolNames.includes("get_figma_status"));
+      assert.equal(toolNames.includes("write_markdown_artifact"), false);
+      assert.equal(toolNames.includes("run_figma_make_file_handoff"), false);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("exposes expected ChatGPT-facing tools for OAuth files.read files.write", async () => {
+    const config = testConfig({ writeMode: "docs" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read files.write");
+      const toolsList = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/list"
+        },
+        sessionHeaders
+      );
+      assert.equal(toolsList.response.status, 200);
+      const toolsResult = firstResult(toolsList.messages, 2);
+      assert.doesNotThrow(() => ListToolsResultSchema.parse(toolsResult));
+      const toolNames = (toolsResult.tools as Array<{ name: string }>).map((entry) => entry.name);
+      const diagnostics = getToolExposureDiagnostics(config, { scope: "files.read files.write" });
+
+      assert.deepEqual(toolNames, diagnostics.exposedToolNames);
+      assert.ok(toolNames.includes("list_project_files"));
+      assert.ok(toolNames.includes("read_project_file"));
+      assert.ok(toolNames.includes("search_project_files"));
+      assert.ok(toolNames.includes("get_figma_status"));
+      assert.ok(toolNames.includes("run_figma_make_file_handoff"));
+      assert.equal(toolNames.includes("safe_stage_changes"), false);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("supports ChatGPT-compatible no-session tools/list discovery with application/json Accept", async () => {
+    const config = testConfig({ writeMode: "docs" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const pair = await issueTestTokenPair(handle.url, "files.read files.write");
+      const toolsList = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 22,
+          method: "tools/list"
+        },
+        {
+          authorization: `Bearer ${pair.accessToken}`,
+          accept: "application/json"
+        }
+      );
+      assert.equal(toolsList.response.status, 200);
+      assert.match(toolsList.response.headers.get("content-type") ?? "", /application\/json/u);
+      const toolsResult = firstResult(toolsList.messages, 22);
+      assert.doesNotThrow(() => ListToolsResultSchema.parse(toolsResult));
+      const toolNames = (toolsResult.tools as Array<{ name: string }>).map((entry) => entry.name);
+      assert.ok(toolNames.includes("list_project_files"));
+      assert.ok(toolNames.includes("read_project_file"));
+      assert.ok(toolNames.includes("search_project_files"));
+      assert.ok(toolNames.includes("get_write_access_status"));
+      assert.ok(toolNames.includes("get_figma_status"));
+      assert.ok(toolNames.includes("run_figma_make_file_handoff"));
+
+      const trace = readLastMcpDiscoveryTrace(config);
+      assert.ok(trace);
+      assert.equal(trace.request.path, "/mcp");
+      assert.deepEqual(trace.jsonRpc.methods, ["tools/list"]);
+      assert.equal(trace.auth.kind, "oauth");
+      assert.equal(trace.auth.clientId, pair.clientId);
+      assert.equal(trace.auth.scope, "files.read files.write");
+      assert.equal(trace.response.transportRoute, "stateless-compat");
+      assert.equal(trace.response.kind, "json-rpc-response");
+      assert.equal(trace.tools.finalToolCountReturned, toolNames.length);
+      assert.deepEqual(trace.tools.finalToolNamesReturned, toolNames);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("traces initialize, initialized, resources/list, prompts/list, and tools/list discovery sequence", async () => {
+    const config = testConfig({ writeMode: "docs" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const pair = await issueTestTokenPair(handle.url, "files.read");
+      const authHeader = { authorization: `Bearer ${pair.accessToken}` };
+      const initialize = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: LATEST_PROTOCOL_VERSION,
+            capabilities: {},
+            clientInfo: { name: "champcity-http-test", version: "0.0.0" }
+          }
+        },
+        authHeader
+      );
+      assert.equal(initialize.response.status, 200);
+      const sessionId = initialize.response.headers.get("mcp-session-id");
+      assert.ok(sessionId);
+      const sessionHeaders = {
+        ...authHeader,
+        "mcp-session-id": sessionId
+      };
+
+      const initialized = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          method: "notifications/initialized"
+        },
+        sessionHeaders
+      );
+      assert.equal(initialized.response.status, 202);
+
+      const resources = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "resources/list"
+        },
+        sessionHeaders
+      );
+      assert.equal(resources.response.status, 200);
+      assert.deepEqual(firstResult(resources.messages, 2), { resources: [] });
+
+      const prompts = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 3,
+          method: "prompts/list"
+        },
+        sessionHeaders
+      );
+      assert.equal(prompts.response.status, 200);
+      assert.deepEqual(firstResult(prompts.messages, 3), { prompts: [] });
+
+      const toolsList = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "tools/list"
+        },
+        sessionHeaders
+      );
+      assert.equal(toolsList.response.status, 200);
+
+      const trace = readLastMcpDiscoveryTrace(config);
+      assert.ok(trace);
+      assert.equal(trace.request.path, "/mcp");
+      assert.deepEqual(trace.jsonRpc.methods, ["tools/list"]);
+      assert.deepEqual(trace.recentDiscoverySequence.methodsObserved, [
+        "initialize",
+        "notifications/initialized",
+        "resources/list",
+        "prompts/list",
+        "tools/list"
+      ]);
+      assert.equal(trace.tools.finalToolNamesReturned.includes("list_project_files"), true);
+      assert.equal(trace.tools.finalToolNamesReturned.includes("write_markdown_artifact"), false);
+      assert.ok(trace.tools.scopeFilteredTools.some((entry) => entry.name === "write_markdown_artifact" && /files\.write/u.test(entry.reason)));
     } finally {
       await handle.close();
     }

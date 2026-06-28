@@ -3,6 +3,7 @@ dist/
 coverage/
 logs/
 generated/
+design/figma-handoff/
 release/
 package-lock.zip
 config/*.local.json

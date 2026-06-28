@@ -2,6 +2,8 @@
 
 ChampCity_GPT is a local MCP filesystem harness. It exposes a small set of audited file and git tools to an MCP-capable client, scoped to configured project roots.
 
+Packaged Electron builds run the local HTTP MCP server in-process from bundled app modules. End users do not need external Node.js, npm, a source checkout, or command-line server startup. The `node dist/src/index.js` CLI remains available only for development and advanced local-client workflows.
+
 ## Threat Model
 
 The server assumes an MCP client can request file reads, searches, patch proposals, approved writes, safe git inspection, and exact allowlisted commands. The main risks are accidental overexposure of local files, path traversal, symlink escapes, secret reads, unsafe writes, and command injection.
@@ -38,21 +40,48 @@ If ChatGPT reports `PKCE S256 code_challenge is required`, inspect the launcher 
 
 Scope mapping:
 
-- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, and `get_write_access_status`.
-- `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, and `run_allowed_script`.
+- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `test_figma_mcp_connection`, `pre_commit_safety_scan`, and `get_commit_readiness`.
+- `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
 
 Write access uses local write modes instead of a per-write token for every write. OAuth `files.write` is still required, but it is not enough by itself. The local write mode must also permit the operation:
 
 - `off`: no write tools are allowed.
 - `docs`: Markdown artifact writes are allowed without `approvalToken`.
 - `patch`: docs mode plus controlled application of patches that match a stored `propose_patch` proposal hash.
-- `elevated`: reserved for scripts and legacy approval-gated fallback operations.
+- `elevated`: reserved for scripts, legacy approval-gated fallback operations, and safe git stage/commit/push tools.
 
 Write mode defaults to `off`. The preferred override is `CHAMPCITY_GPT_WRITE_MODE=off|docs|patch|elevated`; otherwise the server reads `config/write-access.local.json`. Legacy `CHAMPCITY_GPT_ENABLE_WRITE_TOOLS=true` maps to `docs`, and `false` maps to `off`. Existing `httpWriteToolsEnabled: true` local config migrates to `writeMode: "docs"` unless `writeMode` is already present.
 
 The local elevated approval token is stored only as a salted `scrypt` hash in `config/write-access.local.json`; `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` may be used temporarily for dev/manual testing and takes precedence over the local hash. Do not reuse OAuth access tokens as elevated approval tokens.
 
 Static HTTP bearer tokens can remain for legacy/manual testing. Loading order is `CHAMPCITY_GPT_HTTP_AUTH_TOKEN`, then `config\http-auth.local.json`, then no legacy token. Static bearer tokens were useful for manual HTTP tests but are not sufficient for ChatGPT's OAuth connector flow.
+
+## Figma Token And Handoff Policy
+
+Figma Design access uses the official Figma REST API directly. Figma Make URL access uses the configured official Figma MCP server as an MCP client. Figma Make file fallback access parses user-exported local `.make` packages from configured allowed roots. Do not add unofficial third-party Figma MCP packages, browser scraping, screenshot fallback, clipboard automation, or arbitrary network-fetch tools.
+
+Figma token loading order:
+
+1. `CHAMPCITY_GPT_FIGMA_ACCESS_TOKEN`
+2. runtime config file `figma.local.json`
+3. development repo fallback `config\figma.local.json` when supported
+4. none
+
+The local file shape is:
+
+```json
+{
+  "figmaAccessToken": "<FIGMA_ACCESS_TOKEN>"
+}
+```
+
+In development, `config\figma.local.json` is ignored by git. Installed mode stores runtime config under Electron userData, and portable mode stores it under `data\config`; packaged runtime must not require the source repo config path. The launcher can save or clear only the local file. If the source is `env`, the environment variable must be changed outside the app.
+
+Tool results, generated docs, logs, audit entries, and errors must not include the token value. Figma API errors are redacted before being returned. `get_figma_status` returns only configured yes/no and source.
+
+Figma handoff writes require OAuth `files.write` for HTTP callers and local write mode `docs`, `patch`, or `elevated`. Writes still enforce allowed roots, safe relative paths, blocked-file policy, overwrite rules, and git-root requirements when enabled. The tools do not write outside allowed roots and do not enable write mode by default.
+
+Generated Design handoff packages can contain screenshots, frame names, component names, style names, text metadata, and design tokens from private Figma files. Generated Make handoff packages can contain private Make source/resources retrieved through Figma MCP. Treat generated handoffs as potentially sensitive and review them before committing or sharing. Public safety scans block `config/*.local.json`, real-looking `figmaAccessToken` values, and common Figma token-looking strings where practical.
 
 Unauthenticated localhost testing requires the explicit opt-in `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true`. Treat that mode as `LOCAL TEST ONLY - DO NOT TUNNEL.`
 
@@ -69,6 +98,8 @@ ChatGPT.com registration should not be attempted until `npm test` passes, includ
 All file tools require a `root` value that matches one configured allowed root. Paths are resolved to canonical absolute paths before use. Relative paths that contain traversal segments, drive specifiers, UNC-style escapes, absolute paths, null bytes, or colon characters are rejected.
 
 Configured roots can come from `config/allowed-roots.local.json` or `CHAMPCITY_GPT_ALLOWED_ROOTS`, separated by semicolons. Environment variables override local config. If neither is set, the server defaults to the current working directory only.
+
+Installed mode reads local config from Electron `userData\config`; portable mode reads from `data\config` beside the executable. Packaged runtime must not depend on repo-local `config/*.local.json` files or a hardcoded source checkout path.
 
 ## Blocked File Policy
 
@@ -96,6 +127,7 @@ Every tool handler writes a JSONL audit entry with:
 
 - timestamp
 - tool name
+- root, branch, action, and file count for git workflow tools when applicable
 - requested path or command
 - resolved path when applicable
 - allow or deny result
@@ -117,7 +149,7 @@ The default allowlist is:
 - `git status`
 - `git diff`
 
-The dedicated git tools run fixed git commands only.
+The dedicated git tools run fixed git commands only. There is no MCP tool that accepts arbitrary git command strings.
 
 ## Write Mode Model
 
@@ -135,15 +167,29 @@ When `CHAMPCITY_GPT_REQUIRE_GIT_ROOT=true`, write tools verify that targets belo
 
 `run_allowed_script` requires OAuth `files.write`, write mode `elevated`, an exact allowlisted command, and a valid elevated approval token. Scripts are not available in `docs` or `patch` mode.
 
+`pre_commit_safety_scan` and `get_commit_readiness` are read-only tools available with OAuth `files.read`. They report blocker findings by rule and path, but do not return raw matched secret values.
+
+`safe_stage_changes`, `commit_validated_changes`, and `push_current_branch` require OAuth `files.write` and write mode `elevated`. They do not accept shell commands or arbitrary git commands. `safe_stage_changes` stages exact validated paths only after excluding local config, `.env` files except `.env.example`, logs, generated output, release artifacts, `dist`, `node_modules`, `package-lock.zip`, PID/status/log files, coverage output, ignored files, and files with blocker secret/private-path findings. It never runs `git add .` or `git add -f`.
+
+`commit_validated_changes` commits already staged files only. It runs `pre_commit_safety_scan` in staged mode immediately before `git commit -m <message>`, refuses empty staged sets and blocker findings, and refuses `main` by default unless `allowMainCommit` is explicitly `true`.
+
+`push_current_branch` pushes only to `origin`, refuses `main` by default unless `allowMainPush` is explicitly `true`, and never uses force push flags. It returns sanitized stdout/stderr and redacts credentials from remote URLs.
+
 The elevated approval token is a local confirmation guard layered on top of OAuth, not a replacement for OAuth authentication. Treat every write as reviewable work: inspect `git diff` before committing or sharing changes.
 
 Recommended workflow:
 
 1. Use `docs` mode for Markdown planning docs.
 2. Use `patch` mode for code changes and require `propose_patch` before `apply_approved_patch`.
-3. Inspect `git diff` after writes and before commits.
-4. Use `elevated` mode only for rare approval-gated scripts or fallback patch application.
-5. Return write mode to `off` after the session.
+3. Work on `dev` or a feature branch, not `main`.
+4. Ask ChatGPT to run `get_commit_readiness`.
+5. Ask ChatGPT to run `safe_stage_changes`.
+6. Ask ChatGPT to run `pre_commit_safety_scan`.
+7. Ask ChatGPT to run `commit_validated_changes` with a reviewed commit message.
+8. Ask ChatGPT to run `push_current_branch` only after reviewing the commit result.
+9. Return write mode to `off` after the session.
+
+Releases are separate from commits. Release binaries are uploaded as GitHub Release assets, not committed.
 
 ## Known Limitations
 

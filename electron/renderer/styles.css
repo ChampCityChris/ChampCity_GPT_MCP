@@ -137,7 +137,8 @@ h2 {
 }
 
 .oauth-band,
-.write-access-band {
+.write-access-band,
+.figma-band {
   margin: 0 0 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -582,6 +583,15 @@ h2 {
 .modal-input {
   width: 100%;
   margin: 0;
+}
+
+.figma-form {
+  padding-top: 4px;
+}
+
+.inline-token-row {
+  width: calc(100% - 28px);
+  margin: 0 14px;
 }
 
 .modal-actions {

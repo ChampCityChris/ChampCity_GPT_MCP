@@ -18,16 +18,84 @@ interface DoctorResult {
   completedAt: string;
 }
 
+interface LastMcpDiscoveryTrace {
+  timestamp: string;
+  processId: number;
+  request: {
+    httpMethod: string;
+    path: string;
+    publicBaseUrl: string;
+    host?: string;
+    forwardedHost?: string;
+    forwardedProto?: string;
+    cfRay?: string;
+    userAgent?: string;
+    accept?: string;
+    normalizedAccept?: string;
+    contentType?: string;
+    mcpSessionIdPresent: boolean;
+  };
+  jsonRpc: {
+    isBatch: boolean;
+    methods: string[];
+    ids: Array<string | number | null>;
+    hasInitialize: boolean;
+    hasInitializedNotification: boolean;
+    hasToolsList: boolean;
+    hasResourcesList: boolean;
+    hasPromptsList: boolean;
+  };
+  auth: {
+    kind: "oauth" | "legacy" | "local-unauth" | "unauthenticated";
+    subject: string;
+    clientId?: string;
+    scope: string;
+    scopes: string[];
+  };
+  tools: {
+    countBeforeFiltering: number;
+    countAfterMcpSchemaValidation: number;
+    countAfterChatGptSchemaSanitization: number;
+    countAfterScopeFiltering: number;
+    finalToolCountReturned: number;
+    finalToolNamesReturned: string[];
+    invalidToolSchemas: Array<{ name: string; reason: string }>;
+    invalidChatGptToolSchemas: Array<{ name: string; reason: string }>;
+    scopeFilteredTools: Array<{ name: string; reason: string }>;
+    sanitizedToolSchemas: Array<{ name: string; removedKeywords: string[] }>;
+  };
+  response: {
+    statusCode: number;
+    contentType: string;
+    kind: "json-rpc-response" | "sse-event-stream-response" | "empty-accepted-response" | "wrong-content-type" | "wrong-http-status";
+    transportRoute: "stateful-session" | "stateless-compat" | "auth-denied" | "scope-denied" | "bad-request" | "server-error";
+    error?: string;
+  };
+  recentDiscoverySequence: {
+    windowSeconds: number;
+    entries: Array<{
+      timestamp: string;
+      methods: string[];
+      responseStatusCode: number;
+      responseKind: LastMcpDiscoveryTrace["response"]["kind"];
+    }>;
+    methodsObserved: string[];
+  };
+}
+
 interface AppStatus {
   appName: string;
   repoRoot: string;
   runtime: {
     mode: "development" | "installed" | "portable";
+    serverRuntime: "in-process" | "cli-child-process";
+    appRoot: string;
     configDir: string;
     logsDir: string;
     generatedDir: string;
     resourceRoot: string;
     serverEntrypoint: string;
+    nodeExecutable: string;
   };
   entrypoint: string;
   configPath: string;
@@ -49,10 +117,15 @@ interface AppStatus {
     state: string;
     pid: number | null;
     detail: string;
+    serverRuntime: "in-process" | "cli-child-process";
+    startedAt?: string;
+    healthEndpoint?: string;
+    mcpEndpoint?: string;
   };
   lastDoctorResult: DoctorResult | null;
   generatedPreviews: Record<string, string>;
   http: {
+    serverRuntime: "in-process" | "cli-child-process";
     localEndpoint: string;
     localHealthEndpoint: string;
     publicEndpoint: string;
@@ -60,6 +133,10 @@ interface AppStatus {
     oauthIssuer: string;
     oauthAuthorizationServerMetadata: string;
     oauthProtectedResourceMetadata: string;
+    oauthRegistrationEndpoint: string;
+    oauthDynamicClientRegistrationEnabled: boolean;
+    oauthClientRegistryPath: string;
+    oauthTokenRegistryPath: string;
     oauthAdminPasswordConfigured: boolean;
     oauthRegisteredClientsCount: number;
     oauthActiveClientsCount: number;
@@ -87,6 +164,19 @@ interface AppStatus {
       clientIdPrefix?: string;
       redirectUriLocation?: string;
     };
+    chatGptReconnectShouldWork: boolean;
+    chatGptDeleteRecreateConnectorRequired: boolean;
+    internalToolNames: string[];
+    exposedToolNames: string[];
+    internalRegisteredToolCount: number;
+    schemaValidToolCount: number;
+    schemaValidExposedToolCount: number;
+    scopeFilteredToolCount: number;
+    invalidToolSchemas: Array<{ name: string; reason: string }>;
+    scopeFilteredTools: Array<{ name: string; reason: string }>;
+    serializedToolsListPayload: string;
+    lastMcpDiscoveryTrace: LastMcpDiscoveryTrace | null;
+    writeToolNamesBlockedByLocalMode: string[];
     authTokenConfigured: boolean;
     authTokenSource: "env" | "local-file" | "none";
     unauthenticatedLocalHttpAllowed: boolean;
@@ -110,6 +200,21 @@ interface AppStatus {
     oauthFilesWriteGranted: boolean;
     publicWriteReadiness: "READY" | "NOT_READY";
     publicWriteReadinessReason: string;
+  };
+  figma: {
+    configured: boolean;
+    source: "env" | "local-file" | "dev-local-file" | "none";
+    configPath: string;
+    makeHandoffToolAvailable: boolean;
+    figmaMcp: {
+      endpoint: string;
+      mode: "remote" | "desktop";
+      source: "env" | "local-file" | "default";
+      connectionStatus: "not-tested";
+      authStatus: "unknown" | "not-required" | "required" | "configured";
+      makeResourceRetrievalAvailable: "unknown";
+      configPath: string;
+    };
   };
 }
 
@@ -153,6 +258,7 @@ interface HttpAuthOperationResult extends OperationResult {
 }
 
 type WriteAccessStatus = AppStatus["writeAccess"];
+type FigmaStatus = AppStatus["figma"];
 
 interface WriteAccessOperationResult extends OperationResult {
   status: WriteAccessStatus;
@@ -173,6 +279,7 @@ declare global {
       }) => Promise<SetupSaveResult>;
       resetSetupWizard: () => Promise<OperationResult>;
       runDoctor: () => Promise<DoctorResult>;
+      runRuntimePathCheck: () => Promise<OperationResult>;
       installDependencies: () => Promise<OperationResult>;
       buildMcpServer: () => Promise<OperationResult>;
       readLocalConfig: () => Promise<ReadConfigResult>;
@@ -207,6 +314,13 @@ declare global {
       setWriteMode: (writeMode: "off" | "docs" | "patch" | "elevated") => Promise<WriteAccessOperationResult>;
       clearPendingPatchProposals: () => Promise<WriteAccessOperationResult>;
       getWriteAccessStatus: () => Promise<WriteAccessStatus>;
+      getFigmaStatus: () => Promise<FigmaStatus>;
+      saveFigmaAccessToken: (token: string) => Promise<OperationResult & { status: FigmaStatus }>;
+      clearFigmaAccessToken: () => Promise<OperationResult & { status: FigmaStatus }>;
+      parseFigmaUrl: (url: string) => Promise<{ fileKey: string; nodeId: string | null; urlType: string }>;
+      testFigmaConnection: (figmaUrlOrFileKey: string) => Promise<OperationResult & { summary?: unknown }>;
+      createFigmaHandoffPackage: (payload: unknown) => Promise<OperationResult & { result?: { handoffDir: string; filesCreated: string[]; screenshotsCreated: string[]; warnings: string[] } }>;
+      createCodexUiHandoffPrompt: (payload: unknown) => Promise<OperationResult & { result?: { targetFile: string; sizeBytes: number; sha256: string } }>;
       saveWriteApprovalToken: (token: string) => Promise<WriteAccessOperationResult>;
       clearWriteApprovalToken: () => Promise<WriteAccessOperationResult>;
       generateWriteApprovalToken: () => Promise<{ ok: boolean; token: string }>;
@@ -235,13 +349,33 @@ const oauthClientsStatus = document.querySelector<HTMLSpanElement>("#oauthClient
 const oauthTokensStatus = document.querySelector<HTMLSpanElement>("#oauthTokensStatus")!;
 const oauthIssuerInline = document.querySelector<HTMLSpanElement>("#oauthIssuerInline")!;
 const oauthMcpEndpointInline = document.querySelector<HTMLSpanElement>("#oauthMcpEndpointInline")!;
+const oauthMetadataInline = document.querySelector<HTMLSpanElement>("#oauthMetadataInline")!;
+const oauthRegistrationEndpointInline = document.querySelector<HTMLSpanElement>("#oauthRegistrationEndpointInline")!;
 const oauthWriteToolsInline = document.querySelector<HTMLSpanElement>("#oauthWriteToolsInline")!;
 const oauthFilesWriteInline = document.querySelector<HTMLSpanElement>("#oauthFilesWriteInline")!;
 const oauthTunnelInline = document.querySelector<HTMLSpanElement>("#oauthTunnelInline")!;
+const oauthDcrStatusInline = document.querySelector<HTMLSpanElement>("#oauthDcrStatusInline")!;
 const oauthDcrRegisteredInline = document.querySelector<HTMLSpanElement>("#oauthDcrRegisteredInline")!;
+const oauthClientRegistryInline = document.querySelector<HTMLSpanElement>("#oauthClientRegistryInline")!;
+const oauthReconnectInline = document.querySelector<HTMLSpanElement>("#oauthReconnectInline")!;
+const oauthRecreateInline = document.querySelector<HTMLSpanElement>("#oauthRecreateInline")!;
 const oauthLastAuthorizeErrorInline = document.querySelector<HTMLSpanElement>("#oauthLastAuthorizeErrorInline")!;
 const oauthPkceReceivedInline = document.querySelector<HTMLSpanElement>("#oauthPkceReceivedInline")!;
 const oauthPkceMethodInline = document.querySelector<HTMLSpanElement>("#oauthPkceMethodInline")!;
+const internalToolsInline = document.querySelector<HTMLSpanElement>("#internalToolsInline")!;
+const exposedToolsInline = document.querySelector<HTMLSpanElement>("#exposedToolsInline")!;
+const discoveryTimestamp = document.querySelector<HTMLSpanElement>("#discoveryTimestamp")!;
+const discoveryPath = document.querySelector<HTMLSpanElement>("#discoveryPath")!;
+const discoveryMethods = document.querySelector<HTMLSpanElement>("#discoveryMethods")!;
+const discoveryAuth = document.querySelector<HTMLSpanElement>("#discoveryAuth")!;
+const discoveryScopes = document.querySelector<HTMLSpanElement>("#discoveryScopes")!;
+const discoveryToolCounts = document.querySelector<HTMLSpanElement>("#discoveryToolCounts")!;
+const discoveryFinalTools = document.querySelector<HTMLSpanElement>("#discoveryFinalTools")!;
+const discoveryFilteredTools = document.querySelector<HTMLSpanElement>("#discoveryFilteredTools")!;
+const discoverySchemaIssues = document.querySelector<HTMLSpanElement>("#discoverySchemaIssues")!;
+const discoveryResponse = document.querySelector<HTMLSpanElement>("#discoveryResponse")!;
+const discoveryRoute = document.querySelector<HTMLSpanElement>("#discoveryRoute")!;
+const discoveryRecentMethods = document.querySelector<HTMLSpanElement>("#discoveryRecentMethods")!;
 const oauthActiveClientsInline = document.querySelector<HTMLSpanElement>("#oauthActiveClientsInline")!;
 const oauthRefreshSessionsInline = document.querySelector<HTMLSpanElement>("#oauthRefreshSessionsInline")!;
 const oauthExpiredSessionsInline = document.querySelector<HTMLSpanElement>("#oauthExpiredSessionsInline")!;
@@ -258,7 +392,12 @@ const writeToolsStatus = document.querySelector<HTMLSpanElement>("#writeToolsSta
 const writeApprovalTokenStatus = document.querySelector<HTMLSpanElement>("#writeApprovalTokenStatus")!;
 const writeReadinessStatus = document.querySelector<HTMLSpanElement>("#writeReadinessStatus")!;
 const runtimeModeStatus = document.querySelector<HTMLSpanElement>("#runtimeModeStatus")!;
+const runtimeServerRuntimeStatus = document.querySelector<HTMLSpanElement>("#runtimeServerRuntimeStatus")!;
 const runtimeConfigDirStatus = document.querySelector<HTMLSpanElement>("#runtimeConfigDirStatus")!;
+const runtimeLogsDirStatus = document.querySelector<HTMLSpanElement>("#runtimeLogsDirStatus")!;
+const runtimeGeneratedDirStatus = document.querySelector<HTMLSpanElement>("#runtimeGeneratedDirStatus")!;
+const runtimeNodeStatus = document.querySelector<HTMLSpanElement>("#runtimeNodeStatus")!;
+const runtimeServerEntrypointStatus = document.querySelector<HTMLSpanElement>("#runtimeServerEntrypointStatus")!;
 const writeAccessToolsEnabled = document.querySelector<HTMLSpanElement>("#writeAccessToolsEnabled")!;
 const writeAccessDocsAllowed = document.querySelector<HTMLSpanElement>("#writeAccessDocsAllowed")!;
 const writeAccessPatchAllowed = document.querySelector<HTMLSpanElement>("#writeAccessPatchAllowed")!;
@@ -269,6 +408,23 @@ const writeAccessTokenSource = document.querySelector<HTMLSpanElement>("#writeAc
 const writeAccessOAuthGranted = document.querySelector<HTMLSpanElement>("#writeAccessOAuthGranted")!;
 const writeAccessReadiness = document.querySelector<HTMLSpanElement>("#writeAccessReadiness")!;
 const writeAccessConfigPath = document.querySelector<HTMLSpanElement>("#writeAccessConfigPath")!;
+const figmaTokenConfigured = document.querySelector<HTMLSpanElement>("#figmaTokenConfigured")!;
+const figmaTokenSource = document.querySelector<HTMLSpanElement>("#figmaTokenSource")!;
+const figmaConfigPath = document.querySelector<HTMLSpanElement>("#figmaConfigPath")!;
+const figmaMakeToolStatus = document.querySelector<HTMLSpanElement>("#figmaMakeToolStatus")!;
+const figmaMcpEndpoint = document.querySelector<HTMLSpanElement>("#figmaMcpEndpoint")!;
+const figmaMcpMode = document.querySelector<HTMLSpanElement>("#figmaMcpMode")!;
+const figmaMcpConnection = document.querySelector<HTMLSpanElement>("#figmaMcpConnection")!;
+const figmaMcpAuth = document.querySelector<HTMLSpanElement>("#figmaMcpAuth")!;
+const figmaMcpMakeAvailability = document.querySelector<HTMLSpanElement>("#figmaMcpMakeAvailability")!;
+const figmaParsedNode = document.querySelector<HTMLSpanElement>("#figmaParsedNode")!;
+const figmaTokenInput = document.querySelector<HTMLInputElement>("#figmaTokenInput")!;
+const figmaUrlInput = document.querySelector<HTMLInputElement>("#figmaUrlInput")!;
+const figmaTargetAreaInput = document.querySelector<HTMLInputElement>("#figmaTargetAreaInput")!;
+const figmaOutputDirInput = document.querySelector<HTMLInputElement>("#figmaOutputDirInput")!;
+const figmaPromptFileInput = document.querySelector<HTMLInputElement>("#figmaPromptFileInput")!;
+const installDepsButton = document.querySelector<HTMLButtonElement>("#installDeps")!;
+const buildServerButton = document.querySelector<HTMLButtonElement>("#buildServer")!;
 const checklistMeta = document.querySelector<HTMLSpanElement>("#checklistMeta")!;
 const checklist = document.querySelector<HTMLDivElement>("#checklist")!;
 const rootsList = document.querySelector<HTMLDivElement>("#rootsList")!;
@@ -304,6 +460,7 @@ const cancelOAuthPassword = document.querySelector<HTMLButtonElement>("#cancelOA
 const setupWizard = document.querySelector<HTMLDivElement>("#setupWizard")!;
 const setupProgress = document.querySelector<HTMLSpanElement>("#setupProgress")!;
 const setupRuntimeMode = document.querySelector<HTMLSpanElement>("#setupRuntimeMode")!;
+const setupServerRuntime = document.querySelector<HTMLSpanElement>("#setupServerRuntime")!;
 const setupConfigDir = document.querySelector<HTMLSpanElement>("#setupConfigDir")!;
 const setupLogsDir = document.querySelector<HTMLSpanElement>("#setupLogsDir")!;
 const setupGeneratedDir = document.querySelector<HTMLSpanElement>("#setupGeneratedDir")!;
@@ -363,8 +520,8 @@ function setStatusClass(element: HTMLElement, status: string): void {
 
 function renderChecklist(checks: DoctorCheck[] | null): void {
   const fallbackChecks: DoctorCheck[] = [
-    { name: "Node.js installed", status: "WARN", detail: "Run doctor to verify." },
-    { name: "npm installed", status: "WARN", detail: "Run doctor to verify." },
+    { name: "Developer Node.js installed", status: "WARN", detail: "Run doctor to verify build-from-source diagnostics." },
+    { name: "Developer npm installed", status: "WARN", detail: "Run doctor to verify build-from-source diagnostics." },
     { name: "package.json found", status: "WARN", detail: "Run doctor to verify." },
     { name: "Project dependencies installed", status: "WARN", detail: "Run doctor to verify." },
     { name: "MCP server built", status: "WARN", detail: "Run doctor to verify." },
@@ -539,7 +696,9 @@ function renderSetupSummary(): void {
     ["Public endpoint", setupPublicEndpoint.checked ? getSetupPublicBaseUrl() || "https://mcp.example.com" : "local-only"],
     ["OAuth admin configured", setupOAuthPassword.value.length >= 12 && setupOAuthPassword.value === setupOAuthPasswordConfirm.value ? "yes" : "not yet"],
     ["Write mode", setupWriteMode.value],
-    ["Config directory", currentStatus?.runtime.configDir ?? "Loading..."]
+    ["Config directory", currentStatus?.runtime.configDir ?? "Loading..."],
+    ["Server runtime", currentStatus?.runtime.serverRuntime ?? "Loading..."],
+    ["Developer CLI entrypoint", currentStatus?.runtime.serverEntrypoint ?? "Loading..."]
   ];
   for (const [label, value] of rows) {
     const row = document.createElement("p");
@@ -563,6 +722,7 @@ function renderSetupStep(): void {
 
 function maybeShowSetupWizard(status: AppStatus): void {
   setupRuntimeMode.textContent = status.runtime.mode;
+  setupServerRuntime.textContent = status.runtime.serverRuntime;
   setupConfigDir.textContent = status.runtime.configDir;
   setupLogsDir.textContent = status.runtime.logsDir;
   setupGeneratedDir.textContent = status.runtime.generatedDir;
@@ -671,6 +831,24 @@ function renderWriteTokenModalStatus(status: WriteAccessStatus): void {
   writeTokenModalStatus.textContent = status.legacyApprovalTokenConfigured ? "Local elevated approval token hash is configured." : "No local elevated approval token configured.";
 }
 
+function renderFigmaStatus(status: FigmaStatus): void {
+  figmaTokenConfigured.textContent = status.configured ? "yes" : "no";
+  figmaTokenSource.textContent = status.source;
+  figmaConfigPath.textContent = status.configPath;
+  figmaMakeToolStatus.textContent = status.makeHandoffToolAvailable ? "available" : "unavailable";
+  figmaMcpEndpoint.textContent = status.figmaMcp.endpoint;
+  figmaMcpMode.textContent = status.figmaMcp.mode;
+  figmaMcpConnection.textContent = status.figmaMcp.connectionStatus;
+  figmaMcpAuth.textContent = status.figmaMcp.authStatus;
+  figmaMcpMakeAvailability.textContent = status.figmaMcp.makeResourceRetrievalAvailable;
+  setStatusClass(figmaTokenConfigured, status.configured ? "pass" : "warn");
+  setStatusClass(figmaTokenSource, status.source === "env" ? "warn" : status.configured ? "pass" : "warn");
+  setStatusClass(figmaMakeToolStatus, status.makeHandoffToolAvailable ? "pass" : "fail");
+  setStatusClass(figmaMcpConnection, "warn");
+  setStatusClass(figmaMcpAuth, "warn");
+  setStatusClass(figmaMcpMakeAvailability, "warn");
+}
+
 async function openAuthModal(): Promise<void> {
   authTokenInput.value = "";
   authTokenInput.type = "password";
@@ -717,6 +895,59 @@ function closeWriteTokenModal(): void {
   writeTokenModal.classList.add("hidden");
 }
 
+function summarizeDiscoveryIssues(trace: LastMcpDiscoveryTrace): string {
+  const issues = [
+    ...trace.tools.invalidToolSchemas.map((entry) => `${entry.name}: ${entry.reason}`),
+    ...trace.tools.invalidChatGptToolSchemas.map((entry) => `${entry.name}: ${entry.reason}`)
+  ];
+  if (issues.length > 0) {
+    return issues.join("; ");
+  }
+
+  const sanitized = trace.tools.sanitizedToolSchemas.filter((entry) => entry.removedKeywords.length > 0);
+  return sanitized.length > 0
+    ? sanitized.map((entry) => `${entry.name}: removed ${entry.removedKeywords.join(", ")}`).join("; ")
+    : "none";
+}
+
+function renderLastDiscoveryTrace(trace: LastMcpDiscoveryTrace | null): void {
+  if (!trace) {
+    discoveryTimestamp.textContent = "none recorded";
+    discoveryPath.textContent = "none";
+    discoveryMethods.textContent = "none";
+    discoveryAuth.textContent = "none";
+    discoveryScopes.textContent = "none";
+    discoveryToolCounts.textContent = "none";
+    discoveryFinalTools.textContent = "none";
+    discoveryFilteredTools.textContent = "none";
+    discoverySchemaIssues.textContent = "none";
+    discoveryResponse.textContent = "none";
+    discoveryRoute.textContent = "none";
+    discoveryRecentMethods.textContent = "none";
+    return;
+  }
+
+  discoveryTimestamp.textContent = `${trace.timestamp} pid ${trace.processId}`;
+  discoveryPath.textContent = `${trace.request.httpMethod} ${trace.request.path}`;
+  discoveryMethods.textContent = trace.jsonRpc.methods.join(", ") || "none";
+  discoveryAuth.textContent = `${trace.auth.kind} ${trace.auth.subject}`;
+  discoveryScopes.textContent = trace.auth.scope || "none";
+  discoveryToolCounts.textContent = [
+    `registered ${trace.tools.countBeforeFiltering}`,
+    `mcp-valid ${trace.tools.countAfterMcpSchemaValidation}`,
+    `chatgpt-valid ${trace.tools.countAfterChatGptSchemaSanitization}`,
+    `returned ${trace.tools.finalToolCountReturned}`
+  ].join(", ");
+  discoveryFinalTools.textContent = trace.tools.finalToolNamesReturned.join(", ") || "none";
+  discoveryFilteredTools.textContent = trace.tools.scopeFilteredTools.length > 0
+    ? trace.tools.scopeFilteredTools.map((entry) => `${entry.name}: ${entry.reason}`).join("; ")
+    : "none";
+  discoverySchemaIssues.textContent = summarizeDiscoveryIssues(trace);
+  discoveryResponse.textContent = `HTTP ${trace.response.statusCode}; ${trace.response.contentType || "no content-type"}; ${trace.response.kind}`;
+  discoveryRoute.textContent = trace.response.transportRoute;
+  discoveryRecentMethods.textContent = trace.recentDiscoverySequence.methodsObserved.join(", ") || "none";
+}
+
 async function generateWriteTokenForModal(): Promise<void> {
   const result = await window.champcity.generateWriteApprovalToken();
   writeTokenInput.value = result.token;
@@ -742,9 +973,18 @@ async function refreshStatus(): Promise<void> {
   oauthTokensStatus.textContent = String(status.http.oauthActiveTokensCount);
   oauthIssuerInline.textContent = status.http.oauthIssuer;
   oauthMcpEndpointInline.textContent = status.http.publicEndpoint;
+  oauthMetadataInline.textContent = status.http.oauthAuthorizationServerMetadata;
+  oauthRegistrationEndpointInline.textContent = status.http.oauthRegistrationEndpoint;
   oauthWriteToolsInline.textContent = status.writeAccess.writeMode;
   oauthTunnelInline.textContent = status.http.tunnelReadinessStatus;
-  oauthDcrRegisteredInline.textContent = status.http.oauthRegisteredClientsCount > 0 ? "yes" : "no";
+  oauthDcrStatusInline.textContent = status.http.oauthDynamicClientRegistrationEnabled ? "advertised" : "not advertised";
+  oauthDcrRegisteredInline.textContent = String(status.http.oauthRegisteredClientsCount);
+  oauthClientRegistryInline.textContent = status.http.oauthClientRegistryPath;
+  oauthReconnectInline.textContent = status.http.chatGptReconnectShouldWork ? "should work" : "not ready";
+  oauthRecreateInline.textContent = status.http.chatGptDeleteRecreateConnectorRequired ? "delete/recreate once" : "not required";
+  internalToolsInline.textContent = status.http.internalToolNames.join(", ");
+  exposedToolsInline.textContent = status.http.exposedToolNames.join(", ");
+  renderLastDiscoveryTrace(status.http.lastMcpDiscoveryTrace);
   oauthActiveClientsInline.textContent = String(status.http.oauthActiveClientsCount);
   oauthRefreshSessionsInline.textContent = String(status.http.oauthActiveRefreshSessionsCount);
   oauthExpiredSessionsInline.textContent = String(status.http.oauthExpiredSessionsCount);
@@ -764,7 +1004,14 @@ async function refreshStatus(): Promise<void> {
   cloudflarePublicMcpEndpoint.textContent = status.http.publicEndpoint;
   cloudflarePublicHealthEndpoint.textContent = status.http.publicHealthEndpoint;
   runtimeModeStatus.textContent = status.runtime.mode;
+  runtimeServerRuntimeStatus.textContent = status.runtime.serverRuntime;
+  installDepsButton.hidden = status.runtime.mode !== "development";
+  buildServerButton.hidden = status.runtime.mode !== "development";
   runtimeConfigDirStatus.textContent = status.runtime.configDir;
+  runtimeLogsDirStatus.textContent = status.runtime.logsDir;
+  runtimeGeneratedDirStatus.textContent = status.runtime.generatedDir;
+  runtimeNodeStatus.textContent = status.runtime.nodeExecutable;
+  runtimeServerEntrypointStatus.textContent = status.runtime.serverEntrypoint;
   authTokenStatus.textContent = `${status.http.authTokenConfigured ? "yes" : "no"} (${status.http.authTokenSource})`;
   unauthLocalStatus.textContent = status.http.unauthenticatedLocalHttpAllowed ? "yes - LOCAL TEST ONLY - DO NOT TUNNEL" : "no";
   if (status.http.tunnelReadinessStatus === "READY") {
@@ -782,9 +1029,13 @@ async function refreshStatus(): Promise<void> {
   }
   localHealthStatus.textContent = status.http.localHealthPassing ? "yes" : "no";
   renderWriteAccessStatus(status.writeAccess);
+  renderFigmaStatus(status.figma);
   setStatusClass(serverStatus, status.diagnosticStatus.state);
   setStatusClass(oauthAdminStatus, status.http.oauthAdminPasswordConfigured ? "pass" : "warn");
   setStatusClass(oauthTunnelInline, status.http.tunnelReadinessStatus === "READY" ? "pass" : status.http.tunnelReadinessStatus === "WARN" ? "warn" : "fail");
+  setStatusClass(oauthDcrStatusInline, status.http.oauthDynamicClientRegistrationEnabled ? "pass" : "fail");
+  setStatusClass(oauthReconnectInline, status.http.chatGptReconnectShouldWork ? "pass" : "fail");
+  setStatusClass(oauthRecreateInline, status.http.chatGptDeleteRecreateConnectorRequired ? "warn" : "pass");
   setStatusClass(authTokenStatus, status.http.authTokenConfigured ? "pass" : "warn");
   setStatusClass(unauthLocalStatus, status.http.unauthenticatedLocalHttpAllowed ? "warn" : "pass");
   setStatusClass(publicTunnelStatus, status.http.tunnelReadinessStatus === "READY" ? "pass" : status.http.tunnelReadinessStatus === "WARN" ? "warn" : "fail");
@@ -929,6 +1180,11 @@ bindButton("#runDoctor", async () => {
   appendLog(result.output);
   checklistMeta.textContent = `Completed ${result.completedAt}`;
   renderChecklist(result.checks);
+});
+
+bindButton("#runRuntimePathCheck", async () => {
+  const result = await window.champcity.runRuntimePathCheck();
+  appendLog(result.output);
 });
 
 bindButton("#installDeps", async () => {
@@ -1211,6 +1467,101 @@ bindButton("#clearWriteToken", async () => {
   }
 
   const result = await window.champcity.clearWriteApprovalToken();
+  appendLog(result.output);
+});
+
+bindButton("#saveFigmaToken", async () => {
+  const token = figmaTokenInput.value.trim();
+  if (!token) {
+    appendLog("Figma access token is required.");
+    figmaTokenInput.focus();
+    return;
+  }
+
+  const result = await window.champcity.saveFigmaAccessToken(token);
+  figmaTokenInput.value = "";
+  appendLog(result.output);
+  renderFigmaStatus(result.status);
+  await refreshStatus();
+});
+
+bindButton("#clearFigmaToken", async () => {
+  if (currentStatus?.figma.source === "env") {
+    appendLog("Figma access token is configured via CHAMPCITY_GPT_FIGMA_ACCESS_TOKEN. Change the environment variable outside the app.");
+    return;
+  }
+
+  const confirmed = window.confirm("Clear the locally saved Figma access token?");
+  if (!confirmed) {
+    appendLog("Figma token clear canceled.");
+    return;
+  }
+
+  const result = await window.champcity.clearFigmaAccessToken();
+  appendLog(result.output);
+  renderFigmaStatus(result.status);
+  await refreshStatus();
+});
+
+bindButton("#parseFigmaUrl", async () => {
+  const url = figmaUrlInput.value.trim();
+  if (!url) {
+    appendLog("Enter a Figma URL to parse.");
+    figmaUrlInput.focus();
+    return;
+  }
+
+  const parsed = await window.champcity.parseFigmaUrl(url);
+  figmaParsedNode.textContent = parsed.nodeId ?? "none";
+  appendLog(`Parsed Figma URL: fileKey=${parsed.fileKey}, nodeId=${parsed.nodeId ?? "none"}, urlType=${parsed.urlType}`);
+});
+
+bindButton("#testFigmaConnection", async () => {
+  const value = figmaUrlInput.value.trim();
+  if (!value) {
+    appendLog("Enter a Figma file key or URL before testing.");
+    figmaUrlInput.focus();
+    return;
+  }
+
+  const result = await window.champcity.testFigmaConnection(value);
+  appendLog(result.output);
+});
+
+bindButton("#createFigmaHandoffPackage", async () => {
+  const figmaUrl = figmaUrlInput.value.trim();
+  const targetArea = figmaTargetAreaInput.value.trim();
+  if (!figmaUrl || !targetArea) {
+    appendLog("Figma URL and target UI area are required.");
+    (!figmaUrl ? figmaUrlInput : figmaTargetAreaInput).focus();
+    return;
+  }
+
+  const parsed = await window.champcity.parseFigmaUrl(figmaUrl);
+  const result = await window.champcity.createFigmaHandoffPackage({
+    root: currentStatus?.repoRoot,
+    figmaUrl,
+    targetArea,
+    nodeIds: parsed.nodeId ? [parsed.nodeId] : undefined,
+    relativeOutputDir: figmaOutputDirInput.value.trim() || "design/figma-handoff",
+    overwrite: false
+  });
+  appendLog(result.output);
+  if (result.result?.warnings.length) {
+    appendLog(`Figma handoff warnings: ${result.result.warnings.join("; ")}`);
+  }
+});
+
+bindButton("#createCodexUiHandoffPrompt", async () => {
+  const handoffPath = figmaOutputDirInput.value.trim() || "design/figma-handoff";
+  const targetFile = figmaPromptFileInput.value.trim() || "docs/handoffs/CODEX_UI_REDESIGN_HANDOFF.md";
+  const result = await window.champcity.createCodexUiHandoffPrompt({
+    root: currentStatus?.repoRoot,
+    handoffPath,
+    targetFile,
+    targetArea: figmaTargetAreaInput.value.trim() || undefined,
+    overwrite: false
+  });
   appendLog(result.output);
 });
 

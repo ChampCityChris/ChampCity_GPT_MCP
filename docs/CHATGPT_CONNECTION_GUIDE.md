@@ -1,4 +1,4 @@
-﻿# ChatGPT Connection Guide
+# ChatGPT Connection Guide
 
 ChatGPT.com requires an HTTPS-reachable MCP endpoint. A local STDIO MCP server is not directly usable by ChatGPT.com.
 
@@ -129,7 +129,37 @@ Start read-only first. Set write mode above `off` only after confirming:
 - Audit logging is enabled and reviewed.
 - Read-only tools work through ChatGPT.
 
-In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers read/list/search/git status/git diff, `get_write_access_status`, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, and `run_allowed_script`, but write access still has local write-mode gates. Markdown writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. Scripts require mode `elevated`, an allowlisted command, and the elevated approval token. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
+In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers read/list/search/git status/git diff, `get_write_access_status`, Figma status/URL parsing/file summaries, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, Figma frame export, Figma handoff package generation, Figma Make URL handoff orchestration, Figma Make `.make` file handoff orchestration, Codex UI handoff prompt generation, and `run_allowed_script`, but write access still has local write-mode gates. Markdown/Figma handoff writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. Scripts require mode `elevated`, an allowlisted command, and the elevated approval token. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
+
+## Figma Make Handoff Flow
+
+Configure the upstream official Figma MCP server once. Desktop mode defaults to `http://127.0.0.1:3845/mcp`; remote mode requires an explicitly configured HTTPS endpoint. If the upstream server requires Figma-side authentication or user interaction, complete that setup outside ChatGPT first. After that, the intended ChatGPT workflow is one MCP tool call:
+
+```text
+My Figma Make URL is <url>. Use it to create a handoff package and generate a Codex prompt.
+```
+
+ChatGPT should call `run_figma_make_handoff` with the `/make/` URL. The tool writes `design\figma-handoff\make` and `docs\handoffs\CODEX_FIGMA_MAKE_UI_HANDOFF.md` by default, returns created paths, `resourceFiles`, warnings, and errors, and never receives or returns Figma tokens, cookies, auth headers, or session credentials.
+
+Fallback local route: after exporting a `.make` package from Figma Make and placing it under the repo or another configured allowed root, ChatGPT should call `run_figma_make_file_handoff` with `makeFilePath`. The tool writes `design\figma-handoff\make-file` and `docs\handoffs\CODEX_FIGMA_MAKE_FILE_HANDOFF.md` by default, preserves raw important package files, copies package assets, parses `ai_chat.json` when present, reconstructs source files where deterministic, and reports partial/unresolved reconstruction honestly. This route is direct package parsing, not screenshot capture, browser scraping, network scraping, clipboard automation, or Figma Design conversion.
+
+The Make path must retrieve actual Make resources/files through official Figma MCP resource content. If no resources/files are retrieved, the status is `failed`; metadata-only output, screenshots, browser scraping, network scraping, clipboard automation, and Figma Design conversion are not fallback success paths. `/make/` URLs are not sent through the Design REST parser.
+
+## Figma Design Handoff Flow
+
+Configure a Figma personal access token locally before asking ChatGPT to fetch design metadata. Use the launcher Figma section or create `config\figma.local.json` from `config\figma.example.json`. `CHAMPCITY_GPT_FIGMA_ACCESS_TOKEN` overrides the local file.
+
+Recommended ChatGPT flow:
+
+1. Approve `files.read` first and call `get_figma_status`.
+2. Call `parse_figma_url` with the Figma file/frame URL.
+3. Call `fetch_figma_file_summary` to inspect pages, top-level frames, components, and styles.
+4. Switch local write mode to `docs`, `patch`, or `elevated`, and approve OAuth `files.write`.
+5. Call `create_figma_handoff_package` with the project root, Figma URL, target area, and selected frame/node IDs.
+6. Call `create_codex_ui_handoff_prompt` to write the Codex implementation prompt.
+7. Inspect generated files under `design\figma-handoff` and `docs\handoffs`.
+
+Do not paste the Figma token into ChatGPT. Do not include it in prompts, generated handoffs, docs, or logs. Generated handoff packages may contain private Figma screenshots and metadata; review them before committing or sharing.
 
 Do not remove OAuth, do not expose unauthenticated `/mcp`, and do not enable write mode by default. Use `Revoke All OAuth Sessions` or `Revoke ChatGPT Sessions` in the launcher if a ChatGPT connection should be forced to reauthorize.
 

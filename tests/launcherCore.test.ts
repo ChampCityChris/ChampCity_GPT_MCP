@@ -32,6 +32,7 @@ afterEach(() => {
   delete process.env.CHAMPCITY_GPT_CONFIG_DIR;
   delete process.env.CHAMPCITY_GPT_LOG_DIR;
   delete process.env.CHAMPCITY_GPT_GENERATED_DIR;
+  delete process.env.CHAMPCITY_GPT_SERVER_ENTRYPOINT;
   fs.rmSync(tempRoot, { recursive: true, force: true });
 });
 
@@ -259,6 +260,7 @@ describe("launcher command allowlist", () => {
       isAllowedLauncherCommand("node", [getEntrypointPath(tempRoot), "--transport", "http", "--host", "127.0.0.1", "--port", "3333"], tempRoot),
       true
     );
+    assert.equal(isAllowedLauncherCommand("C:\\Temp\\ChampCity GPT MCP Launcher.exe", [getEntrypointPath(tempRoot)], tempRoot), false);
   });
 
   it("rejects arbitrary commands and extra args", () => {

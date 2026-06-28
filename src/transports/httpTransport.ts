@@ -23,6 +23,8 @@ import {
   writeLastOAuthAuthorizeError
 } from "../oauth.js";
 import { writeAuditLog } from "../security/auditLog.js";
+import { writeMcpDiscoveryTrace, type McpDiscoveryTrace, type McpDiscoveryTraceAuth, type McpDiscoveryTraceResponse } from "../server/discoveryTrace.js";
+import { getToolExposureDiagnostics, isReadToolName, isWriteToolName } from "../server/registerTools.js";
 
 export interface HttpTransportOptions {
   host: string;
@@ -38,6 +40,7 @@ export interface HttpTransportHandle {
   url: string;
   healthUrl: string;
   close: () => Promise<void>;
+  forceClose: () => Promise<void>;
 }
 
 export interface HealthResponse {
@@ -130,16 +133,19 @@ function parseBearerToken(req: IncomingMessage): string | undefined {
   return match ? match[1] : undefined;
 }
 
-interface AuthContext {
+export interface AuthContext {
   kind: "oauth" | "legacy" | "local-unauth";
   scope: string;
+  clientId?: string;
+  subject: string;
 }
 
 function authenticateMcpRequest(req: IncomingMessage, config: AppConfig, options: HttpTransportOptions): AuthContext | undefined {
   if (!options.authToken && options.allowUnauthLocalHttp && isLocalHttpHost(options.host)) {
     return {
       kind: "local-unauth",
-      scope: "files.read files.write"
+      scope: "files.read files.write",
+      subject: "local-unauth"
     };
   }
 
@@ -151,7 +157,8 @@ function authenticateMcpRequest(req: IncomingMessage, config: AppConfig, options
   if (options.authToken && bearerToken === options.authToken) {
     return {
       kind: "legacy",
-      scope: "files.read files.write"
+      scope: "files.read files.write",
+      subject: "legacy-bearer-auth"
     };
   }
 
@@ -162,7 +169,9 @@ function authenticateMcpRequest(req: IncomingMessage, config: AppConfig, options
 
   return {
     kind: "oauth",
-    scope: oauthToken.scope
+    scope: oauthToken.scope,
+    clientId: oauthToken.client_id,
+    subject: oauthToken.client_id
   };
 }
 
@@ -233,8 +242,191 @@ function jsonRpcId(body: unknown): unknown {
   return body && typeof body === "object" && !Array.isArray(body) && "id" in body ? (body as { id?: unknown }).id ?? null : null;
 }
 
-const READ_TOOLS = new Set(["list_project_files", "read_project_file", "search_project_files", "git_status", "git_diff", "get_write_access_status"]);
-const WRITE_TOOLS = new Set(["propose_patch", "apply_approved_patch", "write_markdown_artifact", "run_allowed_script"]);
+function jsonRpcIds(body: unknown): Array<string | number | null> {
+  const requests = Array.isArray(body) ? body : [body];
+  return requests.map((request) => {
+    if (!request || typeof request !== "object" || !("id" in request)) {
+      return null;
+    }
+
+    const id = (request as { id?: unknown }).id;
+    return typeof id === "string" || typeof id === "number" ? id : null;
+  });
+}
+
+function jsonRpcMethodNames(body: unknown): string[] {
+  const requests = Array.isArray(body) ? body : [body];
+  return requests
+    .map((request) => request && typeof request === "object" ? (request as { method?: unknown }).method : undefined)
+    .filter((method): method is string => typeof method === "string");
+}
+
+const DISCOVERY_METHODS = new Set(["initialize", "notifications/initialized", "tools/list", "resources/list", "prompts/list"]);
+
+function isDiscoveryTraceBody(body: unknown): boolean {
+  const methods = jsonRpcMethodNames(body);
+  return methods.some((method) => DISCOVERY_METHODS.has(method));
+}
+
+function stringHeader(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) {
+    return value.join(", ");
+  }
+
+  return value;
+}
+
+function normalizeMcpAcceptHeader(req: IncomingMessage): { originalAccept?: string; normalizedAccept?: string } {
+  const originalAccept = stringHeader(req.headers.accept);
+  const acceptParts = (originalAccept ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const normalizedParts = [...acceptParts];
+
+  if (!acceptParts.some((entry) => entry.toLowerCase().includes("application/json"))) {
+    normalizedParts.push("application/json");
+  }
+
+  if (!acceptParts.some((entry) => entry.toLowerCase().includes("text/event-stream"))) {
+    normalizedParts.push("text/event-stream");
+  }
+
+  const normalizedAccept = normalizedParts.join(", ");
+  req.headers.accept = normalizedAccept;
+  const rawAcceptIndex = req.rawHeaders.findIndex((entry) => entry.toLowerCase() === "accept");
+  if (rawAcceptIndex >= 0 && rawAcceptIndex + 1 < req.rawHeaders.length) {
+    req.rawHeaders[rawAcceptIndex + 1] = normalizedAccept;
+  } else {
+    req.rawHeaders.push("Accept", normalizedAccept);
+  }
+  return {
+    originalAccept,
+    normalizedAccept
+  };
+}
+
+function responseContentType(res: ServerResponse): string {
+  const contentType = res.getHeader("content-type");
+  const recordedContentType = Array.isArray(contentType) ? contentType.join(", ") : typeof contentType === "string" ? contentType : "";
+  return recordedContentType || (res.statusCode === 200 ? "application/json" : "");
+}
+
+function responseKind(statusCode: number, contentType: string): McpDiscoveryTraceResponse["kind"] {
+  if (statusCode === 202) {
+    return "empty-accepted-response";
+  }
+
+  if (statusCode < 200 || statusCode >= 300) {
+    return "wrong-http-status";
+  }
+
+  const normalizedContentType = contentType.toLowerCase();
+  if (normalizedContentType.includes("application/json")) {
+    return "json-rpc-response";
+  }
+
+  if (normalizedContentType.includes("text/event-stream")) {
+    return "sse-event-stream-response";
+  }
+
+  return "wrong-content-type";
+}
+
+function discoveryAuth(auth: AuthContext | undefined): McpDiscoveryTraceAuth {
+  if (!auth) {
+    return {
+      kind: "unauthenticated",
+      subject: "unauthenticated",
+      scope: "",
+      scopes: []
+    };
+  }
+
+  return {
+    kind: auth.kind,
+    subject: auth.subject,
+    clientId: auth.clientId,
+    scope: auth.scope,
+    scopes: auth.scope.split(/\s+/u).filter(Boolean)
+  };
+}
+
+function recordMcpDiscovery(
+  config: AppConfig,
+  req: IncomingMessage,
+  requestPath: string,
+  body: unknown,
+  auth: AuthContext | undefined,
+  response: McpDiscoveryTraceResponse,
+  accept: { originalAccept?: string; normalizedAccept?: string },
+  error?: string
+): void {
+  if (!isDiscoveryTraceBody(body)) {
+    return;
+  }
+
+  if (auth?.kind === "local-unauth") {
+    return;
+  }
+
+  const methods = jsonRpcMethodNames(body);
+  const diagnostics = auth
+    ? getToolExposureDiagnostics(config, { scope: auth.scope, id: jsonRpcId(body) as string | number | null })
+    : getToolExposureDiagnostics(config, { scope: "", id: jsonRpcId(body) as string | number | null });
+  const trace: Omit<McpDiscoveryTrace, "recentDiscoverySequence"> = {
+    timestamp: new Date().toISOString(),
+    processId: process.pid,
+    request: {
+      httpMethod: req.method ?? "UNKNOWN",
+      path: requestPath,
+      publicBaseUrl: getOAuthPublicBaseUrl(),
+      host: stringHeader(req.headers.host),
+      forwardedHost: stringHeader(req.headers["x-forwarded-host"]),
+      forwardedProto: stringHeader(req.headers["x-forwarded-proto"]),
+      cfRay: stringHeader(req.headers["cf-ray"]),
+      userAgent: stringHeader(req.headers["user-agent"]),
+      accept: accept.originalAccept,
+      normalizedAccept: accept.normalizedAccept,
+      contentType: stringHeader(req.headers["content-type"]),
+      mcpSessionIdPresent: Boolean(stringHeader(req.headers["mcp-session-id"]))
+    },
+    jsonRpc: {
+      isBatch: Array.isArray(body),
+      methods,
+      ids: jsonRpcIds(body),
+      hasInitialize: methods.includes("initialize"),
+      hasInitializedNotification: methods.includes("notifications/initialized"),
+      hasToolsList: methods.includes("tools/list"),
+      hasResourcesList: methods.includes("resources/list"),
+      hasPromptsList: methods.includes("prompts/list")
+    },
+    auth: discoveryAuth(auth),
+    tools: {
+      countBeforeFiltering: diagnostics.internalRegisteredToolCount,
+      countAfterMcpSchemaValidation: diagnostics.schemaValidToolCount,
+      countAfterChatGptSchemaSanitization: diagnostics.chatGptCompatibleToolCount,
+      countAfterScopeFiltering: diagnostics.schemaValidExposedToolCount,
+      finalToolCountReturned: diagnostics.exposedToolNames.length,
+      finalToolNamesReturned: diagnostics.exposedToolNames,
+      invalidToolSchemas: diagnostics.invalidToolSchemas,
+      invalidChatGptToolSchemas: diagnostics.invalidChatGptToolSchemas,
+      scopeFilteredTools: diagnostics.scopeFilteredTools,
+      sanitizedToolSchemas: diagnostics.sanitizedToolSchemas
+    },
+    response: {
+      ...response,
+      error: error ?? response.error
+    }
+  };
+
+  try {
+    writeMcpDiscoveryTrace(config, trace);
+  } catch (traceError) {
+    const details = errorDetails(traceError);
+    console.warn(`Failed to write MCP discovery trace: ${details.message}`);
+  }
+}
 
 function mcpScopeDenial(body: unknown, auth: AuthContext): string | undefined {
   const requests = Array.isArray(body) ? body : [body];
@@ -253,11 +445,11 @@ function mcpScopeDenial(body: unknown, auth: AuthContext): string | undefined {
     }
 
     const toolName = rpc.params.name;
-    if (WRITE_TOOLS.has(toolName) && !scopeIncludes(auth.scope, "files.write")) {
+    if (isWriteToolName(toolName) && !scopeIncludes(auth.scope, "files.write")) {
       return `OAuth scope files.write is required to call ${toolName}.`;
     }
 
-    if (READ_TOOLS.has(toolName) && !scopeIncludes(auth.scope, "files.read")) {
+    if (isReadToolName(toolName) && !scopeIncludes(auth.scope, "files.read")) {
       return `OAuth scope files.read is required to call ${toolName}.`;
     }
   }
@@ -623,7 +815,7 @@ async function logHttpTransportError(config: AppConfig, req: IncomingMessage, re
   }
 }
 
-export async function runHttpTransport(createServer: () => Server, config: AppConfig, options: HttpTransportOptions): Promise<HttpTransportHandle> {
+export async function runHttpTransport(createServer: (auth?: AuthContext) => Server, config: AppConfig, options: HttpTransportOptions): Promise<HttpTransportHandle> {
   validateHttpBinding(options);
 
   if (!options.authToken && options.allowUnauthLocalHttp) {
@@ -639,16 +831,21 @@ export async function runHttpTransport(createServer: () => Server, config: AppCo
   const sessions = new Map<string, { server: Server; transport: StreamableHTTPServerTransport }>();
   let actualPort = options.port;
 
-  function createSession(): { server: Server; transport: StreamableHTTPServerTransport } {
-    const sessionServer = createServer();
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
+  function createTransport(sessionIdGenerator: (() => string) | undefined): StreamableHTTPServerTransport {
+    return new StreamableHTTPServerTransport({
+      sessionIdGenerator,
+      enableJsonResponse: true,
       onsessionclosed: async (sessionId) => {
         const session = sessions.get(sessionId);
         sessions.delete(sessionId);
         await session?.server.close();
       }
     });
+  }
+
+  function createSession(auth: AuthContext): { server: Server; transport: StreamableHTTPServerTransport } {
+    const sessionServer = createServer(auth);
+    const transport = createTransport(() => randomUUID());
 
     transport.onclose = () => {
       const sessionId = transport.sessionId;
@@ -666,6 +863,18 @@ export async function runHttpTransport(createServer: () => Server, config: AppCo
       server: sessionServer,
       transport
     };
+  }
+
+  async function handleStatelessCompatRequest(auth: AuthContext, req: IncomingMessage, res: ServerResponse, parsedBody: unknown): Promise<void> {
+    const requestServer = createServer(auth);
+    const transport = createTransport(undefined);
+    try {
+      await requestServer.connect(transport);
+      await transport.handleRequest(req, res, parsedBody);
+    } finally {
+      await transport.close();
+      await requestServer.close();
+    }
   }
 
   const httpServer = http.createServer(async (req, res) => {
@@ -704,15 +913,58 @@ export async function runHttpTransport(createServer: () => Server, config: AppCo
       }
 
       if (requestPath === "/mcp") {
+        let parsedBody: unknown;
+        let accept: { originalAccept?: string; normalizedAccept?: string } = {
+          originalAccept: stringHeader(req.headers.accept),
+          normalizedAccept: stringHeader(req.headers.accept)
+        };
+        if (methodAllowsMcpBody(req.method)) {
+          try {
+            parsedBody = await readRequestBody(req);
+          } catch (error) {
+            const details = errorDetails(error);
+            jsonRpcErrorResponse(res, 400, "Parse error: Invalid JSON");
+            recordMcpDiscovery(
+              config,
+              req,
+              requestPath,
+              undefined,
+              undefined,
+              {
+                statusCode: res.statusCode,
+                contentType: responseContentType(res),
+                kind: responseKind(res.statusCode, responseContentType(res)),
+                transportRoute: "bad-request",
+                error: details.message
+              },
+              accept,
+              details.message
+            );
+            return;
+          }
+        }
+
         const auth = authenticateMcpRequest(req, config, options);
         if (!auth) {
           unauthorized(res);
+          recordMcpDiscovery(
+            config,
+            req,
+            requestPath,
+            parsedBody,
+            undefined,
+            {
+              statusCode: res.statusCode,
+              contentType: responseContentType(res),
+              kind: responseKind(res.statusCode, responseContentType(res)),
+              transportRoute: "auth-denied"
+            },
+            accept
+          );
           return;
         }
 
-        let parsedBody: unknown;
         if (methodAllowsMcpBody(req.method)) {
-          parsedBody = await readRequestBody(req);
           const denial = mcpScopeDenial(parsedBody, auth);
           if (denial) {
             await writeAuditLog(config.auditLogPath, {
@@ -722,9 +974,27 @@ export async function runHttpTransport(createServer: () => Server, config: AppCo
               reason: denial
             });
             forbidden(res, denial);
+            recordMcpDiscovery(
+              config,
+              req,
+              requestPath,
+              parsedBody,
+              auth,
+              {
+                statusCode: res.statusCode,
+                contentType: responseContentType(res),
+                kind: responseKind(res.statusCode, responseContentType(res)),
+                transportRoute: "scope-denied",
+                error: denial
+              },
+              accept,
+              denial
+            );
             return;
           }
         }
+
+        accept = normalizeMcpAcceptHeader(req);
 
         const sessionId = req.headers["mcp-session-id"];
         const normalizedSessionId = Array.isArray(sessionId) ? sessionId[0] : sessionId;
@@ -732,21 +1002,82 @@ export async function runHttpTransport(createServer: () => Server, config: AppCo
 
         if (existingSession) {
           await existingSession.transport.handleRequest(req, res, parsedBody);
+          recordMcpDiscovery(
+            config,
+            req,
+            requestPath,
+            parsedBody,
+            auth,
+            {
+              statusCode: res.statusCode,
+              contentType: responseContentType(res),
+              kind: responseKind(res.statusCode, responseContentType(res)),
+              transportRoute: "stateful-session"
+            },
+            accept
+          );
           return;
         }
 
         if (!normalizedSessionId && includesInitializeRequest(parsedBody)) {
-          const session = createSession();
+          const session = createSession(auth);
           await session.server.connect(session.transport);
           await session.transport.handleRequest(req, res, parsedBody);
           const initializedSessionId = session.transport.sessionId;
           if (initializedSessionId) {
             sessions.set(initializedSessionId, session);
           }
+          recordMcpDiscovery(
+            config,
+            req,
+            requestPath,
+            parsedBody,
+            auth,
+            {
+              statusCode: res.statusCode,
+              contentType: responseContentType(res),
+              kind: responseKind(res.statusCode, responseContentType(res)),
+              transportRoute: "stateful-session"
+            },
+            accept
+          );
           return;
         }
 
-        jsonRpcErrorResponse(res, normalizedSessionId ? 404 : 400, normalizedSessionId ? "Session not found" : "Bad Request: No valid session ID provided");
+        if (!methodAllowsMcpBody(req.method)) {
+          jsonRpcErrorResponse(res, normalizedSessionId ? 404 : 400, normalizedSessionId ? "Session not found" : "Bad Request: No valid session ID provided");
+          recordMcpDiscovery(
+            config,
+            req,
+            requestPath,
+            parsedBody,
+            auth,
+            {
+              statusCode: res.statusCode,
+              contentType: responseContentType(res),
+              kind: responseKind(res.statusCode, responseContentType(res)),
+              transportRoute: "bad-request"
+            },
+            accept
+          );
+          return;
+        }
+
+        await handleStatelessCompatRequest(auth, req, res, parsedBody);
+        recordMcpDiscovery(
+          config,
+          req,
+          requestPath,
+          parsedBody,
+          auth,
+          {
+            statusCode: res.statusCode,
+            contentType: responseContentType(res),
+            kind: responseKind(res.statusCode, responseContentType(res)),
+            transportRoute: "stateless-compat"
+          },
+          accept
+        );
         return;
       }
 
@@ -768,19 +1099,49 @@ export async function runHttpTransport(createServer: () => Server, config: AppCo
   const address = httpServer.address();
   actualPort = address && typeof address === "object" ? address.port : options.port;
   const url = `http://${options.host}:${actualPort}/mcp`;
+  let closePromise: Promise<void> | null = null;
+
+  async function closeSessions(): Promise<void> {
+    await Promise.all([...sessions.values()].map(async (session) => {
+      await session.transport.close();
+      await session.server.close();
+    }));
+    sessions.clear();
+  }
+
+  function closeHttpServer(force: boolean): Promise<void> {
+    if (force) {
+      httpServer.closeAllConnections();
+    }
+
+    if (!closePromise) {
+      closePromise = new Promise<void>((resolve, reject) => {
+        httpServer.close((error) => {
+          if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+
+    return closePromise;
+  }
+
   return {
     server: httpServer,
     url,
     healthUrl: `http://${options.host}:${actualPort}/health`,
     close: async () => {
-      await Promise.all([...sessions.values()].map(async (session) => {
-        await session.transport.close();
-        await session.server.close();
-      }));
-      sessions.clear();
-      await new Promise<void>((resolve, reject) => {
-        httpServer.close((error) => (error ? reject(error) : resolve()));
+      await closeSessions();
+      await closeHttpServer(false);
+    },
+    forceClose: async () => {
+      await closeSessions().catch(() => {
+        sessions.clear();
       });
+      await closeHttpServer(true);
     }
   };
 }

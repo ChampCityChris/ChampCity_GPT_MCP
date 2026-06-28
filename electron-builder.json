@@ -27,6 +27,10 @@
     "!**/*.tsbuildinfo"
   ],
   "asar": true,
+  "asarUnpack": [
+    "dist/src/**/*",
+    "node_modules/**/*"
+  ],
   "win": {
     "target": [
       {

@@ -2,47 +2,67 @@ import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 
-import { getRuntimeServerEntrypoint, hasPortableDataDir, type RuntimePathInfo } from "../src/runtimePaths.js";
+import { hasPortableDataDir, resolveRuntimePathInfo, type RuntimePathInfo } from "../src/runtimePaths.js";
 
 export function resolveElectronRuntimePaths(resourceRoot: string): RuntimePathInfo {
   const exeDir = path.dirname(app.getPath("exe"));
-  const portableDataDir = path.join(exeDir, "data");
 
   if (!app.isPackaged) {
-    return {
+    return resolveRuntimePathInfo({
       mode: "development",
-      resourceRoot,
-      configDir: path.join(resourceRoot, "config"),
-      logsDir: path.join(resourceRoot, "logs"),
-      generatedDir: path.join(resourceRoot, "generated"),
-      serverEntrypoint: getRuntimeServerEntrypoint(resourceRoot)
-    };
+      appRoot: resourceRoot,
+      userDataDir: app.getPath("userData"),
+      useUserDataConfigInDevelopment: true
+    });
   }
 
   if (hasPortableDataDir(exeDir)) {
-    return {
+    return resolveRuntimePathInfo({
       mode: "portable",
-      resourceRoot,
-      configDir: path.join(portableDataDir, "config"),
-      logsDir: path.join(portableDataDir, "logs"),
-      generatedDir: path.join(portableDataDir, "generated"),
-      serverEntrypoint: getRuntimeServerEntrypoint(resourceRoot)
-    };
+      appRoot: app.getAppPath(),
+      resourcesPath: process.resourcesPath,
+      exeDir
+    });
   }
 
-  const userData = app.getPath("userData");
-  return {
+  return resolveRuntimePathInfo({
     mode: "installed",
-    resourceRoot,
-    configDir: path.join(userData, "config"),
-    logsDir: path.join(userData, "logs"),
-    generatedDir: path.join(userData, "generated"),
-    serverEntrypoint: getRuntimeServerEntrypoint(resourceRoot)
-  };
+    appRoot: app.getAppPath(),
+    resourcesPath: process.resourcesPath,
+    exeDir,
+    userDataDir: app.getPath("userData")
+  });
 }
 
 export function ensureRuntimeDirectories(paths: RuntimePathInfo): void {
   fs.mkdirSync(paths.configDir, { recursive: true });
   fs.mkdirSync(paths.logsDir, { recursive: true });
   fs.mkdirSync(paths.generatedDir, { recursive: true });
+}
+
+export function migrateLegacyRuntimeConfig(sourceConfigDir: string, targetConfigDir: string): string[] {
+  const source = path.resolve(sourceConfigDir);
+  const target = path.resolve(targetConfigDir);
+  if (source.toLowerCase() === target.toLowerCase() || !fs.existsSync(source)) {
+    return [];
+  }
+
+  fs.mkdirSync(target, { recursive: true });
+  const migrated: string[] = [];
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".local.json")) {
+      continue;
+    }
+
+    const sourcePath = path.join(source, entry.name);
+    const targetPath = path.join(target, entry.name);
+    if (fs.existsSync(targetPath)) {
+      continue;
+    }
+
+    fs.copyFileSync(sourcePath, targetPath);
+    migrated.push(targetPath);
+  }
+
+  return migrated;
 }

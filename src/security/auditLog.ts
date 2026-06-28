@@ -4,6 +4,10 @@ import path from "node:path";
 export interface AuditLogEntry {
   timestamp?: string;
   toolName: string;
+  action?: string;
+  root?: string;
+  branch?: string;
+  fileCount?: number;
   requestedPath?: string;
   resolvedPath?: string;
   command?: string;

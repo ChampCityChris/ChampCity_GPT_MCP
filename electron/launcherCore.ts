@@ -8,6 +8,8 @@ import {
   clearExpiredOAuthTokens,
   formatOAuthDuration,
   getOAuthAccessTokenTtlSeconds,
+  getOAuthClientsPath,
+  getOAuthEndpointPaths,
   getOAuthPublicBaseUrl,
   getOAuthPublicMcpUrl,
   getOAuthRefreshTokenTtlSeconds,
@@ -30,6 +32,15 @@ import {
   type WriteModeSource
 } from "../src/writeAccess.js";
 import { clearPendingPatchProposals, getPendingPatchProposalCount } from "../src/pendingPatches.js";
+import {
+  clearLocalFigmaAccessToken,
+  getFigmaConfigPath,
+  getFigmaStatus,
+  saveLocalFigmaAccessToken,
+  type FigmaConfigSource
+} from "../src/figma/figmaConfig.js";
+import { getFigmaMcpStatus, type FigmaMcpStatus } from "../src/figma/figmaMcpConfig.js";
+import { parseFigmaUrl } from "../src/figma/figmaUrl.js";
 import { getRuntimeConfigFilePath, getRuntimeGeneratedDir, getRuntimeLogDir, getRuntimeServerEntrypoint } from "../src/runtimePaths.js";
 
 export const DEFAULT_REPO_ROOT = path.resolve(process.cwd());
@@ -112,6 +123,14 @@ export interface LauncherOAuthStatus {
   refreshTokenTtlSeconds: number;
   accessTokenTtlLabel: string;
   refreshTokenTtlLabel: string;
+  clientRegistryPath: string;
+  tokenRegistryPath: string;
+  adminConfigPath: string;
+  authorizeErrorPath: string;
+  authorizationServerMetadataPath: string;
+  protectedResourceMetadataPath: string;
+  registrationEndpointPath: string;
+  dynamicClientRegistrationEnabled: boolean;
   lastAuthorizeError?: {
     occurredAt: string;
     requestPath: string;
@@ -144,6 +163,14 @@ export interface LauncherWriteAccessStatus {
   publicWriteReadiness: "READY" | "NOT_READY";
   publicWriteReadinessReason: string;
   configPath: string;
+}
+
+export interface LauncherFigmaStatus {
+  configured: boolean;
+  source: FigmaConfigSource;
+  configPath: string;
+  makeHandoffToolAvailable: boolean;
+  figmaMcp: FigmaMcpStatus;
 }
 
 export function repoPath(...parts: string[]): string {
@@ -192,6 +219,10 @@ export function getPublicOAuthProtectedResourceMetadata(): string {
 
 export function getPublicHealthEndpoint(): string {
   return `${getPublicOAuthIssuer()}/health`;
+}
+
+export function getPublicOAuthRegistrationEndpoint(): string {
+  return getOAuthEndpointPaths(getPublicOAuthIssuer()).registrationEndpoint;
 }
 
 export function readSetupState(repoRoot: string): SetupState {
@@ -383,6 +414,29 @@ export function getLauncherWriteAccessStatus(repoRoot: string, env: NodeJS.Proce
   };
 }
 
+export function getLauncherFigmaStatus(repoRoot: string, env: NodeJS.ProcessEnv = process.env): LauncherFigmaStatus {
+  return {
+    ...getFigmaStatus(repoRoot, env),
+    configPath: getFigmaConfigPath(repoRoot, env),
+    makeHandoffToolAvailable: true,
+    figmaMcp: getFigmaMcpStatus(repoRoot, env)
+  };
+}
+
+export function saveLauncherFigmaAccessToken(repoRoot: string, token: string, env: NodeJS.ProcessEnv = process.env): LauncherFigmaStatus {
+  saveLocalFigmaAccessToken(repoRoot, token, env);
+  return getLauncherFigmaStatus(repoRoot, env);
+}
+
+export function clearLauncherFigmaAccessToken(repoRoot: string, env: NodeJS.ProcessEnv = process.env): LauncherFigmaStatus {
+  clearLocalFigmaAccessToken(repoRoot, env);
+  return getLauncherFigmaStatus(repoRoot, env);
+}
+
+export function parseLauncherFigmaUrl(url: string) {
+  return parseFigmaUrl(url);
+}
+
 export function setLauncherHttpWriteToolsEnabled(repoRoot: string, enabled: boolean): LauncherWriteAccessStatus {
   setHttpWriteToolsEnabled(repoRoot, enabled);
   return getLauncherWriteAccessStatus(repoRoot);
@@ -457,6 +511,7 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
   const publicMcpEndpoint = getPublicMcpEndpoint();
   const publicAuthorizationMetadata = getPublicOAuthAuthorizationServerMetadata();
   const publicProtectedResourceMetadata = getPublicOAuthProtectedResourceMetadata();
+  const publicRegistrationEndpoint = getPublicOAuthRegistrationEndpoint();
   const publicHealthEndpoint = getPublicHealthEndpoint();
 
   return `# ChampCity GPT ChatGPT Setup Notes
@@ -470,6 +525,7 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 - CHAMPCITY_GPT_PUBLIC_BASE_URL for ChatGPT mode: ${publicOAuthIssuer}
 - OAuth authorization server metadata: ${publicAuthorizationMetadata}
 - OAuth protected resource metadata: ${publicProtectedResourceMetadata}
+- OAuth Dynamic Client Registration endpoint: ${publicRegistrationEndpoint}
 - Intended public health endpoint: ${publicHealthEndpoint}
 
 ## Authentication
@@ -479,6 +535,7 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 - Dynamic client registration endpoint: ${publicOAuthIssuer}/oauth/register
 - Authorization endpoint: ${publicOAuthIssuer}/oauth/authorize
 - Token endpoint: ${publicOAuthIssuer}/oauth/token
+- OAuth client registry path: ${getOAuthClientsPath(repoRoot)}
 - Access token TTL: ${formatOAuthDuration(getOAuthAccessTokenTtlSeconds(env))} (${getOAuthAccessTokenTtlSeconds(env)} seconds)
 - Refresh token TTL: ${formatOAuthDuration(getOAuthRefreshTokenTtlSeconds(env))} (${getOAuthRefreshTokenTtlSeconds(env)} seconds)
 - Refresh tokens keep ChatGPT connected between short-lived access-token renewals and are stored only as local hashes.
@@ -493,6 +550,9 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 
 - OAuth admin password configured: ${oauthStatus.adminPasswordConfigured ? "yes" : "no"}
 - Registered OAuth clients: ${oauthStatus.registeredClientsCount}
+- Dynamic Client Registration advertised: ${oauthStatus.dynamicClientRegistrationEnabled ? "yes" : "no"}
+- Registration endpoint path: ${oauthStatus.registrationEndpointPath}
+- OAuth client registry path: ${oauthStatus.clientRegistryPath}
 - Active OAuth tokens: ${oauthStatus.activeTokensCount}
 - Active OAuth clients: ${oauthStatus.activeOAuthClientsCount}
 - Active refresh sessions: ${oauthStatus.activeRefreshSessionsCount}
@@ -520,11 +580,15 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 - Write mode defaults to off: yes
 - Audit log: ${localConfig.auditLog}
 - Require git root: ${localConfig.requireGitRoot ? "yes" : "no"}
+- Figma token configured: ${getLauncherFigmaStatus(repoRoot, env).configured ? "yes" : "no"} (${getLauncherFigmaStatus(repoRoot, env).source})
+- Figma token value: not displayed or written by the launcher.
+- Figma MCP endpoint: ${getLauncherFigmaStatus(repoRoot, env).figmaMcp.endpoint}
+- Figma MCP mode: ${getLauncherFigmaStatus(repoRoot, env).figmaMcp.mode}
 
 ## Scope Mapping
 
 - files.read: list_project_files, read_project_file, search_project_files, git_status, git_diff, get_write_access_status, and tools/list.
-- files.write: propose_patch, write_markdown_artifact, apply_approved_patch, and run_allowed_script.
+- files.write: propose_patch, write_markdown_artifact, apply_approved_patch, fetch_figma_frame_image, create_figma_handoff_package, create_codex_ui_handoff_prompt, run_figma_make_handoff, run_figma_make_file_handoff, and run_allowed_script.
 - write_markdown_artifact requires writeMode docs, patch, or elevated.
 - apply_approved_patch requires writeMode patch or elevated and a matching pending proposal unless elevated approval is supplied in elevated mode.
 - run_allowed_script requires writeMode elevated, an allowlisted command, and the elevated approval token.
@@ -623,10 +687,6 @@ export function isAllowedLauncherCommand(command: string, args: readonly string[
   }
 
   if (normalizedCommand === "node") {
-    return isAllowedNodeEntrypointArgs(normalizedArgs, repoRoot);
-  }
-
-  if (path.resolve(command) === path.resolve(process.execPath)) {
     return isAllowedNodeEntrypointArgs(normalizedArgs, repoRoot);
   }
 

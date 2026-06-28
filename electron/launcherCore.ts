@@ -14,10 +14,14 @@ import {
   getOAuthPublicMcpUrl,
   getOAuthRefreshTokenTtlSeconds,
   getOAuthStatus,
+  readOAuthClientStore,
   resetOAuthClients,
   revokeChatGptOAuthTokens,
   revokeAllOAuthTokens,
-  saveOAuthAdminPassword
+  saveOAuthAdminPassword,
+  scopeIncludes,
+  type OAuthAuthorizeErrorDiagnostic,
+  type OAuthClient
 } from "../src/oauth.js";
 import {
   clearWriteApprovalToken,
@@ -32,6 +36,7 @@ import {
   type WriteModeSource
 } from "../src/writeAccess.js";
 import { clearPendingPatchProposals, getPendingPatchProposalCount } from "../src/pendingPatches.js";
+import { type McpDiscoveryTrace } from "../src/server/discoveryTrace.js";
 import {
   clearLocalFigmaAccessToken,
   getFigmaConfigPath,
@@ -113,6 +118,9 @@ export interface LauncherHttpAuthStatus {
 export interface LauncherOAuthStatus {
   adminPasswordConfigured: boolean;
   registeredClientsCount: number;
+  registeredChatGptClientsCount: number;
+  registeredDoctorProbeClientsCount: number;
+  registeredOtherClientsCount: number;
   activeOAuthClientsCount: number;
   activeTokensCount: number;
   activeWriteTokensCount: number;
@@ -131,21 +139,55 @@ export interface LauncherOAuthStatus {
   protectedResourceMetadataPath: string;
   registrationEndpointPath: string;
   dynamicClientRegistrationEnabled: boolean;
-  lastAuthorizeError?: {
-    occurredAt: string;
-    requestPath: string;
-    error: string;
-    requiredFieldsPresent: {
-      response_type: boolean;
-      client_id: boolean;
-      redirect_uri: boolean;
-      code_challenge: boolean;
-      code_challenge_method: boolean;
-    };
-    codeChallengeMethod?: string;
-    clientIdPrefix?: string;
-    redirectUriLocation?: string;
-  };
+  lastAuthorizeError?: LauncherAuthorizeErrorDiagnostic;
+}
+
+export interface LauncherAuthorizeErrorDiagnostic extends OAuthAuthorizeErrorDiagnostic {
+  stale: boolean;
+  staleReason?: string;
+  newerEvidenceAt?: string;
+  displayLabel: string;
+  displaySeverity: "warn" | "info";
+}
+
+export type LauncherReadinessState = "ready" | "blocked" | "unknown";
+export type LauncherReadinessSeverity = "pass" | "warn" | "fail" | "info" | "unknown";
+export type LauncherOAuthWriteReadiness =
+  | "granted_current_request"
+  | "last_observed_granted"
+  | "not_granted"
+  | "unknown"
+  | "stale_error"
+  | "no_active_stored_token";
+
+export type PublicReachabilityStatus = "reachable" | "unreachable" | "unknown" | "degraded";
+export type TunnelRuntimeStatus = "active" | "inactive" | "unknown";
+export type TunnelPersistenceStatus = "confirmed" | "not_confirmed" | "unknown" | "not_configured";
+export type OverallTunnelReadiness =
+  | "ready"
+  | "current_ready_persistence_unconfirmed"
+  | "blocked_down"
+  | "unknown";
+export type LegacyTunnelReadinessStatus = "READY" | "NOT_READY" | "WARN";
+
+export interface LauncherDoctorCheckEvidence {
+  name: string;
+  status: "PASS" | "WARN" | "FAIL";
+  detail: string;
+}
+
+export interface PublicTunnelDiagnostics {
+  publicReachability: PublicReachabilityStatus;
+  publicReachabilityDetail: string;
+  publicReachabilityEvidence: string[];
+  tunnelRuntime: TunnelRuntimeStatus;
+  tunnelRuntimeDetail: string;
+  tunnelPersistence: TunnelPersistenceStatus;
+  tunnelPersistenceDetail: string;
+  overallTunnelReadiness: OverallTunnelReadiness;
+  overallTunnelReadinessLabel: string;
+  overallTunnelReadinessDetail: string;
+  legacyTunnelReadinessStatus: LegacyTunnelReadinessStatus;
 }
 
 export interface LauncherWriteAccessStatus {
@@ -159,8 +201,19 @@ export interface LauncherWriteAccessStatus {
   legacyApprovalTokenCreatedAt?: string;
   legacyApprovalTokenUpdatedAt?: string;
   pendingPatchProposalCount: number;
-  oauthFilesWriteGranted: boolean;
-  publicWriteReadiness: "READY" | "NOT_READY";
+  oauthFilesWriteGranted: boolean | "unknown";
+  localWriteReadiness: LauncherReadinessState;
+  localWriteReadinessReason: string;
+  localWriteReadinessSource: string;
+  oauthWriteReadiness: LauncherOAuthWriteReadiness;
+  oauthWriteReadinessLabel: string;
+  oauthWriteReadinessDetail: string;
+  oauthWriteReadinessSeverity: LauncherReadinessSeverity;
+  oauthWriteEvidenceAt?: string;
+  oauthWriteEvidenceSource: string;
+  overallWriteReadiness: LauncherReadinessState;
+  overallWriteReadinessReason: string;
+  publicWriteReadiness: "READY" | "NOT_READY" | "UNKNOWN";
   publicWriteReadinessReason: string;
   configPath: string;
 }
@@ -382,34 +435,409 @@ export function isPublicTunnelReady(repoRoot: string, env: NodeJS.ProcessEnv = p
   return getLauncherOAuthStatus(repoRoot).adminPasswordConfigured && !isUnauthenticatedLocalHttpAllowed(env) && !isHttpWriteToolsEnabled(repoRoot, env);
 }
 
-export function getLauncherOAuthStatus(repoRoot: string): LauncherOAuthStatus {
-  const status = getOAuthStatus(repoRoot);
+const PUBLIC_REACHABILITY_CHECK_NAMES = new Set([
+  "Public health status",
+  "Public OAuth metadata status",
+  "Public protected resource metadata status",
+  "Public Dynamic Client Registration status"
+]);
+
+function isDefaultExamplePublicBaseUrl(publicBaseUrl: string): boolean {
+  return /(^|\.)mcp\.example\.com$/iu.test(new URL(publicBaseUrl).hostname);
+}
+
+function publicCheckSummary(check: LauncherDoctorCheckEvidence): string {
+  return `${check.name}=${check.status}`;
+}
+
+function isSuccessfulMcpReachabilityTrace(trace: McpDiscoveryTrace | null | undefined): trace is McpDiscoveryTrace {
+  return Boolean(
+    trace &&
+    trace.request.path === "/mcp" &&
+    trace.auth.kind === "oauth" &&
+    trace.response.statusCode >= 200 &&
+    trace.response.statusCode < 300 &&
+    trace.response.kind === "json-rpc-response"
+  );
+}
+
+export function getPublicTunnelDiagnostics(options: {
+  publicBaseUrl: string;
+  localHealthPassing: boolean;
+  lastDiscoveryTrace?: McpDiscoveryTrace | null;
+  doctorChecks?: LauncherDoctorCheckEvidence[] | null;
+  persistenceConfirmed?: boolean;
+}): PublicTunnelDiagnostics {
+  const publicChecks = (options.doctorChecks ?? []).filter((check) => PUBLIC_REACHABILITY_CHECK_NAMES.has(check.name));
+  const passingChecks = publicChecks.filter((check) => check.status === "PASS");
+  const failingChecks = publicChecks.filter((check) => check.status === "FAIL");
+  const successfulDiscovery = isSuccessfulMcpReachabilityTrace(options.lastDiscoveryTrace);
+  const successfulDiscoveryTrace = successfulDiscovery ? options.lastDiscoveryTrace : null;
+  const evidence = [
+    ...publicChecks.map(publicCheckSummary),
+    successfulDiscoveryTrace
+      ? `Last ChatGPT MCP discovery=PASS HTTP ${successfulDiscoveryTrace.response.statusCode} ${successfulDiscoveryTrace.response.kind}`
+      : undefined,
+    !options.localHealthPassing ? "Local health=FAIL" : "Local health=PASS"
+  ].filter((value): value is string => Boolean(value));
+
+  let publicReachability: PublicReachabilityStatus = "unknown";
+  if (!options.localHealthPassing && passingChecks.length === 0 && !successfulDiscovery) {
+    publicReachability = "unreachable";
+  } else if (successfulDiscovery || passingChecks.some((check) => check.name === "Public Dynamic Client Registration status") || passingChecks.length >= 2) {
+    publicReachability = failingChecks.length > 0 ? "degraded" : "reachable";
+  } else if (passingChecks.length > 0 && failingChecks.length > 0) {
+    publicReachability = "degraded";
+  } else if (failingChecks.length > 0) {
+    publicReachability = "unreachable";
+  }
+
+  const publicReachabilityDetail = publicReachability === "reachable"
+    ? "Public endpoint evidence is currently passing."
+    : publicReachability === "degraded"
+    ? "Some public endpoint evidence is passing, but at least one public check failed."
+    : publicReachability === "unreachable"
+    ? "Current evidence indicates the public endpoint is unreachable."
+    : "No current public endpoint probe or successful ChatGPT MCP discovery is available.";
+
+  const tunnelRuntime: TunnelRuntimeStatus = publicReachability === "reachable" || publicReachability === "degraded"
+    ? "active"
+    : publicReachability === "unreachable"
+    ? "inactive"
+    : "unknown";
+  const tunnelRuntimeDetail = tunnelRuntime === "active"
+    ? "Successful public endpoint evidence is indirect proof that a tunnel path is active."
+    : tunnelRuntime === "inactive"
+    ? "Public endpoint evidence is failing, so the tunnel path is not currently serving the launcher."
+    : "No cloudflared process or successful public endpoint evidence confirms runtime state.";
+
+  const tunnelPersistence: TunnelPersistenceStatus = options.persistenceConfirmed
+    ? "confirmed"
+    : isDefaultExamplePublicBaseUrl(options.publicBaseUrl)
+    ? "not_configured"
+    : "not_confirmed";
+  const tunnelPersistenceDetail = tunnelPersistence === "confirmed"
+    ? "Cloudflare tunnel auto-start persistence is confirmed."
+    : tunnelPersistence === "not_configured"
+    ? "The public base URL is still the example hostname, so production tunnel persistence is not configured."
+    : "The launcher has not confirmed that cloudflared is installed as an auto-starting service after reboot.";
+
+  const overallTunnelReadiness: OverallTunnelReadiness = publicReachability === "unreachable"
+    ? "blocked_down"
+    : publicReachability === "reachable" && tunnelPersistence === "confirmed"
+    ? "ready"
+    : publicReachability === "reachable"
+    ? "current_ready_persistence_unconfirmed"
+    : "unknown";
+  const legacyTunnelReadinessStatus: LegacyTunnelReadinessStatus = overallTunnelReadiness === "ready"
+    ? "READY"
+    : overallTunnelReadiness === "blocked_down"
+    ? "NOT_READY"
+    : "WARN";
+
+  const overallTunnelReadinessLabel = overallTunnelReadiness === "ready"
+    ? "ready"
+    : overallTunnelReadiness === "current_ready_persistence_unconfirmed"
+    ? "current endpoint reachable; auto-start unconfirmed"
+    : overallTunnelReadiness === "blocked_down"
+    ? "public endpoint unreachable"
+    : "unknown";
+  const overallTunnelReadinessDetail = overallTunnelReadiness === "current_ready_persistence_unconfirmed"
+    ? "The public endpoint is currently reachable, but the launcher has not confirmed that the tunnel will restart automatically after reboot."
+    : overallTunnelReadiness === "blocked_down"
+    ? "The current public endpoint evidence is failing; treat this as a current outage until public checks pass."
+    : overallTunnelReadiness === "ready"
+    ? "The public endpoint is reachable and tunnel persistence is confirmed."
+    : "The launcher does not yet have enough evidence to classify public tunnel readiness.";
+
   return {
-    ...status,
-    accessTokenTtlLabel: formatOAuthDuration(status.accessTokenTtlSeconds),
-    refreshTokenTtlLabel: formatOAuthDuration(status.refreshTokenTtlSeconds)
+    publicReachability,
+    publicReachabilityDetail,
+    publicReachabilityEvidence: evidence,
+    tunnelRuntime,
+    tunnelRuntimeDetail,
+    tunnelPersistence,
+    tunnelPersistenceDetail,
+    overallTunnelReadiness,
+    overallTunnelReadinessLabel,
+    overallTunnelReadinessDetail,
+    legacyTunnelReadinessStatus
   };
 }
 
-export function getLauncherWriteAccessStatus(repoRoot: string, env: NodeJS.ProcessEnv = process.env): LauncherWriteAccessStatus {
-  const writeStatus = getWriteAccessStatus(repoRoot, env);
-  const oauthStatus = getLauncherOAuthStatus(repoRoot);
-  const oauthFilesWriteGranted = oauthStatus.activeWriteTokensCount > 0;
-  let publicWriteReadinessReason = "READY";
-  if (!writeStatus.docsWritesAllowed && !writeStatus.patchWritesAllowed && !writeStatus.elevatedOperationsAllowed) {
-    publicWriteReadinessReason = "write mode off";
-  } else if (writeStatus.elevatedOperationsAllowed && !writeStatus.legacyApprovalTokenConfigured) {
-    publicWriteReadinessReason = "elevated approval token not configured";
-  } else if (!oauthFilesWriteGranted) {
-    publicWriteReadinessReason = "OAuth files.write not granted or unknown";
+export function getPackagedDeveloperCliProbeCheck(): LauncherDoctorCheckEvidence {
+  return {
+    name: "Developer CLI entrypoint probe",
+    status: "PASS",
+    detail: "Skipped in packaged runtime as expected. The packaged app uses the in-process server path; CLI probing is for build-from-source diagnostics."
+  };
+}
+
+function isDoctorProbeOAuthClient(client: OAuthClient): boolean {
+  const haystack = [
+    client.client_name,
+    client.client_uri,
+    ...client.redirect_uris
+  ].filter((value): value is string => typeof value === "string").join(" ").toLowerCase();
+
+  return haystack.includes("champcity doctor dcr probe") || haystack.includes("champcity-doctor");
+}
+
+function isChatGptOAuthClient(client: OAuthClient): boolean {
+  if (isDoctorProbeOAuthClient(client)) {
+    return false;
   }
+
+  const haystack = [
+    client.client_name,
+    client.client_uri,
+    ...client.redirect_uris
+  ].filter((value): value is string => typeof value === "string").join(" ").toLowerCase();
+
+  return haystack.includes("chatgpt") || haystack.includes("chat.openai.com") || haystack.includes("openai.com");
+}
+
+function parsedTime(value: string | undefined): number {
+  if (!value) {
+    return Number.NaN;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function isSuccessfulOAuthDiscovery(trace: McpDiscoveryTrace | null | undefined): trace is McpDiscoveryTrace {
+  return Boolean(
+    trace &&
+    trace.auth.kind === "oauth" &&
+    trace.response.statusCode >= 200 &&
+    trace.response.statusCode < 300
+  );
+}
+
+function hasFilesWriteScope(trace: McpDiscoveryTrace | null | undefined): boolean {
+  return Boolean(trace && scopeIncludes(trace.auth.scope, "files.write"));
+}
+
+function isFilesWriteDeniedTrace(trace: McpDiscoveryTrace | null | undefined): boolean {
+  if (!trace || trace.auth.kind !== "oauth" || scopeIncludes(trace.auth.scope, "files.write")) {
+    return false;
+  }
+
+  return (
+    trace.response.transportRoute === "scope-denied" &&
+    /files\.write/u.test(trace.response.error ?? "")
+  ) || trace.tools.scopeFilteredTools.some((tool) => /files\.write/u.test(tool.reason));
+}
+
+function decorateAuthorizeError(
+  error: OAuthAuthorizeErrorDiagnostic,
+  clients: OAuthClient[],
+  lastDiscoveryTrace?: McpDiscoveryTrace | null
+): LauncherAuthorizeErrorDiagnostic {
+  const errorAt = parsedTime(error.occurredAt);
+  const newerClient = clients
+    .filter((client) => parsedTime(client.created_at) > errorAt)
+    .sort((a, b) => parsedTime(b.created_at) - parsedTime(a.created_at))[0];
+  const newerDiscoveryAt = isSuccessfulOAuthDiscovery(lastDiscoveryTrace) && parsedTime(lastDiscoveryTrace.timestamp) > errorAt
+    ? lastDiscoveryTrace.timestamp
+    : undefined;
+  const newerEvidenceAt = newerDiscoveryAt ?? newerClient?.created_at;
+  const staleReason = newerDiscoveryAt
+    ? "newer authenticated MCP discovery succeeded"
+    : newerClient
+    ? `${isDoctorProbeOAuthClient(newerClient) ? "newer doctor DCR probe" : "newer OAuth client registration"} succeeded`
+    : undefined;
+  const stale = Boolean(newerEvidenceAt);
+
+  return {
+    ...error,
+    stale,
+    staleReason,
+    newerEvidenceAt,
+    displayLabel: stale
+      ? `stale: ${error.error} at ${error.occurredAt}; ${staleReason}`
+      : `${error.error} at ${error.occurredAt}`,
+    displaySeverity: stale ? "info" : "warn"
+  };
+}
+
+export function getLauncherOAuthStatus(repoRoot: string, lastDiscoveryTrace?: McpDiscoveryTrace | null): LauncherOAuthStatus {
+  const status = getOAuthStatus(repoRoot);
+  const clients = readOAuthClientStore(repoRoot).clients;
+  const registeredDoctorProbeClientsCount = clients.filter(isDoctorProbeOAuthClient).length;
+  const registeredChatGptClientsCount = clients.filter(isChatGptOAuthClient).length;
+  const registeredOtherClientsCount = Math.max(0, clients.length - registeredDoctorProbeClientsCount - registeredChatGptClientsCount);
+
+  return {
+    ...status,
+    registeredChatGptClientsCount,
+    registeredDoctorProbeClientsCount,
+    registeredOtherClientsCount,
+    accessTokenTtlLabel: formatOAuthDuration(status.accessTokenTtlSeconds),
+    refreshTokenTtlLabel: formatOAuthDuration(status.refreshTokenTtlSeconds),
+    lastAuthorizeError: status.lastAuthorizeError
+      ? decorateAuthorizeError(status.lastAuthorizeError, clients, lastDiscoveryTrace)
+      : undefined
+  };
+}
+
+function localWriteReadiness(writeStatus: ReturnType<typeof getWriteAccessStatus>): Pick<
+  LauncherWriteAccessStatus,
+  "localWriteReadiness" | "localWriteReadinessReason" | "localWriteReadinessSource"
+> {
+  if (!writeStatus.docsWritesAllowed && !writeStatus.patchWritesAllowed && !writeStatus.elevatedOperationsAllowed) {
+    return {
+      localWriteReadiness: "blocked",
+      localWriteReadinessReason: "Local write mode is off.",
+      localWriteReadinessSource: `${writeStatus.writeMode} (${writeStatus.writeModeSource})`
+    };
+  }
+
+  return {
+    localWriteReadiness: "ready",
+    localWriteReadinessReason: `Local write mode ${writeStatus.writeMode} allows at least one write class.`,
+    localWriteReadinessSource: `${writeStatus.writeMode} (${writeStatus.writeModeSource})`
+  };
+}
+
+function oauthWriteReadiness(
+  oauthStatus: LauncherOAuthStatus,
+  lastDiscoveryTrace?: McpDiscoveryTrace | null
+): Pick<
+  LauncherWriteAccessStatus,
+  | "oauthFilesWriteGranted"
+  | "oauthWriteReadiness"
+  | "oauthWriteReadinessLabel"
+  | "oauthWriteReadinessDetail"
+  | "oauthWriteReadinessSeverity"
+  | "oauthWriteEvidenceAt"
+  | "oauthWriteEvidenceSource"
+> {
+  if (lastDiscoveryTrace?.auth.kind === "oauth" && isFilesWriteDeniedTrace(lastDiscoveryTrace)) {
+    return {
+      oauthFilesWriteGranted: false,
+      oauthWriteReadiness: "not_granted",
+      oauthWriteReadinessLabel: "not granted",
+      oauthWriteReadinessDetail: "Latest authenticated MCP request evidence is missing files.write.",
+      oauthWriteReadinessSeverity: "fail",
+      oauthWriteEvidenceAt: lastDiscoveryTrace.timestamp,
+      oauthWriteEvidenceSource: "last MCP discovery trace"
+    };
+  }
+
+  if (isSuccessfulOAuthDiscovery(lastDiscoveryTrace) && hasFilesWriteScope(lastDiscoveryTrace)) {
+    return {
+      oauthFilesWriteGranted: oauthStatus.activeWriteTokensCount > 0 ? true : "unknown",
+      oauthWriteReadiness: "last_observed_granted",
+      oauthWriteReadinessLabel: "last observed granted",
+      oauthWriteReadinessDetail: "Last authenticated ChatGPT MCP discovery included files.write; the next write request still enforces OAuth per request.",
+      oauthWriteReadinessSeverity: "info",
+      oauthWriteEvidenceAt: lastDiscoveryTrace.timestamp,
+      oauthWriteEvidenceSource: "last MCP discovery trace"
+    };
+  }
+
+  if (oauthStatus.activeWriteTokensCount > 0) {
+    return {
+      oauthFilesWriteGranted: true,
+      oauthWriteReadiness: "last_observed_granted",
+      oauthWriteReadinessLabel: "active stored token has files.write",
+      oauthWriteReadinessDetail: "At least one unexpired stored OAuth access token includes files.write; live MCP requests still enforce OAuth per request.",
+      oauthWriteReadinessSeverity: "info",
+      oauthWriteEvidenceSource: "stored OAuth access-token inventory"
+    };
+  }
+
+  if (oauthStatus.activeTokensCount > 0) {
+    return {
+      oauthFilesWriteGranted: false,
+      oauthWriteReadiness: "not_granted",
+      oauthWriteReadinessLabel: "not granted",
+      oauthWriteReadinessDetail: "Active stored OAuth access tokens exist, but none include files.write.",
+      oauthWriteReadinessSeverity: "fail",
+      oauthWriteEvidenceSource: "stored OAuth access-token inventory"
+    };
+  }
+
+  if (oauthStatus.lastAuthorizeError?.stale) {
+    return {
+      oauthFilesWriteGranted: "unknown",
+      oauthWriteReadiness: "stale_error",
+      oauthWriteReadinessLabel: "unknown - stale OAuth error",
+      oauthWriteReadinessDetail: oauthStatus.lastAuthorizeError.displayLabel,
+      oauthWriteReadinessSeverity: "warn",
+      oauthWriteEvidenceAt: oauthStatus.lastAuthorizeError.newerEvidenceAt,
+      oauthWriteEvidenceSource: "stale authorize diagnostic"
+    };
+  }
+
+  return {
+    oauthFilesWriteGranted: "unknown",
+    oauthWriteReadiness: "no_active_stored_token",
+    oauthWriteReadinessLabel: "unknown - no active stored token",
+    oauthWriteReadinessDetail: "No active stored OAuth access token is available; this does not prove files.write is denied.",
+    oauthWriteReadinessSeverity: "warn",
+    oauthWriteEvidenceSource: "stored OAuth access-token inventory"
+  };
+}
+
+function overallWriteReadiness(
+  local: Pick<LauncherWriteAccessStatus, "localWriteReadiness" | "localWriteReadinessReason">,
+  oauth: Pick<LauncherWriteAccessStatus, "oauthWriteReadiness" | "oauthWriteReadinessDetail">
+): Pick<LauncherWriteAccessStatus, "overallWriteReadiness" | "overallWriteReadinessReason" | "publicWriteReadiness" | "publicWriteReadinessReason"> {
+  if (local.localWriteReadiness === "blocked") {
+    return {
+      overallWriteReadiness: "blocked",
+      overallWriteReadinessReason: local.localWriteReadinessReason,
+      publicWriteReadiness: "NOT_READY",
+      publicWriteReadinessReason: local.localWriteReadinessReason
+    };
+  }
+
+  if (oauth.oauthWriteReadiness === "not_granted") {
+    return {
+      overallWriteReadiness: "blocked",
+      overallWriteReadinessReason: oauth.oauthWriteReadinessDetail,
+      publicWriteReadiness: "NOT_READY",
+      publicWriteReadinessReason: oauth.oauthWriteReadinessDetail
+    };
+  }
+
+  if (oauth.oauthWriteReadiness === "granted_current_request") {
+    return {
+      overallWriteReadiness: "ready",
+      overallWriteReadinessReason: "Current request has files.write and local write mode allows writes.",
+      publicWriteReadiness: "READY",
+      publicWriteReadinessReason: "READY"
+    };
+  }
+
+  return {
+    overallWriteReadiness: "unknown",
+    overallWriteReadinessReason: oauth.oauthWriteReadinessDetail,
+    publicWriteReadiness: "UNKNOWN",
+    publicWriteReadinessReason: oauth.oauthWriteReadinessDetail
+  };
+}
+
+export function getLauncherWriteAccessStatus(
+  repoRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+  lastDiscoveryTrace?: McpDiscoveryTrace | null
+): LauncherWriteAccessStatus {
+  const writeStatus = getWriteAccessStatus(repoRoot, env);
+  const oauthStatus = getLauncherOAuthStatus(repoRoot, lastDiscoveryTrace);
+  const local = localWriteReadiness(writeStatus);
+  const oauth = oauthWriteReadiness(oauthStatus, lastDiscoveryTrace);
+  const overall = overallWriteReadiness(local, oauth);
 
   return {
     ...writeStatus,
     pendingPatchProposalCount: getPendingPatchProposalCount(repoRoot),
-    oauthFilesWriteGranted,
-    publicWriteReadiness: publicWriteReadinessReason === "READY" ? "READY" : "NOT_READY",
-    publicWriteReadinessReason,
+    ...local,
+    ...oauth,
+    ...overall,
     configPath: getWriteAccessConfigPath(repoRoot)
   };
 }
@@ -506,7 +934,7 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
   const writeAccessStatus = getLauncherWriteAccessStatus(repoRoot, env);
   const unauthLocalAllowed = isUnauthenticatedLocalHttpAllowed(env);
   const writeMode = writeAccessStatus.writeMode;
-  const tunnelReady = isPublicTunnelReady(repoRoot, env);
+  const localTunnelPrerequisitesReady = isPublicTunnelReady(repoRoot, env);
   const publicOAuthIssuer = getPublicOAuthIssuer();
   const publicMcpEndpoint = getPublicMcpEndpoint();
   const publicAuthorizationMetadata = getPublicOAuthAuthorizationServerMetadata();
@@ -549,18 +977,20 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 ## Security State
 
 - OAuth admin password configured: ${oauthStatus.adminPasswordConfigured ? "yes" : "no"}
-- Registered OAuth clients: ${oauthStatus.registeredClientsCount}
+- Registered OAuth clients: ${oauthStatus.registeredClientsCount} total; ${oauthStatus.registeredChatGptClientsCount} ChatGPT-like; ${oauthStatus.registeredDoctorProbeClientsCount} doctor probe; ${oauthStatus.registeredOtherClientsCount} other
 - Dynamic Client Registration advertised: ${oauthStatus.dynamicClientRegistrationEnabled ? "yes" : "no"}
 - Registration endpoint path: ${oauthStatus.registrationEndpointPath}
 - OAuth client registry path: ${oauthStatus.clientRegistryPath}
 - Active OAuth tokens: ${oauthStatus.activeTokensCount}
+- Active OAuth write tokens: ${oauthStatus.activeWriteTokensCount}
 - Active OAuth clients: ${oauthStatus.activeOAuthClientsCount}
 - Active refresh sessions: ${oauthStatus.activeRefreshSessionsCount}
 - Expired OAuth sessions: ${oauthStatus.expiredSessionsCount}
 - Revoked OAuth sessions: ${oauthStatus.revokedSessionsCount}
 - OAuth required for public /mcp: yes
 - Unauthenticated local HTTP allowed: ${unauthLocalAllowed ? "yes" : "no"}
-- Public tunnel readiness: ${tunnelReady ? "READY" : "NOT READY"}
+- Public tunnel local prerequisites: ${localTunnelPrerequisitesReady ? "ready" : "incomplete"}
+- Cloudflare tunnel auto-start persistence: not confirmed by generated notes
 - ${oauthStatus.adminPasswordConfigured ? "OAuth admin password is configured, but not displayed or written by the launcher." : `Not ready for ${publicOAuthIssuer} tunnel until OAuth admin password is configured.`}
 - ${unauthLocalAllowed ? "Local unauthenticated mode is not safe for tunneling." : "Unauthenticated local mode is disabled."}
 - Write mode: ${writeMode} (${writeAccessStatus.writeModeSource})
@@ -571,6 +1001,9 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 - Elevated approval token configured: ${writeAccessStatus.legacyApprovalTokenConfigured ? "yes" : "no"}
 - Elevated approval token source: ${writeAccessStatus.legacyApprovalTokenSource}
 - Elevated approval token value: not displayed or written by the launcher.
+- OAuth files.write readiness: ${writeAccessStatus.oauthWriteReadinessLabel}
+- OAuth files.write readiness detail: ${writeAccessStatus.oauthWriteReadinessDetail}
+- Overall write readiness: ${writeAccessStatus.overallWriteReadiness} - ${writeAccessStatus.overallWriteReadinessReason}
 - In Architect Docs mode, ChatGPT can create Markdown planning artifacts without approvalToken.
 - Markdown artifact writes do not require approvalToken in docs, patch, or elevated mode.
 - In Controlled Patch mode, ChatGPT must use propose_patch first, then apply the matching proposal.

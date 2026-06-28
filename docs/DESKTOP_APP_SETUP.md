@@ -126,6 +126,26 @@ release\
 
 The configured product name is `ChampCity GPT MCP Launcher`, and the app id is `com.champcity.gpt.mcp.launcher`.
 
+## Development Runtime Copy
+
+During development, do not run the active MCP launcher from the versioned executable under `release\`. Electron Builder must be able to overwrite that final portable executable during packaging.
+
+After a successful package run, refresh the development runtime copy:
+
+```powershell
+npm run app:promote-runtime
+```
+
+The runtime copy is written to:
+
+```text
+C:\Users\<you>\Apps\ChampCity_GPT_MCP_Runtime\ChampCity GPT MCP Launcher-live.exe
+```
+
+Run that copied executable during development instead of `release\ChampCity GPT MCP Launcher-<version>-x64.exe`. The runtime copy is not a packaging artifact and must not be treated as packaging success; packaging success still requires the final versioned portable executable under `release\`.
+
+If the versioned `release\*.exe` is already running and locks packaging, close it once, run `npm run app:promote-runtime` after a successful package build, and switch to the runtime copy. Do not run two launcher instances on port 3333 at the same time.
+
 ## Configure Allowed Roots
 
 Open the Allowed Roots Manager in the app. The suggested defaults are:

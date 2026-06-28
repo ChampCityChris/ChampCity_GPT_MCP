@@ -9,6 +9,13 @@
 
 This repository is the ChampCity GPT MCP desktop app. If the repo/path identity does not match these expectations, stop before making changes.
 
+Before editing, Codex must verify:
+
+- The current working directory is `C:\Users\<you>\Projects\ChampCity_GPT`.
+- `git rev-parse --show-toplevel` resolves to `C:\Users\<you>\Projects\ChampCity_GPT`.
+- `git remote -v` references the expected `ChampCity_GPT_MCP` repository.
+- `package.json` is present.
+
 ## 2. Role Boundaries
 
 - Codex is the implementation agent.
@@ -31,15 +38,27 @@ This repository is the ChampCity GPT MCP desktop app. If the repo/path identity 
 Protected subsystems:
 
 - OAuth and Dynamic Client Registration
+- OAuth behavior
+- PKCE behavior
 - MCP HTTP transport
 - MCP tool discovery/exposure
+- MCP endpoint behavior
+- Public MCP endpoint behavior, including the operator-configured production `/mcp` endpoint
 - Cloudflare tunnel configuration
+- Cloudflare tunnel behavior
 - Runtime path/AppData config behavior
+- Local config persistence behavior
 - Token storage
+- Token/session storage
+- Admin password handling
+- files.write / write-scope enforcement
 - Server lifecycle/shutdown behavior
+- Server start/stop/restart behavior
 - Packaging/release configuration
 - Git commit/push automation
 - Figma Make extraction architecture
+- Existing preload API contracts
+- Existing `window.champcity` API shape
 
 ## 4. Fallback Policy
 
@@ -60,6 +79,32 @@ Fallbacks are not allowed unless explicitly approved by the architect/operator b
 - Codex must not claim user-visible behavior is fixed unless it was actually validated in the relevant environment.
 - Local tests are not a substitute for real ChatGPT connector validation when the task concerns ChatGPT MCP exposure.
 - Packaged app validation is not a substitute for dev validation, and dev validation is not a substitute for packaged validation.
+- Codex must not attempt subjective visual validation.
+- Codex does not have reliable visual judgment and must not spend extended time using Playwright, screenshot comparison loops, browser automation, image matching, or repeated visual retries to decide whether a UI matches a design.
+- Playwright must not be installed or used unless explicitly authorized by the operator for a specific task.
+- For UI tasks, Codex may run deterministic checks such as build, typecheck, lint, unit tests, and existing repo-defined validation commands.
+- Codex may produce deterministic artifacts for operator review only when the repo already has a scripted path for doing so, but Codex must not judge visual fidelity.
+- Human/operator approval is required for Electron UI layout, design fidelity, screenshots, and subjective visual quality.
+- If a task requires visual approval, Codex must clearly list the operator validation steps and stop.
+
+Packaging validation policy:
+
+- For ChampCity MCP / ChampCity_GPT, a successful Windows packaging run requires the final distributable executable under `release`.
+- `release\win-unpacked\*.exe` is an intermediate artifact only and must never be reported as packaging success unless the task explicitly asks for an unpacked build.
+- `.nsis.7z` files are intermediate Electron Builder artifacts and must never be reported as final packaging success.
+- The final executable must match the current package version.
+- Stale final executables from previous runs must not be treated as success.
+- Builder must report final executable path, LastWriteTime, size, and SHA-256 hash when practical.
+- Builder must report processes left running after packaging.
+- Builder must not publish, upload, sign, stage, commit, or push unless explicitly instructed.
+- Do not run the active development MCP server from `release*.exe`.
+- The `release` folder is packaging output and must remain overwriteable.
+- During development, run the copied runtime executable from `C:\Users\<you>\Apps\ChampCity_GPT_MCP_Runtime\ChampCity GPT MCP Launcher-live.exe`.
+- If `release*.exe` is running and locking packaging, Builder must report that the operator should close it once and switch to the runtime copy workflow.
+- The runtime copy is not a packaging success artifact.
+- Packaging success still requires a final versioned portable executable under `release`.
+- Only after successful packaging should the runtime copy be refreshed with `npm run app:promote-runtime`.
+- Do not run two launcher instances on port 3333 simultaneously.
 
 ## 6. Operator Visual Validation
 

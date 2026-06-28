@@ -28,6 +28,10 @@ $trackedFiles = Get-GitList -GitArgs @("ls-files")
 
 $blockedPathPatterns = @(
   '^config/.*\.local\.json$',
+  '^handoffs/.*\.zip$',
+  '^handoffs/figma-ui-context/',
+  '^handoffs/figma-make-launcher-ui/',
+  '^handoffs/figma-mcp-launcher-ui-v2/',
   '^logs/',
   '^generated/',
   '^release/',
@@ -38,6 +42,12 @@ $blockedPathPatterns = @(
   '\.pid$',
   '\.status\.json$',
   '\.tsbuildinfo$'
+)
+
+$privateGeneratedPathPatterns = @(
+  '^handoffs/figma-ui-context/',
+  '^handoffs/figma-make-launcher-ui/',
+  '^handoffs/figma-mcp-launcher-ui-v2/'
 )
 
 foreach ($file in ($trackedFiles + $stagedFiles | Select-Object -Unique)) {
@@ -61,6 +71,14 @@ $privatePatterns = @(
 $scanExtensions = '\.(md|json|yml|yaml|ps1|ts|js|html|css|txt|example)$'
 $scanFiles = $candidateFiles | Where-Object {
   $normalized = $_ -replace '\\', '/'
+  $isPrivateGeneratedPath = $false
+  foreach ($pattern in $privateGeneratedPathPatterns) {
+    if ($normalized -match $pattern) {
+      $isPrivateGeneratedPath = $true
+      break
+    }
+  }
+  -not $isPrivateGeneratedPath -and
   $normalized -notmatch '^node_modules/' -and
   $normalized -notmatch '^dist/' -and
   $normalized -notmatch '^release/' -and

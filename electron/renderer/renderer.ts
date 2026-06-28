@@ -18,6 +18,20 @@ interface DoctorResult {
   completedAt: string;
 }
 
+interface PublicTunnelDiagnostics {
+  publicReachability: "reachable" | "unreachable" | "unknown" | "degraded";
+  publicReachabilityDetail: string;
+  publicReachabilityEvidence: string[];
+  tunnelRuntime: "active" | "inactive" | "unknown";
+  tunnelRuntimeDetail: string;
+  tunnelPersistence: "confirmed" | "not_confirmed" | "unknown" | "not_configured";
+  tunnelPersistenceDetail: string;
+  overallTunnelReadiness: "ready" | "current_ready_persistence_unconfirmed" | "blocked_down" | "unknown";
+  overallTunnelReadinessLabel: string;
+  overallTunnelReadinessDetail: string;
+  legacyTunnelReadinessStatus: "READY" | "NOT_READY" | "WARN";
+}
+
 interface LastMcpDiscoveryTrace {
   timestamp: string;
   processId: number;
@@ -139,6 +153,9 @@ interface AppStatus {
     oauthTokenRegistryPath: string;
     oauthAdminPasswordConfigured: boolean;
     oauthRegisteredClientsCount: number;
+    oauthRegisteredChatGptClientsCount: number;
+    oauthRegisteredDoctorProbeClientsCount: number;
+    oauthRegisteredOtherClientsCount: number;
     oauthActiveClientsCount: number;
     oauthActiveTokensCount: number;
     oauthActiveWriteTokensCount: number;
@@ -163,6 +180,11 @@ interface AppStatus {
       codeChallengeMethod?: string;
       clientIdPrefix?: string;
       redirectUriLocation?: string;
+      stale?: boolean;
+      staleReason?: string;
+      newerEvidenceAt?: string;
+      displayLabel?: string;
+      displaySeverity?: "warn" | "info";
     };
     chatGptReconnectShouldWork: boolean;
     chatGptDeleteRecreateConnectorRequired: boolean;
@@ -184,6 +206,7 @@ interface AppStatus {
     localHealthPassing: boolean;
     tunnelReadinessStatus: "READY" | "NOT_READY" | "WARN";
     publicTunnelReady: boolean;
+    publicTunnelDiagnostics: PublicTunnelDiagnostics;
   };
   writeAccess: {
     configPath: string;
@@ -197,8 +220,19 @@ interface AppStatus {
     legacyApprovalTokenCreatedAt?: string;
     legacyApprovalTokenUpdatedAt?: string;
     pendingPatchProposalCount: number;
-    oauthFilesWriteGranted: boolean;
-    publicWriteReadiness: "READY" | "NOT_READY";
+    oauthFilesWriteGranted: boolean | "unknown";
+    localWriteReadiness: "ready" | "blocked" | "unknown";
+    localWriteReadinessReason: string;
+    localWriteReadinessSource: string;
+    oauthWriteReadiness: "granted_current_request" | "last_observed_granted" | "not_granted" | "unknown" | "stale_error" | "no_active_stored_token";
+    oauthWriteReadinessLabel: string;
+    oauthWriteReadinessDetail: string;
+    oauthWriteReadinessSeverity: "pass" | "warn" | "fail" | "info" | "unknown";
+    oauthWriteEvidenceAt?: string;
+    oauthWriteEvidenceSource: string;
+    overallWriteReadiness: "ready" | "blocked" | "unknown";
+    overallWriteReadinessReason: string;
+    publicWriteReadiness: "READY" | "NOT_READY" | "UNKNOWN";
     publicWriteReadinessReason: string;
   };
   figma: {
@@ -485,6 +519,13 @@ const setupBack = document.querySelector<HTMLButtonElement>("#setupBack")!;
 const setupNext = document.querySelector<HTMLButtonElement>("#setupNext")!;
 const setupFinish = document.querySelector<HTMLButtonElement>("#setupFinish")!;
 const resetSetupWizardButton = document.querySelector<HTMLButtonElement>("#resetSetupWizard")!;
+const appShell = document.querySelector<HTMLElement>(".app-shell")!;
+const navButtons = document.querySelectorAll<HTMLButtonElement>("[data-screen-target]");
+const sidebarStatusText = document.querySelector<HTMLSpanElement>("#sidebarStatusText");
+const logSearchInput = document.querySelector<HTMLInputElement>("#logSearchInput");
+const logFilterButtons = document.querySelectorAll<HTMLButtonElement>("[data-log-filter]");
+const copyLogView = document.querySelector<HTMLButtonElement>("#copyLogView");
+const clearLogView = document.querySelector<HTMLButtonElement>("#clearLogView");
 
 let localConfig: LocalLauncherConfig | null = null;
 let previews: Record<string, string> = {};
@@ -492,6 +533,58 @@ let activePreview = "chatgptNotes";
 let currentStatus: AppStatus | null = null;
 let setupStep = 0;
 let setupRoots: string[] = [];
+let activeLogFilter = "all";
+let logLines: string[] = [];
+
+function switchScreen(screen: string): void {
+  appShell.dataset.activeScreen = screen;
+  navButtons.forEach((button) => {
+    const active = button.dataset.screenTarget === screen;
+    button.setAttribute("aria-current", active ? "page" : "false");
+  });
+}
+
+function getLogSeverity(line: string): string {
+  const structuredStatuses = line
+    .split(/\r?\n/u)
+    .map((entry) => entry.match(/^(?:\[[^\]]+\]\s+[^:]+:\s*)?(PASS|WARN|FAIL|ERROR)\b/iu)?.[1]?.toUpperCase())
+    .filter(Boolean);
+  if (structuredStatuses.includes("FAIL") || structuredStatuses.includes("ERROR")) {
+    return "error";
+  }
+  if (structuredStatuses.includes("WARN")) {
+    return "warn";
+  }
+  if (structuredStatuses.includes("PASS")) {
+    return "info";
+  }
+
+  const normalized = line.toLowerCase();
+  if (/\berror\b|\bfailed\b|\bfail\b/u.test(normalized)) {
+    return "error";
+  }
+  if (normalized.includes("warn")) {
+    return "warn";
+  }
+  if (normalized.includes("debug")) {
+    return "debug";
+  }
+  return "info";
+}
+
+function renderLogView(): void {
+  const query = logSearchInput?.value.trim().toLowerCase() ?? "";
+  const visibleLines = logLines.filter((line) => {
+    const matchesFilter = activeLogFilter === "all" || getLogSeverity(line) === activeLogFilter;
+    const matchesQuery = query === "" || line.toLowerCase().includes(query);
+    return matchesFilter && matchesQuery;
+  });
+  outputLog.textContent = visibleLines.join("\n");
+  if (visibleLines.length > 0) {
+    outputLog.textContent += "\n";
+  }
+  outputLog.scrollTop = outputLog.scrollHeight;
+}
 
 function getProjectsRootLabel(): string {
   const repoRoot = currentStatus?.repoRoot;
@@ -509,13 +602,37 @@ function setBusy(button: HTMLButtonElement, busy: boolean): void {
 }
 
 function appendLog(message: string): void {
-  outputLog.textContent = `${outputLog.textContent}${message}\n`;
-  outputLog.scrollTop = outputLog.scrollHeight;
+  logLines.push(...message.split(/\r?\n/u).filter((line) => line.trim() !== ""));
+  renderLogView();
 }
 
 function setStatusClass(element: HTMLElement, status: string): void {
-  element.classList.remove("pass", "warn", "fail", "running", "stopped");
+  element.classList.remove("pass", "warn", "fail", "running", "stopped", "stale", "unknown", "error");
   element.classList.add(status.toLowerCase());
+}
+
+function tunnelDiagnosticClass(diagnostics: PublicTunnelDiagnostics): "pass" | "warn" | "fail" {
+  if (diagnostics.overallTunnelReadiness === "ready") {
+    return "pass";
+  }
+
+  return diagnostics.overallTunnelReadiness === "blocked_down" ? "fail" : "warn";
+}
+
+function tunnelDiagnosticLabel(diagnostics: PublicTunnelDiagnostics): string {
+  if (diagnostics.overallTunnelReadiness === "blocked_down") {
+    return "Public endpoint unreachable";
+  }
+
+  if (diagnostics.overallTunnelReadiness === "current_ready_persistence_unconfirmed") {
+    return "Public endpoint reachable; auto-start not confirmed";
+  }
+
+  if (diagnostics.overallTunnelReadiness === "ready") {
+    return "Public endpoint reachable; auto-start confirmed";
+  }
+
+  return "Public endpoint status unknown; auto-start not confirmed";
 }
 
 function renderChecklist(checks: DoctorCheck[] | null): void {
@@ -790,7 +907,16 @@ function renderHttpAuthModalStatus(status: HttpAuthStatus): void {
 function renderWriteAccessStatus(status: WriteAccessStatus): void {
   const writeModeText = `${status.writeMode} (${status.writeModeSource})`;
   const tokenText = `${status.legacyApprovalTokenConfigured ? "yes" : "no"} (${status.legacyApprovalTokenSource})`;
-  const readinessText = status.publicWriteReadiness === "READY" ? "READY" : `NOT READY - ${status.publicWriteReadinessReason}`;
+  const readinessText = status.publicWriteReadiness === "READY"
+    ? "READY"
+    : status.publicWriteReadiness === "UNKNOWN"
+    ? `UNKNOWN - ${status.publicWriteReadinessReason}`
+    : `NOT READY - ${status.publicWriteReadinessReason}`;
+  const oauthGrantedText = status.oauthFilesWriteGranted === true
+    ? "yes"
+    : status.oauthFilesWriteGranted === false
+    ? "no"
+    : "unknown";
 
   writeToolsStatus.textContent = writeModeText;
   writeApprovalTokenStatus.textContent = tokenText;
@@ -802,22 +928,22 @@ function renderWriteAccessStatus(status: WriteAccessStatus): void {
   writeAccessPendingPatches.textContent = String(status.pendingPatchProposalCount);
   writeAccessTokenConfigured.textContent = status.legacyApprovalTokenConfigured ? "yes" : "no";
   writeAccessTokenSource.textContent = status.legacyApprovalTokenSource;
-  writeAccessOAuthGranted.textContent = status.oauthFilesWriteGranted ? "yes" : "no/unknown";
+  writeAccessOAuthGranted.textContent = `${oauthGrantedText}; ${status.oauthWriteReadinessLabel}`;
   writeAccessReadiness.textContent = readinessText;
   writeAccessConfigPath.textContent = status.configPath;
-  oauthFilesWriteInline.textContent = status.oauthFilesWriteGranted ? "yes" : "no/unknown";
+  oauthFilesWriteInline.textContent = `${oauthGrantedText}; ${status.oauthWriteReadinessLabel}`;
 
   setStatusClass(writeToolsStatus, status.writeMode === "off" ? "pass" : status.writeMode === "elevated" ? "warn" : "running");
   setStatusClass(writeApprovalTokenStatus, status.legacyApprovalTokenConfigured ? "pass" : "warn");
-  setStatusClass(writeReadinessStatus, status.publicWriteReadiness === "READY" ? "pass" : "fail");
+  setStatusClass(writeReadinessStatus, status.publicWriteReadiness === "READY" ? "pass" : status.publicWriteReadiness === "UNKNOWN" ? "warn" : "fail");
   setStatusClass(writeAccessToolsEnabled, status.writeMode === "off" ? "pass" : status.writeMode === "elevated" ? "warn" : "running");
   setStatusClass(writeAccessDocsAllowed, status.docsWritesAllowed ? "pass" : "warn");
   setStatusClass(writeAccessPatchAllowed, status.patchWritesAllowed ? "pass" : "warn");
   setStatusClass(writeAccessElevatedAllowed, status.elevatedOperationsAllowed ? "warn" : "pass");
   setStatusClass(writeAccessPendingPatches, status.pendingPatchProposalCount > 0 ? "warn" : "pass");
   setStatusClass(writeAccessTokenConfigured, status.legacyApprovalTokenConfigured ? "pass" : "warn");
-  setStatusClass(writeAccessOAuthGranted, status.oauthFilesWriteGranted ? "pass" : "warn");
-  setStatusClass(writeAccessReadiness, status.publicWriteReadiness === "READY" ? "pass" : "fail");
+  setStatusClass(writeAccessOAuthGranted, status.oauthWriteReadinessSeverity === "fail" ? "fail" : status.oauthWriteReadinessSeverity === "warn" ? "warn" : "pass");
+  setStatusClass(writeAccessReadiness, status.publicWriteReadiness === "READY" ? "pass" : status.publicWriteReadiness === "UNKNOWN" ? "warn" : "fail");
 }
 
 function renderWriteTokenModalStatus(status: WriteAccessStatus): void {
@@ -962,6 +1088,16 @@ async function generateWriteTokenForModal(): Promise<void> {
 async function refreshStatus(): Promise<void> {
   const status = await window.champcity.getAppStatus();
   currentStatus = status;
+  const serverState = status.diagnosticStatus.state.toLowerCase();
+  appShell.dataset.serverState = serverState;
+  if (sidebarStatusText) {
+    sidebarStatusText.textContent =
+      serverState === "running"
+        ? ":3333 active"
+        : serverState === "stopped"
+          ? "offline"
+          : serverState;
+  }
   serverStatus.textContent = status.diagnosticStatus.detail;
   localHttpEndpoint.textContent = status.http.localEndpoint;
   localHealthEndpoint.textContent = status.http.localHealthEndpoint;
@@ -976,7 +1112,7 @@ async function refreshStatus(): Promise<void> {
   oauthMetadataInline.textContent = status.http.oauthAuthorizationServerMetadata;
   oauthRegistrationEndpointInline.textContent = status.http.oauthRegistrationEndpoint;
   oauthWriteToolsInline.textContent = status.writeAccess.writeMode;
-  oauthTunnelInline.textContent = status.http.tunnelReadinessStatus;
+  oauthTunnelInline.textContent = status.http.publicTunnelDiagnostics.overallTunnelReadinessLabel;
   oauthDcrStatusInline.textContent = status.http.oauthDynamicClientRegistrationEnabled ? "advertised" : "not advertised";
   oauthDcrRegisteredInline.textContent = String(status.http.oauthRegisteredClientsCount);
   oauthClientRegistryInline.textContent = status.http.oauthClientRegistryPath;
@@ -993,7 +1129,7 @@ async function refreshStatus(): Promise<void> {
   oauthRefreshTtlInline.textContent = `${status.http.oauthRefreshTokenTtlLabel} (${status.http.oauthRefreshTokenTtlSeconds} seconds)`;
   if (status.http.oauthLastAuthorizeError) {
     const lastError = status.http.oauthLastAuthorizeError;
-    oauthLastAuthorizeErrorInline.textContent = `${lastError.error} at ${lastError.occurredAt}`;
+    oauthLastAuthorizeErrorInline.textContent = lastError.displayLabel ?? `${lastError.error} at ${lastError.occurredAt}`;
     oauthPkceReceivedInline.textContent = lastError.requiredFieldsPresent.code_challenge ? "yes" : "no";
     oauthPkceMethodInline.textContent = lastError.codeChallengeMethod ?? "missing";
   } else {
@@ -1014,31 +1150,19 @@ async function refreshStatus(): Promise<void> {
   runtimeServerEntrypointStatus.textContent = status.runtime.serverEntrypoint;
   authTokenStatus.textContent = `${status.http.authTokenConfigured ? "yes" : "no"} (${status.http.authTokenSource})`;
   unauthLocalStatus.textContent = status.http.unauthenticatedLocalHttpAllowed ? "yes - LOCAL TEST ONLY - DO NOT TUNNEL" : "no";
-  if (status.http.tunnelReadinessStatus === "READY") {
-    publicTunnelStatus.textContent = "READY";
-  } else if (status.http.tunnelReadinessStatus === "WARN") {
-    publicTunnelStatus.textContent = `WARN - write mode ${status.writeAccess.writeMode}`;
-  } else if (!status.http.oauthAdminPasswordConfigured) {
-    publicTunnelStatus.textContent = "NOT READY - OAuth admin password missing";
-  } else if (status.http.unauthenticatedLocalHttpAllowed) {
-    publicTunnelStatus.textContent = "NOT READY - unauthenticated local mode enabled";
-  } else if (!status.http.localHealthPassing) {
-    publicTunnelStatus.textContent = "NOT READY - local health failed";
-  } else {
-    publicTunnelStatus.textContent = "NOT READY";
-  }
+  publicTunnelStatus.textContent = tunnelDiagnosticLabel(status.http.publicTunnelDiagnostics);
   localHealthStatus.textContent = status.http.localHealthPassing ? "yes" : "no";
   renderWriteAccessStatus(status.writeAccess);
   renderFigmaStatus(status.figma);
   setStatusClass(serverStatus, status.diagnosticStatus.state);
   setStatusClass(oauthAdminStatus, status.http.oauthAdminPasswordConfigured ? "pass" : "warn");
-  setStatusClass(oauthTunnelInline, status.http.tunnelReadinessStatus === "READY" ? "pass" : status.http.tunnelReadinessStatus === "WARN" ? "warn" : "fail");
+  setStatusClass(oauthTunnelInline, tunnelDiagnosticClass(status.http.publicTunnelDiagnostics));
   setStatusClass(oauthDcrStatusInline, status.http.oauthDynamicClientRegistrationEnabled ? "pass" : "fail");
   setStatusClass(oauthReconnectInline, status.http.chatGptReconnectShouldWork ? "pass" : "fail");
   setStatusClass(oauthRecreateInline, status.http.chatGptDeleteRecreateConnectorRequired ? "warn" : "pass");
   setStatusClass(authTokenStatus, status.http.authTokenConfigured ? "pass" : "warn");
   setStatusClass(unauthLocalStatus, status.http.unauthenticatedLocalHttpAllowed ? "warn" : "pass");
-  setStatusClass(publicTunnelStatus, status.http.tunnelReadinessStatus === "READY" ? "pass" : status.http.tunnelReadinessStatus === "WARN" ? "warn" : "fail");
+  setStatusClass(publicTunnelStatus, tunnelDiagnosticClass(status.http.publicTunnelDiagnostics));
   setStatusClass(localHealthStatus, status.http.localHealthPassing ? "pass" : "fail");
   if (status.lastDoctorResult) {
     checklistMeta.textContent = `Completed ${status.lastDoctorResult.completedAt}`;
@@ -1793,6 +1917,38 @@ auditLog.addEventListener("input", () => {
 allowedCommands.addEventListener("input", () => {
   if (localConfig) {
     localConfig.allowedCommands = allowedCommands.value.split(/\r?\n/u).map((entry) => entry.trim()).filter(Boolean);
+  }
+});
+
+navButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    switchScreen(button.dataset.screenTarget ?? "dashboard");
+  });
+});
+
+logSearchInput?.addEventListener("input", renderLogView);
+
+logFilterButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    activeLogFilter = button.dataset.logFilter ?? "all";
+    logFilterButtons.forEach((candidate) => {
+      candidate.classList.toggle("active", candidate === button);
+    });
+    renderLogView();
+  });
+});
+
+clearLogView?.addEventListener("click", () => {
+  logLines = [];
+  renderLogView();
+});
+
+copyLogView?.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(outputLog.textContent ?? "");
+    appendLog("Copied current log view to clipboard.");
+  } catch (error) {
+    appendLog(`ERROR ${error instanceof Error ? error.message : String(error)}`);
   }
 });
 

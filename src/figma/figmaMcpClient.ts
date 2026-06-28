@@ -77,7 +77,7 @@ const SECRET_PATTERNS = [
 ];
 
 class SdkFigmaMcpClient implements FigmaMcpClientLike {
-  private readonly client = new Client({ name: "champcity-gpt-figma-mcp-client", version: "0.1.0" }, { capabilities: {} });
+  private readonly client = new Client({ name: "champcity-gpt-figma-mcp-client", version: "0.1.2" }, { capabilities: {} });
   private readonly transport: StreamableHTTPClientTransport;
 
   constructor(config: FigmaMcpConfig) {

@@ -29,6 +29,8 @@ import {
   getPublicOAuthIssuer,
   getPublicOAuthProtectedResourceMetadata,
   getPublicOAuthRegistrationEndpoint,
+  getPackagedDeveloperCliProbeCheck,
+  getPublicTunnelDiagnostics,
   getSetupStatePath,
   isPublicTunnelReady,
   isHttpWriteToolsEnabled,
@@ -121,8 +123,6 @@ interface DiagnosticStatus {
   stdoutLog: string;
   stderrLog: string;
 }
-
-type TunnelReadinessStatus = "READY" | "NOT_READY" | "WARN";
 
 interface SetupSavePayload {
   allowedRoots: string[];
@@ -660,11 +660,11 @@ async function runDoctor(): Promise<DoctorResult> {
   const entrypoint = getEntrypointPath(repoRoot);
   const configPath = getLocalConfigPath(repoRoot);
   const logsDir = getLogsDir(repoRoot);
-  const oauthStatus = getLauncherOAuthStatus(repoRoot);
-  const writeAccessStatus = getLauncherWriteAccessStatus(repoRoot);
+  const lastDiscoveryTrace = readLastDiscoveryTraceSafe();
+  const oauthStatus = getLauncherOAuthStatus(repoRoot, lastDiscoveryTrace);
+  const writeAccessStatus = getLauncherWriteAccessStatus(repoRoot, process.env, lastDiscoveryTrace);
   const localHealthPassing = await probeLocalHealth();
   const toolDiagnostics = getToolExposureDiagnostics(currentAppConfig());
-  const lastDiscoveryTrace = readLastDiscoveryTraceSafe();
 
   appendOutput("doctor", "Checking Node.js...");
   appendOutput("doctor", "Checking npm...");
@@ -772,7 +772,12 @@ async function runDoctor(): Promise<DoctorResult> {
   checks.push({
     name: "Registered OAuth client count",
     status: "PASS",
-    detail: String(oauthStatus.registeredClientsCount)
+    detail: [
+      `total=${oauthStatus.registeredClientsCount}`,
+      `chatgpt=${oauthStatus.registeredChatGptClientsCount}`,
+      `doctor_probes=${oauthStatus.registeredDoctorProbeClientsCount}`,
+      `other=${oauthStatus.registeredOtherClientsCount}`
+    ].join("; ")
   });
 
   checks.push({
@@ -836,9 +841,9 @@ async function runDoctor(): Promise<DoctorResult> {
 
   checks.push({
     name: "Last OAuth error",
-    status: oauthStatus.lastAuthorizeError ? "WARN" : "PASS",
+    status: oauthStatus.lastAuthorizeError ? oauthStatus.lastAuthorizeError.stale ? "PASS" : "WARN" : "PASS",
     detail: oauthStatus.lastAuthorizeError
-      ? `${oauthStatus.lastAuthorizeError.error} at ${oauthStatus.lastAuthorizeError.occurredAt}`
+      ? oauthStatus.lastAuthorizeError.displayLabel
       : "none recorded"
   });
 
@@ -859,11 +864,13 @@ async function runDoctor(): Promise<DoctorResult> {
   });
 
   checks.push({
-    name: "OAuth files.write grant",
-    status: writeAccessStatus.oauthFilesWriteGranted ? "PASS" : "WARN",
-    detail: writeAccessStatus.oauthFilesWriteGranted
-      ? "At least one active OAuth access token includes files.write."
-      : "No active OAuth access token with files.write is currently stored; this is separate from local write mode."
+    name: "OAuth files.write readiness",
+    status: writeAccessStatus.oauthWriteReadinessSeverity === "fail"
+      ? "FAIL"
+      : writeAccessStatus.oauthWriteReadinessSeverity === "warn"
+      ? "WARN"
+      : "PASS",
+    detail: `${writeAccessStatus.oauthWriteReadinessLabel}; ${writeAccessStatus.oauthWriteReadinessDetail}`
   });
 
   checks.push({
@@ -913,8 +920,18 @@ async function runDoctor(): Promise<DoctorResult> {
 
   checks.push({
     name: "Write-readiness diagnostics",
-    status: writeAccessStatus.publicWriteReadiness === "READY" ? "PASS" : "WARN",
-    detail: `OAuth files.write granted=${writeAccessStatus.oauthFilesWriteGranted ? "yes" : "no"}; local write mode=${writeAccessStatus.writeMode}; readiness=${writeAccessStatus.publicWriteReadinessReason}; locally blocked write tools=${toolDiagnostics.writeToolNamesBlockedByLocalMode.join(", ") || "none"}`
+    status: writeAccessStatus.overallWriteReadiness === "ready"
+      ? "PASS"
+      : writeAccessStatus.overallWriteReadiness === "blocked"
+      ? "FAIL"
+      : "WARN",
+    detail: [
+      `local=${writeAccessStatus.localWriteReadiness} (${writeAccessStatus.localWriteReadinessSource})`,
+      `oauth=${writeAccessStatus.oauthWriteReadiness}`,
+      `overall=${writeAccessStatus.overallWriteReadiness}`,
+      `reason=${writeAccessStatus.overallWriteReadinessReason}`,
+      `locally blocked write tools=${toolDiagnostics.writeToolNamesBlockedByLocalMode.join(", ") || "none"}`
+    ].join("; ")
   });
 
   const staleRefs = findStaleEntrypointReferences(repoRoot);
@@ -924,19 +941,40 @@ async function runDoctor(): Promise<DoctorResult> {
     detail: staleRefs.length === 0 ? "No stale top-level dist/index.js references found." : staleRefs.join(", ")
   });
 
+  const tunnelDiagnostics = getPublicTunnelDiagnostics({
+    publicBaseUrl: getPublicOAuthIssuer(),
+    localHealthPassing,
+    lastDiscoveryTrace,
+    doctorChecks: checks
+  });
+  checks.push({
+    name: "Public tunnel diagnostics",
+    status: tunnelDiagnostics.overallTunnelReadiness === "blocked_down"
+      ? "FAIL"
+      : tunnelDiagnostics.overallTunnelReadiness === "ready"
+      ? "PASS"
+      : "WARN",
+    detail: [
+      `publicReachability=${tunnelDiagnostics.publicReachability}`,
+      `tunnelRuntime=${tunnelDiagnostics.tunnelRuntime}`,
+      `tunnelPersistence=${tunnelDiagnostics.tunnelPersistence}`,
+      `overall=${tunnelDiagnostics.overallTunnelReadiness}`,
+      tunnelDiagnostics.overallTunnelReadinessDetail
+    ].join("; ")
+  });
+
   if (app.isPackaged) {
-    checks.push({
-      name: "Developer CLI entrypoint probe",
-      status: "WARN",
-      detail: "Skipped in packaged runtime. The normal server path is in-process; CLI probing is for build-from-source diagnostics."
-    });
+    checks.push(getPackagedDeveloperCliProbeCheck());
   } else {
     checks.push(await probeEntrypoint(runtimePaths.nodeExecutable));
   }
 
   const status: CheckStatus = checks.some((check) => check.status === "FAIL") ? "FAIL" : checks.some((check) => check.status === "WARN") ? "WARN" : "PASS";
   const completedAt = new Date().toISOString();
-  const output = checks.map((check) => `${check.status} ${check.name}: ${check.detail}`).join(os.EOL);
+  const output = [
+    `${status} Doctor summary: ${checks.length} checks completed.`,
+    ...checks.map((check) => `${check.status} ${check.name}: ${check.detail}`)
+  ].join(os.EOL);
   lastDoctorResult = { status, checks, output, completedAt };
   appendOutput("doctor", output);
   return lastDoctorResult;
@@ -957,20 +995,21 @@ async function getAppStatus() {
 
   const httpAuthStatus = getLauncherHttpAuthStatus(repoRoot);
   const figmaStatus = getLauncherFigmaStatus(repoRoot);
-  const oauthStatus = getLauncherOAuthStatus(repoRoot);
-  const writeAccessStatus = getLauncherWriteAccessStatus(repoRoot);
+  const lastDiscoveryTrace = readLastDiscoveryTraceSafe();
+  const oauthStatus = getLauncherOAuthStatus(repoRoot, lastDiscoveryTrace);
+  const writeAccessStatus = getLauncherWriteAccessStatus(repoRoot, process.env, lastDiscoveryTrace);
   const unauthenticatedLocalHttpAllowed = isUnauthenticatedLocalHttpAllowed();
   const writeToolsEnabled = isHttpWriteToolsEnabled(repoRoot);
   const localHealthPassing = await probeLocalHealth();
   const toolDiagnostics = getToolExposureDiagnostics(currentAppConfig());
-  const lastDiscoveryTrace = readLastDiscoveryTraceSafe();
-  const tunnelReadinessStatus = getTunnelReadinessStatus({
-    oauthAdminPasswordConfigured: oauthStatus.adminPasswordConfigured,
-    unauthenticatedLocalHttpAllowed,
-    writeToolsEnabled,
-    localHealthPassing
+  const publicTunnelDiagnostics = getPublicTunnelDiagnostics({
+    publicBaseUrl: getPublicOAuthIssuer(),
+    localHealthPassing,
+    lastDiscoveryTrace,
+    doctorChecks: lastDoctorResult?.checks
   });
-  const publicTunnelReady = tunnelReadinessStatus === "READY";
+  const tunnelReadinessStatus = publicTunnelDiagnostics.legacyTunnelReadinessStatus;
+  const publicTunnelReady = publicTunnelDiagnostics.overallTunnelReadiness === "ready";
 
   return {
     appName: "ChampCity GPT MCP Launcher",
@@ -1005,6 +1044,9 @@ async function getAppStatus() {
       oauthTokenRegistryPath: oauthStatus.tokenRegistryPath,
       oauthAdminPasswordConfigured: oauthStatus.adminPasswordConfigured,
       oauthRegisteredClientsCount: oauthStatus.registeredClientsCount,
+      oauthRegisteredChatGptClientsCount: oauthStatus.registeredChatGptClientsCount,
+      oauthRegisteredDoctorProbeClientsCount: oauthStatus.registeredDoctorProbeClientsCount,
+      oauthRegisteredOtherClientsCount: oauthStatus.registeredOtherClientsCount,
       oauthActiveClientsCount: oauthStatus.activeOAuthClientsCount,
       oauthActiveTokensCount: oauthStatus.activeTokensCount,
       oauthActiveWriteTokensCount: oauthStatus.activeWriteTokensCount,
@@ -1017,7 +1059,7 @@ async function getAppStatus() {
       oauthRefreshTokenTtlLabel: oauthStatus.refreshTokenTtlLabel,
       oauthLastAuthorizeError: oauthStatus.lastAuthorizeError,
       chatGptReconnectShouldWork: oauthStatus.adminPasswordConfigured && localHealthPassing && oauthStatus.dynamicClientRegistrationEnabled,
-      chatGptDeleteRecreateConnectorRequired: oauthStatus.lastAuthorizeError?.error === "Invalid client_id.",
+      chatGptDeleteRecreateConnectorRequired: oauthStatus.lastAuthorizeError?.error === "Invalid client_id." && !oauthStatus.lastAuthorizeError.stale,
       internalToolNames: toolDiagnostics.internalToolNames,
       exposedToolNames: toolDiagnostics.exposedToolNames,
       internalRegisteredToolCount: toolDiagnostics.internalRegisteredToolCount,
@@ -1035,7 +1077,8 @@ async function getAppStatus() {
       writeToolsEnabled,
       localHealthPassing,
       tunnelReadinessStatus,
-      publicTunnelReady
+      publicTunnelReady,
+      publicTunnelDiagnostics
     },
     writeAccess: {
       configPath: writeAccessStatus.configPath,
@@ -1050,6 +1093,17 @@ async function getAppStatus() {
       legacyApprovalTokenUpdatedAt: writeAccessStatus.legacyApprovalTokenUpdatedAt,
       pendingPatchProposalCount: writeAccessStatus.pendingPatchProposalCount,
       oauthFilesWriteGranted: writeAccessStatus.oauthFilesWriteGranted,
+      localWriteReadiness: writeAccessStatus.localWriteReadiness,
+      localWriteReadinessReason: writeAccessStatus.localWriteReadinessReason,
+      localWriteReadinessSource: writeAccessStatus.localWriteReadinessSource,
+      oauthWriteReadiness: writeAccessStatus.oauthWriteReadiness,
+      oauthWriteReadinessLabel: writeAccessStatus.oauthWriteReadinessLabel,
+      oauthWriteReadinessDetail: writeAccessStatus.oauthWriteReadinessDetail,
+      oauthWriteReadinessSeverity: writeAccessStatus.oauthWriteReadinessSeverity,
+      oauthWriteEvidenceAt: writeAccessStatus.oauthWriteEvidenceAt,
+      oauthWriteEvidenceSource: writeAccessStatus.oauthWriteEvidenceSource,
+      overallWriteReadiness: writeAccessStatus.overallWriteReadiness,
+      overallWriteReadinessReason: writeAccessStatus.overallWriteReadinessReason,
       publicWriteReadiness: writeAccessStatus.publicWriteReadiness,
       publicWriteReadinessReason: writeAccessStatus.publicWriteReadinessReason
     },
@@ -1284,23 +1338,6 @@ async function probeRegistrationEndpoint(url: string): Promise<EndpointProbeResu
       scope: "files.read"
     })
   });
-}
-
-function getTunnelReadinessStatus(options: {
-  oauthAdminPasswordConfigured: boolean;
-  unauthenticatedLocalHttpAllowed: boolean;
-  writeToolsEnabled: boolean;
-  localHealthPassing: boolean;
-}): TunnelReadinessStatus {
-  if (!options.oauthAdminPasswordConfigured || options.unauthenticatedLocalHttpAllowed || !options.localHealthPassing) {
-    return "NOT_READY";
-  }
-
-  if (options.writeToolsEnabled) {
-    return "WARN";
-  }
-
-  return "READY";
 }
 
 async function runTunnelReadinessCheck(): Promise<OperationResult> {

@@ -25,6 +25,22 @@ release\
 
 The app is named `ChampCity GPT MCP Launcher`.
 
+## Development Runtime Copy
+
+During development, keep `release\` overwriteable by running the copied runtime executable instead of the versioned release executable:
+
+```text
+C:\Users\<you>\Apps\ChampCity_GPT_MCP_Runtime\ChampCity GPT MCP Launcher-live.exe
+```
+
+After successful packaging, refresh that copy with:
+
+```powershell
+npm run app:promote-runtime
+```
+
+The runtime copy is not a packaging artifact. Packaging success still requires the final current-version portable executable under `release\`, not `release\win-unpacked\` and not an Electron Builder `.nsis.7z` intermediate. Do not run two launcher instances on port 3333 simultaneously.
+
 ## What The App Handles
 
 - Setup checklist and doctor output.

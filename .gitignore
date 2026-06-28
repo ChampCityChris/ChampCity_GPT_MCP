@@ -4,6 +4,10 @@ coverage/
 logs/
 generated/
 design/figma-handoff/
+handoffs/*.zip
+handoffs/figma-ui-context/
+handoffs/figma-make-launcher-ui/
+handoffs/figma-mcp-launcher-ui-v2/
 release/
 package-lock.zip
 config/*.local.json

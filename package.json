@@ -1,6 +1,6 @@
 {
   "name": "champcity-gpt",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "ChatGPT-compatible local MCP launcher with allowlisted project roots, OAuth, and audited file tools.",
   "type": "module",
   "main": "dist/electron/main.js",
@@ -12,7 +12,8 @@
     "champcity-gpt-mcp": "./dist/src/index.js"
   },
   "scripts": {
-    "mcp:build": "tsc -p tsconfig.json",
+    "mcp:build": "tsc -p tsconfig.json && npm run renderer:build",
+    "renderer:build": "node scripts/build-renderer.mjs",
     "build": "npm run mcp:build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "tsc --noEmit -p tsconfig.json",
@@ -21,20 +22,27 @@
     "check:release": "powershell -ExecutionPolicy Bypass -File ./scripts/check-release-clean.ps1",
     "app:build": "npm run mcp:build",
     "app:dev": "npm run app:build && electron .",
-    "app:package": "npm run app:build && electron-builder --win portable --config electron-builder.json",
-    "app:dist": "npm run app:build && electron-builder --win portable --config electron-builder.json"
+    "app:package": "node scripts/package-portable.mjs",
+    "app:dist": "node scripts/package-portable.mjs",
+    "app:promote-runtime": "node scripts/promote-runtime-exe.mjs",
+    "app:package-and-promote": "npm run app:package && npm run app:promote-runtime"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.13.0",
     "diff": "^9.0.0",
     "picomatch": "^4.0.2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "zod": "^3.24.4"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
     "@types/picomatch": "^3.0.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
     "electron": "^42.5.0",
     "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1",
     "typescript": "^5.8.3"
   },
   "engines": {

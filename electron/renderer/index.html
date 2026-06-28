@@ -5,13 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;"
+      content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data:;"
     />
     <title>ChampCity GPT MCP Launcher</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="../../dist/electron/renderer/main.css" />
   </head>
   <body>
-    <main class="app-shell">
+    <div id="root"></div>
+    <template id="launcher-template">
+    <main class="app-shell" data-active-screen="dashboard" data-server-state="stopped">
       <div id="setupWizard" class="setup-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
         <section class="setup-panel">
           <div class="setup-header">
@@ -117,7 +119,32 @@
         </section>
       </div>
 
-      <section class="hero-band">
+      <aside class="launcher-sidebar" aria-label="Primary navigation">
+        <div class="brand-block">
+          <div class="brand-mark">
+            <img src="./assets/champcity-crest.png" alt="ChampCity crest" />
+          </div>
+          <div>
+            <p class="brand-title">ChampCity</p>
+            <p class="brand-subtitle">MCP Launcher</p>
+          </div>
+        </div>
+        <nav class="launcher-nav">
+          <button class="nav-item" type="button" data-screen-target="dashboard" aria-current="page">Dashboard</button>
+          <button class="nav-item" type="button" data-screen-target="connection">Connection</button>
+          <button class="nav-item" type="button" data-screen-target="logs">Logs</button>
+          <button class="nav-item" type="button" data-screen-target="tools">MCP Tools</button>
+          <button class="nav-item" type="button" data-screen-target="troubleshoot">Troubleshoot</button>
+          <button class="nav-item" type="button" data-screen-target="settings">Settings</button>
+        </nav>
+        <div class="sidebar-status">
+          <span id="sidebarStatusDot" class="sidebar-status-dot" aria-hidden="true"></span>
+          <span id="sidebarStatusText">offline</span>
+        </div>
+      </aside>
+
+      <div class="app-workspace">
+      <section class="hero-band" data-screen="dashboard">
         <div>
           <p class="eyebrow">ChatGPT.com HTTPS MCP endpoint</p>
           <h1>ChampCity GPT MCP Launcher</h1>
@@ -221,12 +248,12 @@
         </div>
       </section>
 
-      <section class="notice-band">
+      <section class="notice-band" data-screen="dashboard">
         <strong>Architecture correction:</strong>
         ChatGPT.com needs an HTTPS-reachable MCP endpoint with OAuth. Local STDIO is retained for advanced local clients, but the ChatGPT path is local HTTP on 127.0.0.1 plus a secure tunnel for your public MCP hostname.
       </section>
 
-      <section class="oauth-band" aria-label="ChatGPT OAuth Setup">
+      <section class="oauth-band" data-screen="connection" aria-label="ChatGPT OAuth Setup">
         <div class="section-heading">
           <h2>ChatGPT OAuth Setup</h2>
           <span>OAuth is primary for ChatGPT.com; bearer auth is legacy/manual testing.</span>
@@ -261,7 +288,7 @@
         </div>
       </section>
 
-      <section class="oauth-band" aria-label="OAuth Sessions">
+      <section class="oauth-band" data-screen="connection" aria-label="OAuth Sessions">
         <div class="section-heading">
           <h2>OAuth Sessions</h2>
           <span>Refresh tokens keep ChatGPT connected while access tokens stay short-lived.</span>
@@ -282,7 +309,7 @@
         </div>
       </section>
 
-      <section class="write-access-band" aria-label="Write Access">
+      <section class="write-access-band" data-screen="tools" aria-label="Write Access">
         <div class="section-heading">
           <h2>Write Access</h2>
           <span>Use docs for planning artifacts, patch for proposed code changes, elevated only rarely.</span>
@@ -315,7 +342,7 @@
         </div>
       </section>
 
-      <section class="figma-band" aria-label="Figma Handoff">
+      <section class="figma-band" data-screen="tools" aria-label="Figma Handoff">
         <div class="section-heading">
           <h2>Figma Handoff</h2>
           <span>Setup and debug status only; ChatGPT runs Make handoff through the MCP tool.</span>
@@ -356,7 +383,7 @@
         </div>
       </section>
 
-      <section class="toolbar-band" aria-label="Actions">
+      <section class="toolbar-band" data-screen="dashboard" aria-label="Actions">
         <button id="runDoctor">Run Doctor</button>
         <button id="runRuntimePathCheck">Run Runtime Path Check</button>
         <button id="installDeps">Developer: Install Dependencies</button>
@@ -455,7 +482,7 @@
       </div>
 
       <div class="content-grid">
-        <section class="panel checklist-panel">
+        <section class="panel checklist-panel" data-screen="dashboard connection">
           <div class="section-heading">
             <h2>Cloudflare / public endpoint</h2>
             <span>Read-only first, then carefully enable writes.</span>
@@ -475,7 +502,7 @@
           </div>
         </section>
 
-        <section class="panel checklist-panel">
+        <section class="panel checklist-panel" data-screen="troubleshoot">
           <div class="section-heading">
             <h2>Doctor Checklist</h2>
             <span id="checklistMeta">Run doctor for current results.</span>
@@ -483,7 +510,7 @@
           <div id="checklist" class="checklist"></div>
         </section>
 
-        <section class="panel checklist-panel">
+        <section class="panel checklist-panel" data-screen="troubleshoot">
           <div class="section-heading">
             <h2>Last ChatGPT MCP Discovery</h2>
             <span id="discoveryTimestamp">none recorded</span>
@@ -503,7 +530,7 @@
           </div>
         </section>
 
-        <section class="panel roots-panel">
+        <section class="panel roots-panel" data-screen="settings">
           <div class="section-heading">
             <h2>Allowed Roots Manager</h2>
             <span id="configPath">config/allowed-roots.local.json</span>
@@ -525,7 +552,7 @@
           <div id="rootWarnings" class="warnings"></div>
         </section>
 
-        <section class="panel client-panel">
+        <section class="panel client-panel" data-screen="connection">
           <div class="section-heading">
             <h2>Generated Setup Notes</h2>
             <span>ChatGPT first; STDIO is advanced/local.</span>
@@ -539,7 +566,7 @@
           <pre id="configPreview" class="code-preview"></pre>
         </section>
 
-        <section class="panel advanced-panel">
+        <section class="panel advanced-panel" data-screen="settings">
           <details>
             <summary>Advanced: Settings and Local STDIO Clients</summary>
             <p>
@@ -551,15 +578,29 @@
           </details>
         </section>
 
-        <section class="panel logs-panel">
+        <section class="panel logs-panel" data-screen="logs">
           <div class="section-heading">
             <h2>Logs / Output</h2>
             <span>Doctor, build, install, HTTP start/stop, and errors</span>
           </div>
+          <div class="log-toolbar" aria-label="Log filters and actions">
+            <input id="logSearchInput" class="text-input log-search" type="search" placeholder="Search logs" spellcheck="false" />
+            <div class="log-filter-row" role="group" aria-label="Severity filter">
+              <button class="log-filter active" type="button" data-log-filter="all">All</button>
+              <button class="log-filter" type="button" data-log-filter="info">Info</button>
+              <button class="log-filter" type="button" data-log-filter="warn">Warn</button>
+              <button class="log-filter" type="button" data-log-filter="error">Error</button>
+              <button class="log-filter" type="button" data-log-filter="debug">Debug</button>
+            </div>
+            <button id="copyLogView" type="button">Copy View</button>
+            <button id="clearLogView" type="button">Clear View</button>
+          </div>
           <pre id="outputLog" class="output-log"></pre>
         </section>
       </div>
+      </div>
     </main>
-    <script type="module" src="../../dist/electron/renderer/renderer.js"></script>
+    </template>
+    <script type="module" src="../../dist/electron/renderer/main.js"></script>
   </body>
 </html>

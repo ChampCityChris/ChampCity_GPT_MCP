@@ -2,7 +2,7 @@
 
 ChampCity GPT MCP Launcher is a pre-release ChatGPT-compatible MCP server and Electron launcher for controlled local project-file access. It can expose read-only and approval-gated write tools over local STDIO or local HTTP, with optional OAuth and HTTPS tunneling for ChatGPT.com-compatible MCP connectors.
 
-Current maturity: `v0.1.0`, pre-release/private-tooling quality. Review the code and security model before using it with sensitive repositories.
+Current maturity: `v0.1.2`, pre-release/private-tooling quality. Review the code and security model before using it with sensitive repositories.
 
 License: not yet selected. See [docs/LICENSE_DECISION_NEEDED.md](docs/LICENSE_DECISION_NEEDED.md).
 

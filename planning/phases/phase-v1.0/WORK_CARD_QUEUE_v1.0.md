@@ -408,7 +408,7 @@ This queue is derived from the answered operator intake file:
 - Scope: Include install/dependency checks, typecheck, build, tests, lint, public scan, audit, MCP self-test, tool manifest validation, live ChatGPT test, OAuth/DCR test, Cloudflare persistence test, source-control workflow test, release workflow test, installer/signing/update tests, and manual smoke tests.
 - Acceptance criteria: v1.0 cannot release unless all P0 checks pass or are explicitly waived by the operator.
 - Validation: Full release candidate validation run and report.
-- Dependencies or notes: Local deterministic tests do not replace live ChatGPT connector validation.
+- Dependencies or notes: Local deterministic tests do not replace live ChatGPT connector validation. Consumes the ChatGPT-only acceptance matrix produced by `WC-V1-0101`.
 
 ### WC-V1-0803 — v1.0 release candidate freeze
 

@@ -156,6 +156,8 @@ Output summary: `writeMode`, `writeModeSource`, docs/patch/elevated booleans, wh
 
 ## `get_figma_status`
 
+v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
+
 Returns whether a Figma token is configured and where it came from. It never returns the token value.
 
 Input:

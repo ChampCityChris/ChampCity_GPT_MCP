@@ -11,7 +11,7 @@ License: not yet selected. See [docs/LICENSE_DECISION_NEEDED.md](docs/LICENSE_DE
 - Lists, reads, and searches files inside configured allowed roots.
 - Reports git status and git diffs for allowed git worktrees.
 - Provides safe git workflow tools for readiness checks, safety scans, filtered staging, validated local commits, and optional non-force pushes.
-- Provides Figma-to-Codex design handoff tools using the official Figma REST API for Design URLs and official Figma MCP resources for Make URLs.
+- Contains experimental/deferred Figma-to-Codex design handoff tools using the official Figma REST API for Design URLs and official Figma MCP resources for Make URLs.
 - Supports write modes: `off`, `docs`, `patch`, and `elevated`.
 - Provides an Electron launcher for local setup, status checks, OAuth administration, and client config generation.
 - Supports local STDIO MCP for trusted local clients.
@@ -91,6 +91,8 @@ Copy-Item config\write-access.example.json config\write-access.local.json
 Local files matching `config/*.local.json` are ignored by git. Do not commit OAuth stores, auth tokens, local paths, tunnel credentials, logs, generated configs, release outputs, or `.env` files.
 
 ## Figma Design Handoff
+
+v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
 
 ChampCity GPT can fetch Figma file/frame metadata through the official Figma REST API and generate a Codex-ready UI implementation handoff. Configure a Figma personal access token locally:
 

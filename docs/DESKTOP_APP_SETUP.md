@@ -16,7 +16,7 @@ The packaged launcher runs the HTTP MCP server in-process from Electron. End use
 - Starts and stops the local HTTP MCP server in-process from Electron.
 - Configures ChatGPT OAuth setup: admin password, client reset, token revocation, metadata links, MCP URL copy, and OAuth setup notes.
 - Configures the HTTP auth token through a desktop modal instead of the browser prompt API.
-- Configures a local Figma token and creates Figma design handoff packages/prompts.
+- Shows the current experimental/deferred Figma handoff controls.
 - Shows runtime mode and runtime-local config/log/generated directories.
 - Runs a first-run setup wizard when required runtime config is missing.
 
@@ -288,6 +288,8 @@ Recommended workflow:
 5. Set write mode back to `Off`.
 
 ## Figma Handoff
+
+v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
 
 Use the `Figma Handoff` section to save the Figma token once and monitor Figma handoff status. For Figma Make, the primary online workflow is ChatGPT calling `run_figma_make_handoff`; the local exported-package fallback is ChatGPT calling `run_figma_make_file_handoff` with a `.make` path under an allowed root. The URL fields and buttons can remain useful for manual Design-file debugging.
 

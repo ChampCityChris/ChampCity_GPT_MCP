@@ -133,6 +133,8 @@ In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.rea
 
 ## Figma Make Handoff Flow
 
+v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
+
 Configure the upstream official Figma MCP server once. Desktop mode defaults to `http://127.0.0.1:3845/mcp`; remote mode requires an explicitly configured HTTPS endpoint. If the upstream server requires Figma-side authentication or user interaction, complete that setup outside ChatGPT first. After that, the intended ChatGPT workflow is one MCP tool call:
 
 ```text

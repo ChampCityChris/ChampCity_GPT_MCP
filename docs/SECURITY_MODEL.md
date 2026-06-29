@@ -58,6 +58,8 @@ Static HTTP bearer tokens can remain for legacy/manual testing. Loading order is
 
 ## Figma Token And Handoff Policy
 
+v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
+
 Figma Design access uses the official Figma REST API directly. Figma Make URL access uses the configured official Figma MCP server as an MCP client. Figma Make file fallback access parses user-exported local `.make` packages from configured allowed roots. Do not add unofficial third-party Figma MCP packages, browser scraping, screenshot fallback, clipboard automation, or arbitrary network-fetch tools.
 
 Figma token loading order:

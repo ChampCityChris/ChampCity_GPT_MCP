@@ -350,7 +350,7 @@ This queue is derived from the answered operator intake file:
 - Priority: P0
 - Owner mode: Architect decides; Codex/Builder implements if scoped
 - Type: Scope cleanup
-- Objective: Remove current Figma workflow from production-core v1.0.
+- Objective: De-scope current Figma workflow from production-core v1.0.
 - Scope: Decide whether to remove, disable, hide, or mark current Figma tooling experimental, then update roadmap/docs/UI only as separately authorized.
 - Acceptance criteria: v1.0 does not present current Figma workflow as a supported production-core feature.
 - Validation: Documentation review and operator UI validation if UI changes are made.

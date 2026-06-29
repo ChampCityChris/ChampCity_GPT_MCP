@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ListToolsResultSchema, ToolSchema } from "@modelcontextprotocol/sdk/types.js";
 
-import { createMcpToolsListResult, getToolExposureDiagnostics, serializeMcpToolsListPayload, tools } from "../src/server/registerTools.js";
+import { createMcpToolsListResult, getToolExposureDiagnostics, isReadToolName, isWriteToolName, serializeMcpToolsListPayload, tools } from "../src/server/registerTools.js";
 import { type AppConfig } from "../src/config.js";
 
 type TestToolSchema = {
@@ -40,6 +40,37 @@ function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   } satisfies AppConfig;
 }
 
+const publicSafeFacadeToolNames = [
+  "get_workspace_status_summary",
+  "get_change_set_readiness_summary",
+  "get_release_artifact_summary",
+  "get_release_publication_summary"
+] as const;
+
+const mutationInputFields = new Set([
+  "command",
+  "script",
+  "shell",
+  "args",
+  "argv",
+  "glob",
+  "absoluteOutputPath",
+  "approvalToken",
+  "force",
+  "delete",
+  "clobber"
+]);
+
+const riskyDescriptionPhrases = [
+  "arbitrary command",
+  "run command",
+  "execute shell",
+  "PowerShell",
+  "force push",
+  "delete tag",
+  "clobber"
+];
+
 describe("MCP tool schemas", () => {
   it("exposes write_markdown_artifact with optional approvalToken", () => {
     const writeMarkdown = tool("write_markdown_artifact");
@@ -69,15 +100,48 @@ describe("MCP tool schemas", () => {
     assert.deepEqual(status.inputSchema.required, []);
     assert.match(status.description, /without exposing secrets/i);
     assert.deepEqual(script.inputSchema.required, ["root", "command", "approvalToken"]);
-    assert.match(script.description, /elevated write mode/i);
+    assert.match(script.description, /Internal\/elevated exception/i);
     assert.match(script.description, /Never available in docs or patch mode/i);
+  });
+
+  it("registers the public-safe read-only facade tools with narrow schemas", () => {
+    for (const toolName of publicSafeFacadeToolNames) {
+      const facade = tool(toolName);
+      const properties = facade.inputSchema.properties ?? {};
+
+      assert.equal(isReadToolName(toolName), true, `${toolName} should require files.read`);
+      assert.equal(isWriteToolName(toolName), false, `${toolName} must not be a write tool`);
+      assert.match(facade.description, /^Read-only\./u);
+      assert.match(facade.description, /Does not modify repository files, git state, release state, or configuration\./u);
+
+      for (const fieldName of Object.keys(properties)) {
+        assert.equal(mutationInputFields.has(fieldName), false, `${toolName} must not expose mutation field ${fieldName}`);
+      }
+    }
+
+    assert.deepEqual(tool("get_workspace_status_summary").inputSchema.required, []);
+    assert.deepEqual(tool("get_change_set_readiness_summary").inputSchema.required, []);
+    assert.deepEqual(tool("get_release_artifact_summary").inputSchema.required, ["releaseVersion"]);
+    assert.deepEqual(tool("get_release_publication_summary").inputSchema.required, ["tagName"]);
+    assert.ok(tool("get_release_artifact_summary").inputSchema.properties?.releaseVersion);
+    assert.ok(tool("get_release_publication_summary").inputSchema.properties?.tagName);
+    assert.equal("glob" in (tool("get_release_artifact_summary").inputSchema.properties ?? {}), false);
+    assert.equal("command" in (tool("get_release_publication_summary").inputSchema.properties ?? {}), false);
+  });
+
+  it("keeps public-facing tool descriptions free of risky phrases", () => {
+    for (const registeredTool of tools) {
+      for (const phrase of riskyDescriptionPhrases) {
+        assert.doesNotMatch(registeredTool.description, new RegExp(phrase, "iu"), `${registeredTool.name} description contains ${phrase}`);
+      }
+    }
   });
 
   it("exposes narrow git workflow tools", () => {
     assert.match(tool("safe_stage_changes").description, /Never stages local config, logs, generated output, release artifacts, dist, node_modules, \.env, or ignored files/i);
     assert.match(tool("commit_validated_changes").description, /already staged files only/i);
     assert.match(tool("commit_validated_changes").description, /Refuses main branch by default/i);
-    assert.match(tool("push_current_branch").description, /without force push/i);
+    assert.match(tool("push_current_branch").description, /standard non-forcing behavior/i);
     assert.match(tool("push_current_branch").description, /Refuses main by default/i);
     assert.match(tool("get_commit_readiness").description, /read-only commit\/push readiness/i);
     assert.match(tool("pre_commit_safety_scan").description, /without staging or committing/i);

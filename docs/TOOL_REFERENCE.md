@@ -16,7 +16,7 @@ OAuth metadata:
 
 Scope mapping:
 
-- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `pre_commit_safety_scan`, and `get_commit_readiness`.
+- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `pre_commit_safety_scan`, and `get_commit_readiness`.
 - `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
 
 Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=off|docs|patch|elevated` is preferred, with `config/write-access.local.json` as the local-file source. Legacy `CHAMPCITY_GPT_ENABLE_WRITE_TOOLS=true` maps to `docs`.
@@ -24,7 +24,11 @@ Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=of
 - `off`: no writes.
 - `docs`: Markdown artifact writes.
 - `patch`: docs plus application of matching pending patch proposals.
-- `elevated`: scripts, legacy approval-gated fallback operations, and safe git stage/commit/push tools.
+- `elevated`: internal/elevated exception tasks, legacy approval-gated fallback operations, and safe git stage/commit/push tools.
+
+ChatGPT-facing status and release checks should prefer the read-only safe facade tools: `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, and `get_release_publication_summary`. These tools avoid caller-supplied local roots, executable file globs, and command-string inputs. Legacy `git_status`, `get_commit_readiness`, `list_project_files`, and `run_allowed_script` remain documented for compatibility, but `run_allowed_script` is not the normal v1.0 ChatGPT-facing status or release workflow.
+
+These facade tools are part of the WC-V1-0102 remediation path for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, and `CAV-030`. Live ChatGPT validation is still required before claiming full remediation.
 
 The elevated approval token is configured in `config/write-access.local.json` as a salted hash, or temporarily through `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` for dev/manual testing. Static bearer tokens are legacy/manual testing only; ChatGPT.com uses OAuth.
 
@@ -344,9 +348,69 @@ Input:
 
 Both fields are optional overrides. Without overrides, the app uses `figma-mcp.local.json`, `CHAMPCITY_GPT_FIGMA_MCP_ENDPOINT`, or the desktop default `http://127.0.0.1:3845/mcp`.
 
+## `get_workspace_status_summary`
+
+Read-only ChatGPT-safe facade for configured workspace status. It does not require the caller to provide an absolute local root and returns structured counts plus repository-relative changed paths.
+
+Input:
+
+```json
+{
+  "workspaceId": "default"
+}
+```
+
+Output summary: workspace ID/label, repository name when available, branch, clean/dirty booleans, staged/tracked/untracked/deleted counts, repository-relative changed paths, and safety notes. It does not return raw git status text.
+
+## `get_change_set_readiness_summary`
+
+Read-only ChatGPT-safe facade for change set readiness. It reports staged, unstaged, and untracked files, public-safety blockers, warnings, and recommended next steps without staging, committing, pushing, tagging, or changing release state.
+
+Input:
+
+```json
+{
+  "workspaceId": "default",
+  "targetBranch": "feature"
+}
+```
+
+Output summary: workspace ID, branch, target branch, clean/dirty state, staged files, unstaged files, untracked files, blocker findings by relative path/rule/message, warnings, and recommended next steps.
+
+## `get_release_artifact_summary`
+
+Read-only ChatGPT-safe facade for local release artifact inspection. It accepts a release version and maps that version internally to the expected final portable executable name under `release`.
+
+Input:
+
+```json
+{
+  "workspaceId": "default",
+  "releaseVersion": "v0.1.2"
+}
+```
+
+Output summary: normalized release version, expected artifact names, local final-artifact presence, repository-relative artifact path, size, timestamp, SHA-256 when present, release output policy, and warnings. Intermediate builder output such as `win-unpacked` executables or `.nsis.7z` files is not accepted as final release evidence.
+
+## `get_release_publication_summary`
+
+Read-only ChatGPT-safe facade for GitHub Release publication state. It accepts a tag name and optional asset inclusion flag, then checks release metadata through a fixed GitHub release lookup derived from the configured repository remote.
+
+Input:
+
+```json
+{
+  "workspaceId": "default",
+  "tagName": "v0.1.2",
+  "includeAssets": true
+}
+```
+
+Output summary: tag name, release existence, publication state, release URL, target commitish, draft/prerelease booleans, publish timestamp, optional asset metadata, expected asset match, expected asset match method, warnings, and blockers. When the expected local final artifact exists, expected asset matching first compares the local SHA-256 to GitHub asset digests such as `sha256:<hex>`, then falls back to exact asset name and conservative separator-normalized name comparison. Size-only evidence is reported as weak and is not treated as a strong match. It does not create, edit, upload, publish, or alter releases.
+
 ## `git_status`
 
-Runs fixed git inspection commands for an allowed root.
+Legacy read-only git inspection tool for an allowed root. ChatGPT-facing status workflows should prefer `get_workspace_status_summary`.
 
 Input:
 
@@ -393,7 +457,7 @@ Safety behavior: findings identify the path and rule only. The tool does not ret
 
 ## `get_commit_readiness`
 
-Returns read-only commit and push readiness.
+Legacy read-only commit and push readiness tool for an allowed root. ChatGPT-facing change set workflows should prefer `get_change_set_readiness_summary`.
 
 Input:
 
@@ -471,7 +535,7 @@ Safety behavior: only `origin` is accepted, force flags are never used, `main` p
 
 ## `run_allowed_script`
 
-Runs only commands exactly listed in `CHAMPCITY_GPT_ALLOWED_COMMANDS`, without shell interpolation, and only in elevated write mode with required elevated approval. It is never available in `docs` or `patch` mode.
+Internal/elevated exception tool for exact allowlisted maintenance tasks, without shell interpolation, and only in elevated write mode with required elevated approval. It is never available in `docs` or `patch` mode and is not the normal v1.0 ChatGPT-facing status or release workflow.
 
 Input:
 

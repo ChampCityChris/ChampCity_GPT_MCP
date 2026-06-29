@@ -82,7 +82,7 @@ This queue is derived from the answered operator intake file:
 - Scope: Adjust tool names, descriptions, schemas, responses, and exposed workflows as needed to avoid false unsafe classifications.
 - Acceptance criteria: Required safe tool calls work in a new ChatGPT conversation and blocked unsafe calls remain blocked.
 - Validation: Live ChatGPT connector validation, protocol self-test, and regression checks.
-- Dependencies or notes: Touches protected MCP exposure behavior and must be handled under a separately approved implementation card.
+- Dependencies or notes: Touches protected MCP exposure behavior and must be handled under a separately approved implementation card. Builder pass WC-V1-0102 adds read-only facade tools for status, change set readiness, release artifact inspection, and release publication inspection; full remediation still requires live ChatGPT validation for CAV-011, CAV-012, CAV-013, CAV-021, CAV-023, and CAV-030.
 
 ### WC-V1-0103 — Add MCP protocol self-test for release validation
 

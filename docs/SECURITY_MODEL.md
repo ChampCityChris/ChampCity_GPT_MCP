@@ -40,7 +40,7 @@ If ChatGPT reports `PKCE S256 code_challenge is required`, inspect the launcher 
 
 Scope mapping:
 
-- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `test_figma_mcp_connection`, `pre_commit_safety_scan`, and `get_commit_readiness`.
+- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `test_figma_mcp_connection`, `pre_commit_safety_scan`, and `get_commit_readiness`.
 - `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
 
 Write access uses local write modes instead of a per-write token for every write. OAuth `files.write` is still required, but it is not enough by itself. The local write mode must also permit the operation:
@@ -55,6 +55,21 @@ Write mode defaults to `off`. The preferred override is `CHAMPCITY_GPT_WRITE_MOD
 The local elevated approval token is stored only as a salted `scrypt` hash in `config/write-access.local.json`; `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` may be used temporarily for dev/manual testing and takes precedence over the local hash. Do not reuse OAuth access tokens as elevated approval tokens.
 
 Static HTTP bearer tokens can remain for legacy/manual testing. Loading order is `CHAMPCITY_GPT_HTTP_AUTH_TOKEN`, then `config\http-auth.local.json`, then no legacy token. Static bearer tokens were useful for manual HTTP tests but are not sufficient for ChatGPT's OAuth connector flow.
+
+## ChatGPT-Safe Read-Only Facade Tools
+
+WC-V1-0102 adds four purpose-built read-only facade tools for normal ChatGPT-facing status and release diagnostics:
+
+- `get_workspace_status_summary`
+- `get_change_set_readiness_summary`
+- `get_release_artifact_summary`
+- `get_release_publication_summary`
+
+These tools do not require absolute local Windows paths, do not accept command strings, do not accept executable file globs, and return bounded structured summaries with repository-relative paths where possible. They are the preferred ChatGPT-facing path for workspace status, change set readiness, release artifact inspection, and GitHub Release publication inspection.
+
+Legacy `git_status`, `get_commit_readiness`, `list_project_files`, and `run_allowed_script` remain available where their existing gates allow them, but `run_allowed_script` is not the normal v1.0 ChatGPT-facing status or release workflow. No write-scope, allowed-root, blocked-file, git safety, OAuth, or local write-mode checks are weakened by the facade tools.
+
+These tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, and `CAV-030`. Local tests can verify registration and schema safety, but live ChatGPT validation is still required before claiming full remediation.
 
 ## Figma Token And Handoff Policy
 
@@ -140,7 +155,7 @@ The audit log never records full file contents. The default path is `logs/audit.
 
 ## Command Allowlist Policy
 
-`run_allowed_script` only runs commands that exactly match the configured command allowlist. `CHAMPCITY_GPT_ALLOWED_COMMANDS` overrides the local config file. The command is parsed into executable plus arguments and spawned without shell interpolation.
+`run_allowed_script` is an internal/elevated exception for exact allowlisted maintenance tasks. `CHAMPCITY_GPT_ALLOWED_COMMANDS` overrides the local config file. The configured entry is parsed into executable plus arguments and spawned without shell interpolation.
 
 The default allowlist is:
 
@@ -184,7 +199,7 @@ Recommended workflow:
 1. Use `docs` mode for Markdown planning docs.
 2. Use `patch` mode for code changes and require `propose_patch` before `apply_approved_patch`.
 3. Work on `dev` or a feature branch, not `main`.
-4. Ask ChatGPT to run `get_commit_readiness`.
+4. Ask ChatGPT to call `get_change_set_readiness_summary` for the public-safe change set check.
 5. Ask ChatGPT to run `safe_stage_changes`.
 6. Ask ChatGPT to run `pre_commit_safety_scan`.
 7. Ask ChatGPT to run `commit_validated_changes` with a reviewed commit message.

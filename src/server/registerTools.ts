@@ -44,6 +44,12 @@ import {
 } from "../tools/inputLimits.js";
 import { listProjectFiles } from "../tools/listProjectFiles.js";
 import { proposePatch } from "../tools/proposePatch.js";
+import {
+  getChangeSetReadinessSummary,
+  getReleaseArtifactSummary,
+  getReleasePublicationSummary,
+  getWorkspaceStatusSummary
+} from "../tools/publicSafeFacade.js";
 import { readProjectFile } from "../tools/readProjectFile.js";
 import { runAllowedScript } from "../tools/runAllowedScript.js";
 import { searchProjectFiles } from "../tools/searchProjectFiles.js";
@@ -57,6 +63,7 @@ const approvalTokenSchema = { ...textSchema, maxLength: MAX_APPROVAL_TOKEN_LENGT
 const figmaUrlSchema = { ...textSchema, maxLength: 4096 };
 const figmaFileKeySchema = { ...textSchema, maxLength: 256 };
 const figmaNodeIdSchema = { ...textSchema, maxLength: 256 };
+const workspaceIdSchema = { ...textSchema, maxLength: 64, default: "default" };
 
 export const tools = [
   {
@@ -301,6 +308,58 @@ export const tools = [
     }
   },
   {
+    name: "get_workspace_status_summary",
+    description:
+      "Read-only. Returns a sanitized summary of the configured workspace state. Does not modify repository files, git state, release state, or configuration.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: workspaceIdSchema
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_change_set_readiness_summary",
+    description:
+      "Read-only. Returns a sanitized change set readiness summary for the configured workspace. Does not modify repository files, git state, release state, or configuration.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: workspaceIdSchema,
+        targetBranch: { type: "string", enum: ["main", "dev", "feature"], default: "feature" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_release_artifact_summary",
+    description:
+      "Read-only. Returns a sanitized release artifact summary for a requested version. Does not modify repository files, git state, release state, or configuration.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: workspaceIdSchema,
+        releaseVersion: { ...textSchema, maxLength: 64 }
+      },
+      required: ["releaseVersion"]
+    }
+  },
+  {
+    name: "get_release_publication_summary",
+    description:
+      "Read-only. Returns a sanitized GitHub release publication summary for a requested tag. Does not modify repository files, git state, release state, or configuration.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: workspaceIdSchema,
+        tagName: { ...textSchema, maxLength: 128 },
+        includeAssets: { type: "boolean", default: false }
+      },
+      required: ["tagName"]
+    }
+  },
+  {
     name: "git_status",
     description: "Return git status --short and the current branch for an allowed root.",
     inputSchema: {
@@ -379,7 +438,7 @@ export const tools = [
   },
   {
     name: "push_current_branch",
-    description: "Push the current branch to origin without force push. Refuses main by default.",
+    description: "Push the current branch to origin using standard non-forcing behavior. Refuses main by default.",
     inputSchema: {
       type: "object",
       properties: {
@@ -393,7 +452,7 @@ export const tools = [
   },
   {
     name: "run_allowed_script",
-    description: "Run only allowlisted commands in elevated write mode with required elevated approval. Never available in docs or patch mode.",
+    description: "Internal/elevated exception for exact allowlisted maintenance tasks with required elevated approval. Never available in docs or patch mode.",
     inputSchema: {
       type: "object",
       properties: {
@@ -415,6 +474,10 @@ export const READ_TOOL_NAMES = [
   "search_project_files",
   "git_status",
   "git_diff",
+  "get_workspace_status_summary",
+  "get_change_set_readiness_summary",
+  "get_release_artifact_summary",
+  "get_release_publication_summary",
   "get_write_access_status",
   "get_figma_status",
   "parse_figma_url",
@@ -942,6 +1005,14 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
           return toolResponse(await runFigmaMakeFileHandoffTool(args, config));
         case "test_figma_mcp_connection":
           return toolResponse(await testFigmaMcpConnectionTool(args, config));
+        case "get_workspace_status_summary":
+          return toolResponse(await getWorkspaceStatusSummary(args, config));
+        case "get_change_set_readiness_summary":
+          return toolResponse(await getChangeSetReadinessSummary(args, config));
+        case "get_release_artifact_summary":
+          return toolResponse(await getReleaseArtifactSummary(args, config));
+        case "get_release_publication_summary":
+          return toolResponse(await getReleasePublicationSummary(args, config));
         case "propose_patch":
           return toolResponse(await proposePatch(args, config));
         case "apply_approved_patch":

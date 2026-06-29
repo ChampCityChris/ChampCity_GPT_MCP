@@ -117,6 +117,19 @@ For local PKCE parsing verification against a running local server:
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-oauth-pkce-local.ps1
 ```
 
+## Safe Status And Release Checks
+
+For normal ChatGPT-facing read-only status and release diagnostics, prefer these WC-V1-0102 facade tools:
+
+- `get_workspace_status_summary`
+- `get_change_set_readiness_summary`
+- `get_release_artifact_summary`
+- `get_release_publication_summary`
+
+These tools avoid caller-supplied local roots, command-string inputs, and executable file globs. They return structured summaries with repository-relative paths where possible. `run_allowed_script` is not the normal v1.0 ChatGPT-facing status or release workflow.
+
+These facade tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, and `CAV-030`. Live ChatGPT validation is still required before claiming the safety-layer false-positive issue is fully remediated.
+
 ## Security Notes
 
 Files stay local until a tool call reads them. File contents requested through MCP may enter hosted ChatGPT context. This does not make hosted ChatGPT local-only.
@@ -129,7 +142,7 @@ Start read-only first. Set write mode above `off` only after confirming:
 - Audit logging is enabled and reviewed.
 - Read-only tools work through ChatGPT.
 
-In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers read/list/search/git status/git diff, `get_write_access_status`, Figma status/URL parsing/file summaries, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, Figma frame export, Figma handoff package generation, Figma Make URL handoff orchestration, Figma Make `.make` file handoff orchestration, Codex UI handoff prompt generation, and `run_allowed_script`, but write access still has local write-mode gates. Markdown/Figma handoff writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. Scripts require mode `elevated`, an allowlisted command, and the elevated approval token. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
+In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers read/list/search/git status/git diff, the safe status/release facade tools, `get_write_access_status`, Figma status/URL parsing/file summaries, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, Figma frame export, Figma handoff package generation, Figma Make URL handoff orchestration, Figma Make `.make` file handoff orchestration, Codex UI handoff prompt generation, and `run_allowed_script`, but write access still has local write-mode gates. Markdown/Figma handoff writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. `run_allowed_script` requires mode `elevated`, an allowlisted maintenance task, and the elevated approval token. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
 
 ## Figma Make Handoff Flow
 
@@ -175,7 +188,7 @@ Recommended write workflow:
 2. Set write mode to `patch` for code changes.
 3. Ask ChatGPT to propose a patch first and review the returned patch.
 4. Apply only the matching pending proposal.
-5. Inspect `git status` and `git diff`.
+5. Ask ChatGPT to call `get_workspace_status_summary` and inspect any needed diff separately.
 6. Use `elevated` only for scripts or legacy fallback, then rotate or clear the elevated token.
 7. Return write mode to `off`.
 

@@ -78,6 +78,7 @@ const REQUIRED_GATED_TOOLS = [
   "write_markdown_artifact",
   "propose_patch",
   "apply_approved_patch",
+  "prepare_git_work_branch",
   "safe_stage_changes",
   "commit_validated_changes",
   "push_current_branch",

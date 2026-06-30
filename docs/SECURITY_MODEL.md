@@ -41,14 +41,14 @@ If ChatGPT reports `PKCE S256 code_challenge is required`, inspect the launcher 
 Scope mapping:
 
 - `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `test_figma_mcp_connection`, `pre_commit_safety_scan`, and `get_commit_readiness`.
-- `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
+- `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `prepare_git_work_branch`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
 
 Write access uses local write modes instead of a per-write token for every write. OAuth `files.write` is still required, but it is not enough by itself. The local write mode must also permit the operation:
 
 - `off`: no write tools are allowed.
 - `docs`: Markdown artifact writes are allowed without `approvalToken`.
 - `patch`: docs mode plus controlled application of patches that match a stored `propose_patch` proposal hash.
-- `elevated`: reserved for scripts, legacy approval-gated fallback operations, and safe git stage/commit/push tools.
+- `elevated`: reserved for scripts, legacy approval-gated fallback operations, and safe git branch/stage/commit/push tools.
 
 Write mode defaults to `off`. The preferred override is `CHAMPCITY_GPT_WRITE_MODE=off|docs|patch|elevated`; otherwise the server reads `config/write-access.local.json`. Legacy `CHAMPCITY_GPT_ENABLE_WRITE_TOOLS=true` maps to `docs`, and `false` maps to `off`. Existing `httpWriteToolsEnabled: true` local config migrates to `writeMode: "docs"` unless `writeMode` is already present.
 
@@ -218,7 +218,7 @@ When `CHAMPCITY_GPT_REQUIRE_GIT_ROOT=true`, write tools verify that targets belo
 
 `pre_commit_safety_scan` and `get_commit_readiness` are read-only tools available with OAuth `files.read`. They report blocker findings by rule and path, but do not return raw matched secret values.
 
-`safe_stage_changes`, `commit_validated_changes`, and `push_current_branch` require OAuth `files.write` and write mode `elevated`. They do not accept shell commands or arbitrary git commands. `safe_stage_changes` stages exact validated paths only after excluding local config, `.env` files except `.env.example`, logs, generated output, release artifacts, `dist`, `node_modules`, `package-lock.zip`, PID/status/log files, coverage output, ignored files, and files with blocker secret/private-path findings. It never runs `git add .` or `git add -f`.
+`prepare_git_work_branch`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch` require OAuth `files.write` and write mode `elevated`. They do not accept shell commands or arbitrary git commands. `prepare_git_work_branch` accepts only `branchKind: dev` or `branchKind: feature` plus a validated Work Card ID and lowercase kebab-case slug. It generates only `dev`, `feature/WC-V1-xxxx-*`, or `feature/WC-V1-FIXxx-*`, refuses dirty working trees, refuses detached HEAD, refuses `main` as the active work target, and cannot push, merge, rebase, reset, stash, delete branches, tag, or run arbitrary commands. `safe_stage_changes` stages exact validated paths only after excluding local config, `.env` files except `.env.example`, logs, generated output, release artifacts, `dist`, `node_modules`, `package-lock.zip`, PID/status/log files, coverage output, ignored files, and files with blocker secret/private-path findings. It never runs `git add .` or `git add -f`.
 
 `commit_validated_changes` commits already staged files only. It runs `pre_commit_safety_scan` in staged mode immediately before `git commit -m <message>`, refuses empty staged sets and blocker findings, and refuses `main` by default unless `allowMainCommit` is explicitly `true`.
 
@@ -230,13 +230,16 @@ Recommended workflow:
 
 1. Use `docs` mode for Markdown planning docs.
 2. Use `patch` mode for code changes and require `propose_patch` before `apply_approved_patch`.
-3. Work on `dev` or a feature branch, not `main`.
-4. Ask ChatGPT to call `get_change_set_readiness_summary` for the public-safe change set check.
-5. Ask ChatGPT to run `safe_stage_changes`.
-6. Ask ChatGPT to run `pre_commit_safety_scan`.
-7. Ask ChatGPT to run `commit_validated_changes` with a reviewed commit message.
-8. Ask ChatGPT to run `push_current_branch` only after reviewing the commit result.
-9. Return write mode to `off` after the session.
+3. Work on `dev` or a Work Card feature branch, not `main`; `main` is for stable release or baseline checkpoints.
+4. Ask ChatGPT to run `prepare_git_work_branch` when `dev` or `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` needs to be prepared.
+5. Validate the change on the prepared branch.
+6. Ask ChatGPT to call `get_change_set_readiness_summary` for the public-safe change set check.
+7. Ask ChatGPT to run `safe_stage_changes`.
+8. Ask ChatGPT to run `pre_commit_safety_scan`.
+9. Ask ChatGPT to run `commit_validated_changes` with a reviewed commit message.
+10. Ask ChatGPT to run `push_current_branch` only after reviewing the commit result.
+11. Merge to `main` only at a stable release or baseline checkpoint.
+12. Return write mode to `off` after the session.
 
 Releases are separate from commits. Release binaries are uploaded as GitHub Release assets, not committed.
 

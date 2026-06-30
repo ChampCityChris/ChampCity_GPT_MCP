@@ -17,14 +17,14 @@ OAuth metadata:
 Scope mapping:
 
 - `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `pre_commit_safety_scan`, and `get_commit_readiness`.
-- `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
+- `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `prepare_git_work_branch`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
 
 Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=off|docs|patch|elevated` is preferred, with `config/write-access.local.json` as the local-file source. Legacy `CHAMPCITY_GPT_ENABLE_WRITE_TOOLS=true` maps to `docs`.
 
 - `off`: no writes.
 - `docs`: Markdown artifact writes.
 - `patch`: docs plus application of matching pending patch proposals.
-- `elevated`: internal/elevated exception tasks, legacy approval-gated fallback operations, and safe git stage/commit/push tools.
+- `elevated`: internal/elevated exception tasks, legacy approval-gated fallback operations, and safe git branch/stage/commit/push tools.
 
 ChatGPT-facing status and release checks should prefer the read-only safe facade tools: `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, and `get_release_publication_summary`. These tools avoid caller-supplied local roots, executable file globs, and command-string inputs. Legacy `git_status`, `get_commit_readiness`, `list_project_files`, and `run_allowed_script` remain documented for compatibility, but `run_allowed_script` is not the normal v1.0 ChatGPT-facing status or release workflow.
 
@@ -41,7 +41,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-This self-test checks the local tool registry, MCP `tools/list` schema validity, required read and gated tool registration, narrow safe-facade schemas, tool description safety phrases, safe read-only facade calls, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, and elevated-script gating. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
+This self-test checks the local tool registry, MCP `tools/list` schema validity, required read and gated tool registration, narrow safe-facade schemas, tool description safety phrases, safe read-only facade calls, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, elevated-script gating, and gated branch workflow tool coverage. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
 
 This self-test complements but does not replace live ChatGPT connector validation.
 
@@ -545,6 +545,29 @@ Input:
 ```
 
 Output summary: `readyToCommit`, `readyToPush`, current branch, staged files, blocker findings, warnings, and recommended next steps.
+
+## `prepare_git_work_branch`
+
+Prepares `dev` or a generated `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` branch. Requires OAuth `files.write` and local write mode `elevated`.
+
+Input:
+
+```json
+{
+  "workspaceId": "default",
+  "branchKind": "feature",
+  "workCardId": "WC-V1-FIX01",
+  "slug": "safe-branch-workflow-tool",
+  "baseBranch": "dev",
+  "createIfMissing": true
+}
+```
+
+Output summary: branch before/after, whether the branch was created or switched, selected base branch, target branch, clean status before/after, warnings, and recommended next steps.
+
+Safety behavior: the tool does not accept a raw branch name, root path, command, script, shell, args, `approvalToken`, force, reset, merge, rebase, stash, delete, or clobber field. It refuses dirty working trees, staged changes, untracked files, detached HEAD, `main` as the active work target, invalid Work Card IDs, unsafe slugs, missing base branches, and existing target branches that are not based on the selected base branch. It validates the generated branch with `git check-ref-format --branch`. It does not push, merge, rebase, reset, stash, delete branches, tag, or run arbitrary commands.
+
+Active Work Cards should use `dev` or a Work Card feature branch. `main` is reserved for stable release or baseline checkpoints. After branch preparation, the normal sequence is validate, stage reviewed files with `safe_stage_changes`, run `pre_commit_safety_scan`, commit with `commit_validated_changes`, push the current `dev` or feature branch with `push_current_branch`, and merge to `main` only at a stable checkpoint.
 
 ## `safe_stage_changes`
 

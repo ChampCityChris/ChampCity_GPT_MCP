@@ -136,6 +136,21 @@ Normal ChatGPT workflows should avoid broad `list_project_files` calls that comb
 
 These facade tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, `CAV-030`, and `CAV-033`. Live ChatGPT validation is still required before claiming the safety-layer false-positive issue is fully remediated.
 
+## Safe Source-Control Branch Preparation
+
+Active Work Cards should use `dev` or a generated `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` branch. `main` is reserved for stable release or baseline checkpoints.
+
+Use `prepare_git_work_branch` as the safe MCP path to prepare `dev` or a Work Card feature branch. The tool requires OAuth `files.write` and local write mode `elevated`, refuses dirty working trees, refuses detached HEAD, refuses `main` as the active work target, and does not push, merge, rebase, reset, stash, delete branches, tag, or run arbitrary commands.
+
+After branch preparation, the normal sequence is:
+
+1. Validate on the prepared branch.
+2. Stage reviewed files with `safe_stage_changes`.
+3. Run `pre_commit_safety_scan`.
+4. Commit with `commit_validated_changes`.
+5. Push the current `dev` or feature branch with `push_current_branch`.
+6. Merge to `main` only at a stable release or baseline checkpoint.
+
 ## Local MCP Protocol Self-Test
 
 For deterministic local release validation after a build, run:
@@ -145,7 +160,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-The self-test validates the local MCP tool registry, `tools/list` schema, required read and gated tools, safe facade schema narrowness, safe read-only facade calls, Builder Report discovery and summary, docs-write denial with write mode off, blocked-path denial, and elevated-script gating. JSON mode is suitable for Builder Reports and release validation evidence.
+The self-test validates the local MCP tool registry, `tools/list` schema, required read and gated tools, safe facade schema narrowness, safe read-only facade calls, Builder Report discovery and summary, docs-write denial with write mode off, blocked-path denial, elevated-script gating, and gated branch workflow tool coverage. JSON mode is suitable for Builder Reports and release validation evidence.
 
 This self-test complements but does not replace live ChatGPT connector validation. It does not contact ChatGPT.com, use browser automation or UI scraping, launch Cloudflare, mutate OAuth/DCR state, package, tag, push, publish, or run elevated scripts.
 
@@ -181,7 +196,7 @@ Start read-only first. Set write mode above `off` only after confirming:
 - Audit logging is enabled and reviewed.
 - Read-only tools work through ChatGPT.
 
-In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers read/list/search/git status/git diff, the safe status/release/Builder Report facade tools, `get_write_access_status`, Figma status/URL parsing/file summaries, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, Figma frame export, Figma handoff package generation, Figma Make URL handoff orchestration, Figma Make `.make` file handoff orchestration, Codex UI handoff prompt generation, and `run_allowed_script`, but write access still has local write-mode gates. Markdown/Figma handoff writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. `run_allowed_script` requires mode `elevated`, an allowlisted maintenance task, and the elevated approval token. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
+In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers read/list/search/git status/git diff, the safe status/release/Builder Report facade tools, `get_write_access_status`, Figma status/URL parsing/file summaries, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, Figma frame export, Figma handoff package generation, Figma Make URL handoff orchestration, Figma Make `.make` file handoff orchestration, Codex UI handoff prompt generation, `prepare_git_work_branch`, source-control stage/commit/push tools, and `run_allowed_script`, but write access still has local write-mode gates. Markdown/Figma handoff writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Branch preparation, staging, committing, pushing, and `run_allowed_script` require mode `elevated`; `run_allowed_script` also requires an allowlisted maintenance task and the elevated approval token. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
 
 ## Figma Make Handoff Flow
 
@@ -225,11 +240,13 @@ Recommended write workflow:
 
 1. Set write mode to `docs` for Markdown planning docs.
 2. Set write mode to `patch` for code changes.
-3. Ask ChatGPT to propose a patch first and review the returned patch.
-4. Apply only the matching pending proposal.
-5. Ask ChatGPT to call `get_workspace_status_summary` and inspect any needed diff separately.
-6. Use `elevated` only for scripts or legacy fallback, then rotate or clear the elevated token.
-7. Return write mode to `off`.
+3. Ask ChatGPT to prepare `dev` or a Work Card feature branch with `prepare_git_work_branch` before source changes are staged or committed.
+4. Ask ChatGPT to propose a patch first and review the returned patch.
+5. Apply only the matching pending proposal.
+6. Ask ChatGPT to call `get_workspace_status_summary` and inspect any needed diff separately.
+7. Validate, then stage reviewed files, commit, and push only the current `dev` or feature branch.
+8. Use `elevated` only for source-control tools, scripts, or legacy fallback, then rotate or clear the elevated token.
+9. Return write mode to `off`.
 
 The bearer token is a development/private-connector safeguard, not a complete enterprise auth system.
 

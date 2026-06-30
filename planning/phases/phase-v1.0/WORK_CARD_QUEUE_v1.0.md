@@ -14,6 +14,9 @@ This queue is derived from the answered operator intake file:
 - P0 means a v1.0 blocker unless explicitly waived by the operator.
 - P1/P2 items may clarify sequencing but must not convert deferred features into v1.0 commitments.
 - No Work Card in this queue authorizes fallback architecture, release publication, tag movement, package generation, source implementation, or protected-subsystem changes outside its own future approved scope.
+- Active implementation Work Cards should use `dev` or a generated `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` branch. `main` is reserved for stable release or baseline checkpoints.
+- `prepare_git_work_branch` is the safe MCP branch-preparation path. It refuses dirty working trees and `main` as the active work target, and it does not push, merge, rebase, reset, stash, delete, force, or run arbitrary commands.
+- Normal source-control flow after branch preparation is validate, stage reviewed files, run pre-commit safety scan, commit, push the current `dev` or feature branch, and merge to `main` only at a stable checkpoint.
 
 ## Phase 0 — Scope Lock And Baseline
 
@@ -203,7 +206,7 @@ This queue is derived from the answered operator intake file:
 - Scope: Provide purpose-built status, diff, scan, stage, commit, pull, push, tag-preflight, and evidence tools with guardrails.
 - Acceptance criteria: ChatGPT can coordinate normal source-control flow without asking the operator to run git commands manually.
 - Validation: Unit tests, sandbox/repo identity tests, public safety scan, and live ChatGPT workflow validation.
-- Dependencies or notes: Must not allow unsafe git reset, checkout, force-push, or tag movement without explicit future approval.
+- Dependencies or notes: Must not allow unsafe git reset, checkout, force-push, or tag movement without explicit future approval. `WC-V1-FIX01` adds the narrow `prepare_git_work_branch` prerequisite for safe `dev` or Work Card feature branch preparation; broader source-control workflow remains in this card.
 
 ### WC-V1-0302 — Build MCP-native release publication workflow
 
@@ -244,7 +247,7 @@ This queue is derived from the answered operator intake file:
 - Scope: Verify dynamic client registration, protected resource metadata, token flow, scope enforcement, and public connector documentation.
 - Acceptance criteria: Public setup does not require bearer/PAT/manual auth except when separately approved for safety-layer compatibility.
 - Validation: OAuth/DCR tests, live ChatGPT connector validation, and operator setup review.
-- Dependencies or notes: Protected OAuth/DCR subsystem; implementation requires a separate approved card.
+- Dependencies or notes: Protected OAuth/DCR subsystem; implementation requires a separate approved card. `WC-V1-0401` remains paused until `WC-V1-FIX01` is reviewed, committed, pushed, and available through MCP.
 
 ### WC-V1-0402 — Implement Cloudflare tunnel persistence setup and validation
 

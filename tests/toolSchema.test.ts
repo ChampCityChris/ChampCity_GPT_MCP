@@ -61,6 +61,30 @@ const mutationInputFields = new Set([
   "absoluteOutputPath",
   "approvalToken",
   "force",
+  "reset",
+  "merge",
+  "rebase",
+  "stash",
+  "delete",
+  "clobber"
+]);
+
+const unsafeBranchToolFields = new Set([
+  "root",
+  "absolutePath",
+  "branchName",
+  "targetBranch",
+  "command",
+  "script",
+  "shell",
+  "args",
+  "argv",
+  "approvalToken",
+  "force",
+  "reset",
+  "merge",
+  "rebase",
+  "stash",
   "delete",
   "clobber"
 ]);
@@ -154,6 +178,23 @@ describe("MCP tool schemas", () => {
   });
 
   it("exposes narrow git workflow tools", () => {
+    const prepareBranch = tool("prepare_git_work_branch");
+
+    assert.equal(isReadToolName("prepare_git_work_branch"), false);
+    assert.equal(isWriteToolName("prepare_git_work_branch"), true);
+    assert.deepEqual(prepareBranch.inputSchema.required, ["branchKind"]);
+    assert.deepEqual(prepareBranch.inputSchema.properties?.branchKind, { type: "string", enum: ["dev", "feature"] });
+    assert.deepEqual(prepareBranch.inputSchema.properties?.baseBranch, { type: "string", enum: ["main", "dev"] });
+    assert.ok(prepareBranch.inputSchema.properties?.workspaceId);
+    assert.ok(prepareBranch.inputSchema.properties?.workCardId);
+    assert.ok(prepareBranch.inputSchema.properties?.slug);
+    assert.ok(prepareBranch.inputSchema.properties?.createIfMissing);
+    assert.match(prepareBranch.description, /Requires a clean working tree/i);
+    assert.match(prepareBranch.description, /refuses main as the active work target/i);
+    for (const fieldName of Object.keys(prepareBranch.inputSchema.properties ?? {})) {
+      assert.equal(unsafeBranchToolFields.has(fieldName), false, `prepare_git_work_branch must not expose ${fieldName}`);
+    }
+
     assert.match(tool("safe_stage_changes").description, /Never stages local config, logs, generated output, release artifacts, dist, node_modules, \.env, or ignored files/i);
     assert.match(tool("commit_validated_changes").description, /already staged files only/i);
     assert.match(tool("commit_validated_changes").description, /Refuses main branch by default/i);
@@ -267,8 +308,22 @@ describe("MCP tool schemas", () => {
     assert.ok(diagnostics.exposedToolNames.includes("write_markdown_artifact"));
     assert.ok(diagnostics.exposedToolNames.includes("run_figma_make_handoff"));
     assert.ok(diagnostics.exposedToolNames.includes("run_figma_make_file_handoff"));
+    assert.equal(diagnostics.exposedToolNames.includes("prepare_git_work_branch"), false);
     assert.equal(diagnostics.exposedToolNames.includes("safe_stage_changes"), false);
+    assert.ok(diagnostics.scopeFilteredTools.some((entry) => entry.name === "prepare_git_work_branch" && /elevated/u.test(entry.reason)));
     assert.ok(diagnostics.scopeFilteredTools.some((entry) => entry.name === "safe_stage_changes" && /elevated/u.test(entry.reason)));
+  });
+
+  it("exposes prepare_git_work_branch only with files.write and elevated mode", () => {
+    const readOnlyDiagnostics = getToolExposureDiagnostics(testConfig({ writeMode: "elevated" }), { scope: "files.read" });
+    const docsDiagnostics = getToolExposureDiagnostics(testConfig({ writeMode: "docs" }), { scope: "files.read files.write" });
+    const elevatedDiagnostics = getToolExposureDiagnostics(testConfig({ writeMode: "elevated" }), { scope: "files.read files.write" });
+
+    assert.equal(readOnlyDiagnostics.exposedToolNames.includes("prepare_git_work_branch"), false);
+    assert.ok(readOnlyDiagnostics.scopeFilteredTools.some((entry) => entry.name === "prepare_git_work_branch" && /files\.write/u.test(entry.reason)));
+    assert.equal(docsDiagnostics.exposedToolNames.includes("prepare_git_work_branch"), false);
+    assert.ok(docsDiagnostics.scopeFilteredTools.some((entry) => entry.name === "prepare_git_work_branch" && /elevated/u.test(entry.reason)));
+    assert.equal(elevatedDiagnostics.exposedToolNames.includes("prepare_git_work_branch"), true);
   });
 
   it("excludes only a malformed tool schema from public exposure", () => {

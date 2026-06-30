@@ -27,6 +27,7 @@ import {
 import { commitValidatedChanges } from "../tools/gitWorkflow/commitValidatedChanges.js";
 import { getCommitReadiness } from "../tools/gitWorkflow/getCommitReadiness.js";
 import { preCommitSafetyScan } from "../tools/gitWorkflow/preCommitSafetyScan.js";
+import { prepareGitWorkBranch } from "../tools/gitWorkflow/prepareGitWorkBranch.js";
 import { pushCurrentBranch } from "../tools/gitWorkflow/pushCurrentBranch.js";
 import { safeStageChanges } from "../tools/gitWorkflow/safeStageChanges.js";
 import { getWriteAccessStatus } from "../tools/getWriteAccessStatus.js";
@@ -67,6 +68,7 @@ const figmaNodeIdSchema = { ...textSchema, maxLength: 256 };
 const workspaceIdSchema = { ...textSchema, maxLength: 64, default: "default" };
 const phaseFolderSchema = { ...textSchema, maxLength: 128 };
 const workCardIdSchema = { ...textSchema, maxLength: 128 };
+const branchSlugSchema = { ...textSchema, maxLength: 80 };
 
 export const tools = [
   {
@@ -443,6 +445,23 @@ export const tools = [
     }
   },
   {
+    name: "prepare_git_work_branch",
+    description:
+      "Prepare dev or a Work Card feature branch using fixed git branch operations. Requires a clean working tree, OAuth files.write, and writeMode elevated; refuses main as the active work target.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: workspaceIdSchema,
+        branchKind: { type: "string", enum: ["dev", "feature"] },
+        workCardId: workCardIdSchema,
+        slug: branchSlugSchema,
+        baseBranch: { type: "string", enum: ["main", "dev"] },
+        createIfMissing: { type: "boolean", default: true }
+      },
+      required: ["branchKind"]
+    }
+  },
+  {
     name: "safe_stage_changes",
     description:
       "Stage only files that pass public-repo safety rules. Never stages local config, logs, generated output, release artifacts, dist, node_modules, .env, or ignored files.",
@@ -533,6 +552,7 @@ export const WRITE_TOOL_NAMES = [
   "run_figma_make_handoff",
   "run_figma_make_file_handoff",
   "run_allowed_script",
+  "prepare_git_work_branch",
   "safe_stage_changes",
   "commit_validated_changes",
   "push_current_branch"
@@ -981,7 +1001,10 @@ export function assertWriteToolEnabled(toolName: string, config: AppConfig): voi
   }
 
   if (
-    (toolName === "safe_stage_changes" || toolName === "commit_validated_changes" || toolName === "push_current_branch") &&
+    (toolName === "prepare_git_work_branch" ||
+      toolName === "safe_stage_changes" ||
+      toolName === "commit_validated_changes" ||
+      toolName === "push_current_branch") &&
     !config.elevatedOperationsAllowed
   ) {
     throw new AppError("APPROVAL_REQUIRED", `${toolName} requires writeMode elevated.`);
@@ -1067,6 +1090,8 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
           return toolResponse(await preCommitSafetyScan(args, config));
         case "get_commit_readiness":
           return toolResponse(await getCommitReadiness(args, config));
+        case "prepare_git_work_branch":
+          return toolResponse(await prepareGitWorkBranch(args, config));
         case "safe_stage_changes":
           return toolResponse(await safeStageChanges(args, config));
         case "commit_validated_changes":

@@ -136,6 +136,19 @@ Normal ChatGPT workflows should avoid broad `list_project_files` calls that comb
 
 These facade tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, `CAV-030`, and `CAV-033`. Live ChatGPT validation is still required before claiming the safety-layer false-positive issue is fully remediated.
 
+## Local MCP Protocol Self-Test
+
+For deterministic local release validation after a build, run:
+
+```powershell
+npm run mcp:self-test
+npm run mcp:self-test -- --json
+```
+
+The self-test validates the local MCP tool registry, `tools/list` schema, required read and gated tools, safe facade schema narrowness, safe read-only facade calls, Builder Report discovery and summary, docs-write denial with write mode off, blocked-path denial, and elevated-script gating. JSON mode is suitable for Builder Reports and release validation evidence.
+
+This self-test complements but does not replace live ChatGPT connector validation. It does not contact ChatGPT.com, use browser automation or UI scraping, launch Cloudflare, mutate OAuth/DCR state, package, tag, push, publish, or run elevated scripts.
+
 ## Security Notes
 
 Files stay local until a tool call reads them. File contents requested through MCP may enter hosted ChatGPT context. This does not make hosted ChatGPT local-only.

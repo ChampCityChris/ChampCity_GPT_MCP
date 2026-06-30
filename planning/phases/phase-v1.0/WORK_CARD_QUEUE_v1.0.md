@@ -108,7 +108,7 @@ This queue is derived from the answered operator intake file:
 - Scope: Verify metadata, initialize, tools/list, required tool presence, safe read call, write-scope denied behavior, and diagnostic output.
 - Acceptance criteria: Self-test produces pass/fail results suitable for release reports and catches empty namespace/tool exposure failures.
 - Validation: Local self-test run and release validation integration.
-- Dependencies or notes: Complements but does not replace live ChatGPT connector validation.
+- Dependencies or notes: Builder implementation adds `npm run mcp:self-test` and `npm run mcp:self-test -- --json` for deterministic local release validation. Complements but does not replace live ChatGPT connector validation.
 
 ### WC-V1-0104 — Add live ChatGPT connector evidence capture
 

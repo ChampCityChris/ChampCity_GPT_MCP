@@ -13,6 +13,7 @@
   },
   "scripts": {
     "mcp:build": "tsc -p tsconfig.json && npm run renderer:build",
+    "mcp:self-test": "node scripts/mcp-self-test.mjs",
     "renderer:build": "node scripts/build-renderer.mjs",
     "build": "npm run mcp:build",
     "typecheck": "tsc --noEmit -p tsconfig.json",

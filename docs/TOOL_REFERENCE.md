@@ -32,6 +32,19 @@ These facade tools are part of the WC-V1-0102 remediation path for `CAV-011`, `C
 
 Builder Report discovery should use `get_builder_report_index`. Specific report review should use `get_builder_report_summary`, or `read_project_file` only with a narrow expected report path already returned by the index. Normal ChatGPT workflows should avoid broad `list_project_files` calls that combine `planning/phases`, `**/BUILDER_REPORT*.md`, high `maxResults`, and absolute local roots. The Builder Report facade supports `CAV-033`; live ChatGPT validation is still required before claiming platform safety-layer remediation.
 
+## Local MCP Protocol Self-Test
+
+Release validation can run the deterministic local MCP protocol self-test after building:
+
+```powershell
+npm run mcp:self-test
+npm run mcp:self-test -- --json
+```
+
+This self-test checks the local tool registry, MCP `tools/list` schema validity, required read and gated tool registration, narrow safe-facade schemas, tool description safety phrases, safe read-only facade calls, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, and elevated-script gating. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
+
+This self-test complements but does not replace live ChatGPT connector validation.
+
 The elevated approval token is configured in `config/write-access.local.json` as a salted hash, or temporarily through `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` for dev/manual testing. Static bearer tokens are legacy/manual testing only; ChatGPT.com uses OAuth.
 
 ## `list_project_files`

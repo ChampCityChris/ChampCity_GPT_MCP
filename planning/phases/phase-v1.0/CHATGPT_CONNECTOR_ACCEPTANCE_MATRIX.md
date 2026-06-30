@@ -170,7 +170,7 @@ Owner values:
 | --- | --- | --- |
 | Safety-layer false positives | `WC-V1-0102` | Adds safe read-only facade tools for CAV-011, CAV-012, CAV-013, CAV-021, CAV-023, and CAV-030; live ChatGPT validation is still required. |
 | Builder Report discovery false positive | `WC-V1-0102A` | Required for CAV-033; adds a safe read-only Builder Report discovery facade so ChatGPT does not need broad recursive globs or absolute local roots for normal Architect review workflows. |
-| MCP protocol self-test | `WC-V1-0103` | Required for deterministic support around CAV-011, CAV-014, and CAV-015. |
+| MCP protocol self-test | `WC-V1-0103` | Adds `npm run mcp:self-test` and `npm run mcp:self-test -- --json` for deterministic local coverage around CAV-011, CAV-014, CAV-015, CAV-018, CAV-019, CAV-021, CAV-023, CAV-030, and CAV-033. This local self-test complements but does not replace live ChatGPT connector validation. |
 | Live evidence capture | `WC-V1-0104` | Required for CAV-007 through CAV-011 and CAV-027 through CAV-031. |
 | Purpose-built tools | `WC-V1-0201` | Required to keep CAV-018, CAV-021, CAV-022, and CAV-023 off arbitrary shell workflows. |
 | Permission modes/toolsets | `WC-V1-0202` | Required for CAV-014, CAV-015, CAV-017, and CAV-018. |

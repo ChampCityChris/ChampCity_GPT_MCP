@@ -75,6 +75,21 @@ The Builder Report facade tools are limited to `planning/phases/<phaseFolder>/Bu
 
 These tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, `CAV-030`, and `CAV-033`. Local tests can verify registration and schema safety, but live ChatGPT validation is still required before claiming full platform safety-layer remediation.
 
+## Local MCP Protocol Self-Test
+
+Release validation can run:
+
+```powershell
+npm run mcp:self-test
+npm run mcp:self-test -- --json
+```
+
+The self-test is deterministic and local. It validates the MCP tool registry, `tools/list` schema, required read and gated tool registration, narrow safe-facade schemas, safety-compatible descriptions, safe read-only facade calls, Builder Report discovery, denied docs-write behavior, blocked-path denial, and elevated-script gating. It uses temporary fixtures for denied write and blocked-path probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
+
+The JSON output is intended for release validation and Builder Reports. It must remain redacted and must not expose secrets, tokens, OAuth stores, local config contents, full private user paths, release binary contents, logs, or generated output contents.
+
+This self-test complements but does not replace live ChatGPT connector validation.
+
 ## Figma Token And Handoff Policy
 
 v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.

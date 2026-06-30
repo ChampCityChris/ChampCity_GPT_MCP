@@ -136,6 +136,7 @@ Owner values:
 | CAV-030 | ChatGPT safety layer | Safety-layer false positive regression is tracked | Known safe calls and prior ChatGPT safety failures are listed | Re-run known safe calls in a new ChatGPT conversation using the WC-V1-0102 facade tools and compare outcomes | Known previously blocked safe calls are listed with expected future pass behavior | CHATGPT_TOOL_RESULT, CHATGPT_UI_OBSERVATION, REDACTED_DIAGNOSTIC_EXPORT | TOOL_CALL_BLOCKED_BY_CHATGPT_SAFETY, EVIDENCE_INCOMPLETE | P0_BLOCKER | Manual | Operator | WC-V1-0102, WC-V1-0104 | NOT_RUN | Use live ChatGPT evidence; local tests cannot prove this. |
 | CAV-031 | evidence/export | Diagnostic evidence export is safe | Diagnostic export feature or manual evidence bundle exists | Generate or assemble diagnostic evidence and inspect redaction | Diagnostic/export artifact redacts tokens, secrets, private local config, OAuth stores, and unnecessary private paths | REDACTED_DIAGNOSTIC_EXPORT, APP_LOG | SECRET_SAFETY_BLOCKER, EVIDENCE_INCOMPLETE | P1_RC_REQUIRED | Hybrid | Builder | WC-V1-0104, WC-V1-0205 | NOT_RUN | A P1 issue may still block RC approval if evidence cannot be trusted. |
 | CAV-032 | guided setup | User-facing setup path is semi-technical friendly | Clean profile or scripted reset available; operator can perform guided setup | Follow guided setup without routine CLI; record blockers and required manual steps | Matrix defines how to validate that a semi-technical user can complete setup without routine CLI | OPERATOR_SCREEN_CONFIRMATION, DOCTOR_OUTPUT, REDACTED_DIAGNOSTIC_EXPORT | MANUAL_OPERATOR_VALIDATION_REQUIRED, PUBLIC_ENDPOINT_UNREACHABLE, EVIDENCE_INCOMPLETE | P0_BLOCKER | Manual | Operator | WC-V1-0501, WC-V1-0502, WC-V1-0802 | NOT_RUN | Builder does not judge visual quality; operator validates usability. |
+| CAV-033 | planning artifact discovery | Builder Report discovery facade avoids broad recursive glob false positives | Connector connected; `files.read` granted; target repository has phase-local `Builder_Reports` Markdown files | Ask ChatGPT to find Builder Reports through a purpose-built facade such as `get_builder_report_index`, including a known report such as `WC07` in `ChampCity_AI`, without passing an absolute local root or broad recursive glob | ChatGPT can discover relevant Builder Reports through a safe facade without platform safety false positives, and the facade returns repository-relative paths with bounded metadata | CHATGPT_TOOL_RESULT, CHATGPT_UI_OBSERVATION, APP_LOG, REDACTED_DIAGNOSTIC_EXPORT | TOOL_CALL_BLOCKED_BY_CHATGPT_SAFETY, TOOL_NOT_VISIBLE, REPORT_DISCOVERY_UNAVAILABLE, TOOL_CALL_APP_ERROR | P0_BLOCKER | Manual | Operator | WC-V1-0102A, WC-V1-0104 | NOT_RUN | Captures the 2026-06-29 false positive where broad `list_project_files` with `planning/phases` and `**/BUILDER_REPORT*.md` was blocked. |
 
 ## 6. Failure Classification Taxonomy
 
@@ -151,6 +152,7 @@ Owner values:
 - `SCOPE_MISSING`
 - `TOOLS_LIST_FAIL`
 - `TOOL_NOT_VISIBLE`
+- `REPORT_DISCOVERY_UNAVAILABLE`
 - `TOOL_CALL_BLOCKED_BY_CHATGPT_SAFETY`
 - `TOOL_CALL_DENIED_BY_APP_POLICY`
 - `TOOL_CALL_APP_ERROR`
@@ -167,6 +169,7 @@ Owner values:
 | Gap | Follow-up Work Card | Acceptance dependency |
 | --- | --- | --- |
 | Safety-layer false positives | `WC-V1-0102` | Adds safe read-only facade tools for CAV-011, CAV-012, CAV-013, CAV-021, CAV-023, and CAV-030; live ChatGPT validation is still required. |
+| Builder Report discovery false positive | `WC-V1-0102A` | Required for CAV-033; adds a safe read-only Builder Report discovery facade so ChatGPT does not need broad recursive globs or absolute local roots for normal Architect review workflows. |
 | MCP protocol self-test | `WC-V1-0103` | Required for deterministic support around CAV-011, CAV-014, and CAV-015. |
 | Live evidence capture | `WC-V1-0104` | Required for CAV-007 through CAV-011 and CAV-027 through CAV-031. |
 | Purpose-built tools | `WC-V1-0201` | Required to keep CAV-018, CAV-021, CAV-022, and CAV-023 off arbitrary shell workflows. |

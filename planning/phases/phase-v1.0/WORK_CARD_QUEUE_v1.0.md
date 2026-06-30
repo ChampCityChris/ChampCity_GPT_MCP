@@ -84,6 +84,19 @@ This queue is derived from the answered operator intake file:
 - Validation: Live ChatGPT connector validation, protocol self-test, and regression checks.
 - Dependencies or notes: Touches protected MCP exposure behavior and must be handled under a separately approved implementation card. Builder pass WC-V1-0102 adds read-only facade tools for status, change set readiness, release artifact inspection, and release publication inspection; full remediation still requires live ChatGPT validation for CAV-011, CAV-012, CAV-013, CAV-021, CAV-023, and CAV-030.
 
+### WC-V1-0102A — Add Builder Report discovery facade
+
+- ID: `WC-V1-0102A`
+- Title: Add Builder Report discovery facade
+- Priority: P0
+- Owner mode: Architect specifies; Codex/Builder implements
+- Type: MCP reliability / planning artifact discovery
+- Objective: Replace broad recursive Builder Report listing with a purpose-built ChatGPT-safe read-only facade.
+- Scope: Add a bounded read-only tool such as `get_builder_report_index` and, if needed, a narrow `get_builder_report_summary`/specific-report lookup that discovers phase-local Builder Reports without caller-supplied absolute roots, arbitrary globs, or broad recursive file queries. The tool should support configured allowed workspaces by safe `workspaceId`/project key, phase folder, Work Card ID, and bounded result count. It must return repository-relative paths and safe metadata only.
+- Acceptance criteria: ChatGPT can find known Builder Reports, including the WC07 report under `ChampCity_AI`, without using `list_project_files` with `planning/phases` plus `**/BUILDER_REPORT*.md`; blocked unsafe path attempts remain blocked; live ChatGPT validation records whether the prior broad-glob false positive is avoided by the facade.
+- Validation: Unit tests for schema bounds, allowed-root enforcement, blocked-path behavior, and relative output paths; MCP tool-list/self-test once available; live ChatGPT validation for CAV-033.
+- Dependencies or notes: This is a narrow follow-up to WC-V1-0102. It does not authorize a broad workspace registry, product Work Card UI, GitHub Projects sync, arbitrary file search expansion, or mutation tools.
+
 ### WC-V1-0103 — Add MCP protocol self-test for release validation
 
 - ID: `WC-V1-0103`
@@ -438,4 +451,4 @@ This queue is derived from the answered operator intake file:
 
 ## Work Card Count
 
-This queue contains 31 P0 Work Cards.
+This queue contains 32 P0 Work Cards.

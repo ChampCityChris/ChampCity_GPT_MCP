@@ -40,7 +40,7 @@ If ChatGPT reports `PKCE S256 code_challenge is required`, inspect the launcher 
 
 Scope mapping:
 
-- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `test_figma_mcp_connection`, `pre_commit_safety_scan`, and `get_commit_readiness`.
+- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `test_figma_mcp_connection`, `pre_commit_safety_scan`, and `get_commit_readiness`.
 - `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
 
 Write access uses local write modes instead of a per-write token for every write. OAuth `files.write` is still required, but it is not enough by itself. The local write mode must also permit the operation:
@@ -64,12 +64,16 @@ WC-V1-0102 adds four purpose-built read-only facade tools for normal ChatGPT-fac
 - `get_change_set_readiness_summary`
 - `get_release_artifact_summary`
 - `get_release_publication_summary`
+- `get_builder_report_index`
+- `get_builder_report_summary`
 
 These tools do not require absolute local Windows paths, do not accept command strings, do not accept executable file globs, and return bounded structured summaries with repository-relative paths where possible. They are the preferred ChatGPT-facing path for workspace status, change set readiness, release artifact inspection, and GitHub Release publication inspection.
 
 Legacy `git_status`, `get_commit_readiness`, `list_project_files`, and `run_allowed_script` remain available where their existing gates allow them, but `run_allowed_script` is not the normal v1.0 ChatGPT-facing status or release workflow. No write-scope, allowed-root, blocked-file, git safety, OAuth, or local write-mode checks are weakened by the facade tools.
 
-These tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, and `CAV-030`. Local tests can verify registration and schema safety, but live ChatGPT validation is still required before claiming full remediation.
+The Builder Report facade tools are limited to `planning/phases/<phaseFolder>/Builder_Reports/BUILDER_REPORT*.md`. `get_builder_report_index` returns repository-relative metadata only; `get_builder_report_summary` returns one bounded preview by safe report lookup and redacts private local path-like and token-like content. They do not accept arbitrary roots, arbitrary globs, command strings, shell arguments, write controls, or mutation inputs. Normal ChatGPT workflows should avoid broad `list_project_files` calls that combine `planning/phases`, `**/BUILDER_REPORT*.md`, high `maxResults`, and absolute local roots.
+
+These tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, `CAV-030`, and `CAV-033`. Local tests can verify registration and schema safety, but live ChatGPT validation is still required before claiming full platform safety-layer remediation.
 
 ## Figma Token And Handoff Policy
 

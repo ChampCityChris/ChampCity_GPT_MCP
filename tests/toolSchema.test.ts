@@ -44,10 +44,14 @@ const publicSafeFacadeToolNames = [
   "get_workspace_status_summary",
   "get_change_set_readiness_summary",
   "get_release_artifact_summary",
-  "get_release_publication_summary"
+  "get_release_publication_summary",
+  "get_builder_report_index",
+  "get_builder_report_summary"
 ] as const;
 
 const mutationInputFields = new Set([
+  "root",
+  "absolutePath",
   "command",
   "script",
   "shell",
@@ -123,10 +127,22 @@ describe("MCP tool schemas", () => {
     assert.deepEqual(tool("get_change_set_readiness_summary").inputSchema.required, []);
     assert.deepEqual(tool("get_release_artifact_summary").inputSchema.required, ["releaseVersion"]);
     assert.deepEqual(tool("get_release_publication_summary").inputSchema.required, ["tagName"]);
+    assert.deepEqual(tool("get_builder_report_index").inputSchema.required, []);
+    assert.deepEqual(tool("get_builder_report_summary").inputSchema.required, []);
     assert.ok(tool("get_release_artifact_summary").inputSchema.properties?.releaseVersion);
     assert.ok(tool("get_release_publication_summary").inputSchema.properties?.tagName);
+    assert.ok(tool("get_builder_report_index").inputSchema.properties?.workspaceId);
+    assert.ok(tool("get_builder_report_index").inputSchema.properties?.phaseFolder);
+    assert.ok(tool("get_builder_report_index").inputSchema.properties?.workCardId);
+    assert.ok(tool("get_builder_report_index").inputSchema.properties?.maxResults);
+    assert.ok(tool("get_builder_report_summary").inputSchema.properties?.reportPath);
+    assert.ok(tool("get_builder_report_summary").inputSchema.properties?.maxChars);
     assert.equal("glob" in (tool("get_release_artifact_summary").inputSchema.properties ?? {}), false);
     assert.equal("command" in (tool("get_release_publication_summary").inputSchema.properties ?? {}), false);
+    assert.equal("root" in (tool("get_builder_report_index").inputSchema.properties ?? {}), false);
+    assert.equal("glob" in (tool("get_builder_report_index").inputSchema.properties ?? {}), false);
+    assert.equal("absolutePath" in (tool("get_builder_report_summary").inputSchema.properties ?? {}), false);
+    assert.equal("approvalToken" in (tool("get_builder_report_summary").inputSchema.properties ?? {}), false);
   });
 
   it("keeps public-facing tool descriptions free of risky phrases", () => {

@@ -16,7 +16,7 @@ OAuth metadata:
 
 Scope mapping:
 
-- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `pre_commit_safety_scan`, and `get_commit_readiness`.
+- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `pre_commit_safety_scan`, and `get_commit_readiness`.
 - `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
 
 Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=off|docs|patch|elevated` is preferred, with `config/write-access.local.json` as the local-file source. Legacy `CHAMPCITY_GPT_ENABLE_WRITE_TOOLS=true` maps to `docs`.
@@ -29,6 +29,8 @@ Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=of
 ChatGPT-facing status and release checks should prefer the read-only safe facade tools: `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, and `get_release_publication_summary`. These tools avoid caller-supplied local roots, executable file globs, and command-string inputs. Legacy `git_status`, `get_commit_readiness`, `list_project_files`, and `run_allowed_script` remain documented for compatibility, but `run_allowed_script` is not the normal v1.0 ChatGPT-facing status or release workflow.
 
 These facade tools are part of the WC-V1-0102 remediation path for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, and `CAV-030`. Live ChatGPT validation is still required before claiming full remediation.
+
+Builder Report discovery should use `get_builder_report_index`. Specific report review should use `get_builder_report_summary`, or `read_project_file` only with a narrow expected report path already returned by the index. Normal ChatGPT workflows should avoid broad `list_project_files` calls that combine `planning/phases`, `**/BUILDER_REPORT*.md`, high `maxResults`, and absolute local roots. The Builder Report facade supports `CAV-033`; live ChatGPT validation is still required before claiming platform safety-layer remediation.
 
 The elevated approval token is configured in `config/write-access.local.json` as a salted hash, or temporarily through `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` for dev/manual testing. Static bearer tokens are legacy/manual testing only; ChatGPT.com uses OAuth.
 
@@ -407,6 +409,55 @@ Input:
 ```
 
 Output summary: tag name, release existence, publication state, release URL, target commitish, draft/prerelease booleans, publish timestamp, optional asset metadata, expected asset match, expected asset match method, warnings, and blockers. When the expected local final artifact exists, expected asset matching first compares the local SHA-256 to GitHub asset digests such as `sha256:<hex>`, then falls back to exact asset name and conservative separator-normalized name comparison. Size-only evidence is reported as weak and is not treated as a strong match. It does not create, edit, upload, publish, or alter releases.
+
+## `get_builder_report_index`
+
+Read-only ChatGPT-safe facade for Builder Report discovery under configured allowed roots. It does not accept caller-supplied absolute roots or arbitrary glob patterns. The scanner only inspects:
+
+```text
+planning/phases/<phaseFolder>/Builder_Reports/BUILDER_REPORT*.md
+```
+
+Input:
+
+```json
+{
+  "workspaceId": "default",
+  "phaseFolder": "phase-v1.0",
+  "workCardId": "WC-V1-0102A",
+  "maxResults": 25
+}
+```
+
+`workspaceId` may be `default`, `all_allowed`, or a safe alias derived from a configured allowed root folder name or git remote repo name. It is never interpreted as a filesystem path. `maxResults` defaults to `25` and is capped at `50`.
+
+Output summary: workspace ID/label, optional repository name, query metadata, report metadata, result count, truncation flag, warnings, and safety notes. Report paths are repository-relative. The index returns metadata only, not report contents.
+
+## `get_builder_report_summary`
+
+Read-only ChatGPT-safe facade for bounded review of one Builder Report. It accepts either a safe repository-relative `reportPath` returned by `get_builder_report_index`, or a `phaseFolder` plus `workCardId` lookup.
+
+Input:
+
+```json
+{
+  "workspaceId": "default",
+  "reportPath": "planning/phases/phase-v1.0/Builder_Reports/BUILDER_REPORT_WC-V1-0102A_builder_report_discovery_facade.md",
+  "maxChars": 6000
+}
+```
+
+Alternate lookup:
+
+```json
+{
+  "workspaceId": "default",
+  "phaseFolder": "phase-v1.0",
+  "workCardId": "WC-V1-0102A"
+}
+```
+
+Output summary: workspace ID/label, optional repository name, report metadata, match/ambiguity status, candidate paths for ambiguous lookups, bounded `contentPreview`, truncation flag, warnings, and safety notes. Private local path-like and token-like content is redacted from previews. `maxChars` defaults to `6000` and is capped at `12000`. `all_allowed` is intentionally rejected for summaries so a specific configured workspace must be selected.
 
 ## `git_status`
 

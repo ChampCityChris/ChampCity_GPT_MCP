@@ -12,6 +12,7 @@ import {
 import { type AppConfig } from "../config.js";
 import { scopeIncludes } from "../oauth.js";
 import { applyApprovedPatch } from "../tools/applyApprovedPatch.js";
+import { getBuilderReportIndex, getBuilderReportSummary } from "../tools/builderReportFacade.js";
 import {
   createCodexUiHandoffPromptTool,
   createFigmaHandoffPackageTool,
@@ -64,6 +65,8 @@ const figmaUrlSchema = { ...textSchema, maxLength: 4096 };
 const figmaFileKeySchema = { ...textSchema, maxLength: 256 };
 const figmaNodeIdSchema = { ...textSchema, maxLength: 256 };
 const workspaceIdSchema = { ...textSchema, maxLength: 64, default: "default" };
+const phaseFolderSchema = { ...textSchema, maxLength: 128 };
+const workCardIdSchema = { ...textSchema, maxLength: 128 };
 
 export const tools = [
   {
@@ -360,6 +363,37 @@ export const tools = [
     }
   },
   {
+    name: "get_builder_report_index",
+    description:
+      "Read-only. Returns a bounded Builder Report index for configured workspaces. Does not modify repository files, git state, release state, or configuration.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: workspaceIdSchema,
+        phaseFolder: phaseFolderSchema,
+        workCardId: workCardIdSchema,
+        maxResults: { type: "integer", default: 25, minimum: 1, maximum: 50 }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_builder_report_summary",
+    description:
+      "Read-only. Returns a bounded Builder Report preview from a safe report lookup. Does not modify repository files, git state, release state, or configuration.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: workspaceIdSchema,
+        reportPath: relativePathSchema,
+        phaseFolder: phaseFolderSchema,
+        workCardId: workCardIdSchema,
+        maxChars: { type: "integer", default: 6000, minimum: 1, maximum: 12000 }
+      },
+      required: []
+    }
+  },
+  {
     name: "git_status",
     description: "Return git status --short and the current branch for an allowed root.",
     inputSchema: {
@@ -478,6 +512,8 @@ export const READ_TOOL_NAMES = [
   "get_change_set_readiness_summary",
   "get_release_artifact_summary",
   "get_release_publication_summary",
+  "get_builder_report_index",
+  "get_builder_report_summary",
   "get_write_access_status",
   "get_figma_status",
   "parse_figma_url",
@@ -1013,6 +1049,10 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
           return toolResponse(await getReleaseArtifactSummary(args, config));
         case "get_release_publication_summary":
           return toolResponse(await getReleasePublicationSummary(args, config));
+        case "get_builder_report_index":
+          return toolResponse(await getBuilderReportIndex(args, config));
+        case "get_builder_report_summary":
+          return toolResponse(await getBuilderReportSummary(args, config));
         case "propose_patch":
           return toolResponse(await proposePatch(args, config));
         case "apply_approved_patch":

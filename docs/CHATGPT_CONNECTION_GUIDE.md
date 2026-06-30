@@ -125,10 +125,16 @@ For normal ChatGPT-facing read-only status and release diagnostics, prefer these
 - `get_change_set_readiness_summary`
 - `get_release_artifact_summary`
 - `get_release_publication_summary`
+- `get_builder_report_index`
+- `get_builder_report_summary`
 
 These tools avoid caller-supplied local roots, command-string inputs, and executable file globs. They return structured summaries with repository-relative paths where possible. `run_allowed_script` is not the normal v1.0 ChatGPT-facing status or release workflow.
 
-These facade tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, and `CAV-030`. Live ChatGPT validation is still required before claiming the safety-layer false-positive issue is fully remediated.
+For Builder Reports, ask ChatGPT to call `get_builder_report_index`, optionally with `phaseFolder` and `workCardId`. For a specific report, ask ChatGPT to call `get_builder_report_summary` with the returned repository-relative `reportPath`, or use a narrow expected-path `read_project_file` call only after the index has identified the path.
+
+Normal ChatGPT workflows should avoid broad `list_project_files` calls that combine an absolute local root, `planning/phases`, `**/BUILDER_REPORT*.md`, and high `maxResults`. The Builder Report facade supports `CAV-033` by avoiding that broad recursive query shape.
+
+These facade tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, `CAV-030`, and `CAV-033`. Live ChatGPT validation is still required before claiming the safety-layer false-positive issue is fully remediated.
 
 ## Security Notes
 
@@ -142,7 +148,7 @@ Start read-only first. Set write mode above `off` only after confirming:
 - Audit logging is enabled and reviewed.
 - Read-only tools work through ChatGPT.
 
-In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers read/list/search/git status/git diff, the safe status/release facade tools, `get_write_access_status`, Figma status/URL parsing/file summaries, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, Figma frame export, Figma handoff package generation, Figma Make URL handoff orchestration, Figma Make `.make` file handoff orchestration, Codex UI handoff prompt generation, and `run_allowed_script`, but write access still has local write-mode gates. Markdown/Figma handoff writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. `run_allowed_script` requires mode `elevated`, an allowlisted maintenance task, and the elevated approval token. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
+In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers read/list/search/git status/git diff, the safe status/release/Builder Report facade tools, `get_write_access_status`, Figma status/URL parsing/file summaries, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, Figma frame export, Figma handoff package generation, Figma Make URL handoff orchestration, Figma Make `.make` file handoff orchestration, Codex UI handoff prompt generation, and `run_allowed_script`, but write access still has local write-mode gates. Markdown/Figma handoff writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. `run_allowed_script` requires mode `elevated`, an allowlisted maintenance task, and the elevated approval token. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
 
 ## Figma Make Handoff Flow
 

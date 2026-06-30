@@ -121,7 +121,7 @@ This queue is derived from the answered operator intake file:
 - Scope: Define safe evidence artifacts for connector visibility, tool count, successful calls, rejected calls, and error classification.
 - Acceptance criteria: Release validation can include evidence without exposing secrets, tokens, private URLs, or sensitive local paths.
 - Validation: Operator-run ChatGPT connector evidence capture and redaction review.
-- Dependencies or notes: Evidence capture must not rely on browser scraping or screenshots unless separately authorized.
+- Dependencies or notes: Evidence capture must not rely on browser scraping or screenshots unless separately authorized. Builder implementation adds the redacted evidence template, `npm run chatgpt:evidence:validate`, and local redaction/completeness checks; it does not itself perform live ChatGPT connector validation. Supports CAV-007 through CAV-011 and CAV-027 through CAV-031, and also helps CAV-033.
 
 ## Phase 2 — Safe Purpose-Built MCP Tool Architecture
 

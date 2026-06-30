@@ -13,6 +13,7 @@
   },
   "scripts": {
     "mcp:build": "tsc -p tsconfig.json && npm run renderer:build",
+    "chatgpt:evidence:validate": "node scripts/validate-chatgpt-evidence.mjs",
     "mcp:self-test": "node scripts/mcp-self-test.mjs",
     "renderer:build": "node scripts/build-renderer.mjs",
     "build": "npm run mcp:build",

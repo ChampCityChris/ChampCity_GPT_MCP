@@ -171,7 +171,7 @@ Owner values:
 | Safety-layer false positives | `WC-V1-0102` | Adds safe read-only facade tools for CAV-011, CAV-012, CAV-013, CAV-021, CAV-023, and CAV-030; live ChatGPT validation is still required. |
 | Builder Report discovery false positive | `WC-V1-0102A` | Required for CAV-033; adds a safe read-only Builder Report discovery facade so ChatGPT does not need broad recursive globs or absolute local roots for normal Architect review workflows. |
 | MCP protocol self-test | `WC-V1-0103` | Adds `npm run mcp:self-test` and `npm run mcp:self-test -- --json` for deterministic local coverage around CAV-011, CAV-014, CAV-015, CAV-018, CAV-019, CAV-021, CAV-023, CAV-030, and CAV-033. This local self-test complements but does not replace live ChatGPT connector validation. |
-| Live evidence capture | `WC-V1-0104` | Required for CAV-007 through CAV-011 and CAV-027 through CAV-031. |
+| Live evidence capture | `WC-V1-0104` | Adds a redacted evidence template and validator under `planning/phases/phase-v1.0/Live_Connector_Evidence/`. Required for CAV-007 through CAV-011 and CAV-027 through CAV-031, and also helps CAV-033. |
 | Purpose-built tools | `WC-V1-0201` | Required to keep CAV-018, CAV-021, CAV-022, and CAV-023 off arbitrary shell workflows. |
 | Permission modes/toolsets | `WC-V1-0202` | Required for CAV-014, CAV-015, CAV-017, and CAV-018. |
 | Tool manifest | `WC-V1-0203` | Required for CAV-011, CAV-016, CAV-017, and release validation. |
@@ -188,6 +188,21 @@ Owner values:
 | v1.0 validation suite | `WC-V1-0802` | Must consume this matrix as the ChatGPT connector release gate. |
 
 ## 8. Evidence Collection Template
+
+The WC-V1-0104 evidence template lives at:
+
+```text
+planning/phases/phase-v1.0/Live_Connector_Evidence/CHATGPT_LIVE_CONNECTOR_EVIDENCE_TEMPLATE.md
+```
+
+Validate template or evidence files with:
+
+```powershell
+npm run chatgpt:evidence:validate -- --template
+npm run chatgpt:evidence:validate -- --file planning/phases/phase-v1.0/Live_Connector_Evidence/<evidence-file>.md
+```
+
+Live ChatGPT validation evidence must be captured manually or from explicit ChatGPT tool results. No screenshots, browser scraping, or ChatGPT UI scraping are required or supported by WC-V1-0104. Local MCP self-test evidence supports release validation but does not replace live ChatGPT connector evidence.
 
 ```text
 Validation date:

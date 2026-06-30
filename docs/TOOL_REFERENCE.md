@@ -45,6 +45,18 @@ This self-test checks the local tool registry, MCP `tools/list` schema validity,
 
 This self-test complements but does not replace live ChatGPT connector validation.
 
+## Live ChatGPT Connector Evidence
+
+Operator-assisted live ChatGPT validation evidence should be captured with the template under `planning/phases/phase-v1.0/Live_Connector_Evidence/`. The validator checks evidence completeness and redaction safety without using browser automation, ChatGPT UI scraping, screenshots, OAuth/DCR mutation, Cloudflare mutation, packaging, release publication, or token capture.
+
+```powershell
+npm run chatgpt:evidence:validate -- --template
+npm run chatgpt:evidence:validate -- --template --json
+npm run chatgpt:evidence:validate -- --file planning/phases/phase-v1.0/Live_Connector_Evidence/<evidence-file>.md
+```
+
+Use the local MCP self-test output as deterministic baseline evidence only. Live ChatGPT connector evidence must come from manual operator observations or explicit ChatGPT tool results, and must keep public endpoints, local paths, OAuth material, local config contents, and secrets redacted.
+
 The elevated approval token is configured in `config/write-access.local.json` as a salted hash, or temporarily through `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` for dev/manual testing. Static bearer tokens are legacy/manual testing only; ChatGPT.com uses OAuth.
 
 ## `list_project_files`

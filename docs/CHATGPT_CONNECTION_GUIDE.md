@@ -149,6 +149,26 @@ The self-test validates the local MCP tool registry, `tools/list` schema, requir
 
 This self-test complements but does not replace live ChatGPT connector validation. It does not contact ChatGPT.com, use browser automation or UI scraping, launch Cloudflare, mutate OAuth/DCR state, package, tag, push, publish, or run elevated scripts.
 
+## Live Connector Evidence Capture
+
+Use the evidence template when the operator runs live ChatGPT connector validation:
+
+```text
+planning/phases/phase-v1.0/Live_Connector_Evidence/CHATGPT_LIVE_CONNECTOR_EVIDENCE_TEMPLATE.md
+```
+
+Validate the template or a completed redacted evidence file with:
+
+```powershell
+npm run chatgpt:evidence:validate -- --template
+npm run chatgpt:evidence:validate -- --template --json
+npm run chatgpt:evidence:validate -- --file planning/phases/phase-v1.0/Live_Connector_Evidence/<evidence-file>.md
+```
+
+Live evidence must be captured manually by the operator or from explicit ChatGPT tool results. This workflow does not use screenshots, browser scraping, ChatGPT UI scraping, OAuth/DCR mutation, Cloudflare mutation, packaging, release publication, or token capture.
+
+WC-V1-0104 supports evidence capture for CAV-007 through CAV-011 and CAV-027 through CAV-031, and also helps CAV-033. Local deterministic evidence from `npm run mcp:self-test` is useful baseline evidence, but it does not replace a live ChatGPT connector pass.
+
 ## Security Notes
 
 Files stay local until a tool call reads them. File contents requested through MCP may enter hosted ChatGPT context. This does not make hosted ChatGPT local-only.

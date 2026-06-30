@@ -90,6 +90,19 @@ The JSON output is intended for release validation and Builder Reports. It must 
 
 This self-test complements but does not replace live ChatGPT connector validation.
 
+## Live ChatGPT Evidence Capture
+
+Live ChatGPT connector validation evidence is recorded with the template and validator under `planning/phases/phase-v1.0/Live_Connector_Evidence/`:
+
+```powershell
+npm run chatgpt:evidence:validate -- --template
+npm run chatgpt:evidence:validate -- --file planning/phases/phase-v1.0/Live_Connector_Evidence/<evidence-file>.md
+```
+
+This evidence workflow is manual/operator-assisted or based on explicit ChatGPT tool results. It does not require or support browser automation, ChatGPT UI scraping, screenshots, OAuth/DCR implementation changes, Cloudflare implementation changes, packaging, release publication, or token capture.
+
+The validator fails evidence with obvious token-looking content, credential assignment text, private local user paths, `.env`-style secret lines, or private-key material. Evidence should use `%USERPROFILE%`, `%TEMP%`, `<REDACTED_LOCAL_PATH>`, `<REDACTED_PUBLIC_ENDPOINT>`, and `<REDACTED_SECRET>` placeholders. Local MCP self-test evidence supports release validation but does not prove live ChatGPT connector behavior.
+
 ## Figma Token And Handoff Policy
 
 v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.

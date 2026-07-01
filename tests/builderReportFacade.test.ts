@@ -76,7 +76,7 @@ describe("Builder Report facade tools", () => {
 
     const result = await getBuilderReportIndex({ workCardId: "WC07" }, testConfig());
 
-    assert.equal(result.workspaceId, "default");
+    assert.equal(result.workspaceId, "champcity_gpt");
     assert.equal(result.resultCount, 1);
     assert.equal(result.reports[0]?.relativePath, relativePath);
     assert.equal(result.reports[0]?.fileName, "BUILDER_REPORT_WC07_human_validation_and_repair_loop.md");

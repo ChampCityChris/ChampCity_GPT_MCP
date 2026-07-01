@@ -129,12 +129,13 @@ describe("MCP protocol self-test", () => {
     assert.doesNotMatch(JSON.stringify(check), /SELF_TEST_BLOCKED_CONTENT_DO_NOT_RETURN/u);
   });
 
-  it("includes Builder Report index and summary checks", async () => {
+  it("includes Builder Report and explicit workspace routing checks", async () => {
     const report = await runMcpSelfTest();
     const checkIds = report.checks.map((check) => check.id);
 
     assert.ok(checkIds.includes("BUILDER_REPORT_INDEX_WORKS"));
     assert.ok(checkIds.includes("BUILDER_REPORT_SUMMARY_WORKS"));
+    assert.ok(checkIds.includes("EXPLICIT_MULTI_WORKSPACE_ROUTING_WORKS"));
   });
 
   it("does not include unredacted local user paths in JSON output", async () => {

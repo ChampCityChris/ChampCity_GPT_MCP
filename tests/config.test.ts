@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { DEFAULT_ALLOWED_COMMANDS, ensureConfiguredRootsExist, loadConfig } from "../src/config.js";
 import { getHttpAuthTokenConfig } from "../src/httpAuthConfig.js";
 import { saveWriteApprovalToken, verifyWriteApprovalTokenHash, readWriteAccessLocalConfig } from "../src/writeAccess.js";
+import { getWorkspaceRegistry } from "../src/workspaces.js";
 
 let tempRoot: string;
 let localRoot: string;
@@ -109,6 +110,82 @@ describe("config loading", () => {
     assert.equal(config.writeToolsEnabled, false);
     assert.equal(config.writeToolsEnabledSource, "default");
     assert.doesNotThrow(() => ensureConfiguredRootsExist(config));
+  });
+
+  it("loads named workspace registry config with an explicit default", () => {
+    const aiRoot = path.join(tempRoot, "ChampCity_AI");
+    fs.mkdirSync(aiRoot, { recursive: true });
+    writeLocalConfig({
+      workspaces: [
+        {
+          workspaceId: "champcity_gpt",
+          label: "ChampCity GPT MCP",
+          root: localRoot,
+          remote: "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git"
+        },
+        {
+          workspaceId: "champcity_ai",
+          label: "ChampCity AI",
+          root: aiRoot
+        }
+      ],
+      defaultWorkspaceId: "champcity_gpt",
+      requireGitRoot: false
+    });
+
+    const config = loadConfig({}, tempRoot);
+    const registry = getWorkspaceRegistry(config);
+
+    assert.deepEqual(config.allowedRoots, [path.resolve(localRoot), path.resolve(aiRoot)]);
+    assert.equal(config.defaultWorkspaceId, "champcity_gpt");
+    assert.equal(config.defaultWorkspaceIdSource, "local-file");
+    assert.equal(config.defaultWorkspaceRoot, path.resolve(localRoot));
+    assert.equal(config.workspaces?.[0]?.workspaceId, "champcity_gpt");
+    assert.equal(config.workspaces?.[0]?.remote, "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git");
+    assert.deepEqual(registry.availableWorkspaceIds, ["champcity_ai", "champcity_gpt"]);
+    assert.equal(registry.defaultWorkspaceId, "champcity_gpt");
+  });
+
+  it("derives stable workspace IDs from legacy allowedRoots-only config", () => {
+    const aiRoot = path.join(tempRoot, "ChampCity_AI");
+    fs.mkdirSync(aiRoot, { recursive: true });
+    writeLocalConfig({
+      allowedRoots: [localRoot, aiRoot],
+      defaultWorkspaceId: "champcity_ai"
+    });
+
+    const registry = getWorkspaceRegistry(loadConfig({}, tempRoot));
+
+    assert.deepEqual(registry.availableWorkspaceIds, ["champcity_ai", "local_root"]);
+    assert.equal(registry.defaultWorkspaceId, "champcity_ai");
+    assert.equal(registry.defaultWorkspaceIdSource, "local-file");
+  });
+
+  it("rejects invalid configured workspace IDs", () => {
+    writeLocalConfig({
+      workspaces: [
+        {
+          workspaceId: "C:\\Users\\Alice\\Project",
+          root: localRoot
+        }
+      ]
+    });
+
+    assert.throws(() => loadConfig({}, tempRoot), /workspaceId must be a safe lowercase server-defined alias/i);
+  });
+
+  it("requires configured workspace roots to stay inside allowed roots", () => {
+    writeLocalConfig({
+      allowedRoots: [localRoot],
+      workspaces: [
+        {
+          workspaceId: "outside_project",
+          root: envRoot
+        }
+      ]
+    });
+
+    assert.throws(() => loadConfig({}, tempRoot), /workspace root must be inside an allowed root/i);
   });
 
   it("loads runtime config directory when CHAMPCITY_GPT_CONFIG_DIR is set", () => {

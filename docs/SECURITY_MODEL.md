@@ -91,6 +91,8 @@ These tools reduce future top-level MCP schema churn. ChatGPT may bind tool sche
 
 The toolbox input shape is stable: `action`, optional `workspaceId`, and optional `params`. The schema is not a security boundary. Each action has strict server-side validation and rejects unknown actions, unknown services, unsafe params, and missing required params with structured errors.
 
+Workspace routing is stateless and per-call. Runtime config can define a workspace registry in `allowed-roots.local.json` with `workspaces` entries containing server-defined `workspaceId`, `label`, `root`, and optional expected `remote`, plus optional `defaultWorkspaceId`. Legacy `allowedRoots`-only configs still work; safe workspace IDs are derived from folder names. With multiple workspaces and no explicit default, project-specific toolbox calls using `workspaceId: "default"` fail with `WORKSPACE_REQUIRED` and safe available workspace IDs. There is no mutable global active workspace.
+
 Toolbox visibility requires `files.read`. Mixed read/write toolboxes are safe because write-capable actions enforce OAuth `files.write` and the same local write-mode policy as the mapped legacy operation. A caller with only `files.read` can see and call read-only diagnostics, but write actions fail with a clear missing `files.write` or write-mode error. This avoids hiding diagnostics from read-only sessions.
 
 The toolbox surface must not expose or accept raw local filesystem roots from public ChatGPT callers, arbitrary shell, arbitrary git commands, arbitrary URL fetch, arbitrary upstream MCP tool calls, arbitrary service API methods, arbitrary browser actions, raw JSON passthrough as execution authority, raw tokens, OAuth stores, `.env`, local config, credential stores, private tunnel URLs, cookies, or browser profile credentials.
@@ -116,7 +118,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-The self-test is deterministic and local. It validates the MCP tool registry, `tools/list` schema, required read and gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, safety-compatible descriptions, safe read-only facade calls, toolbox read-only diagnostics, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery, denied docs-write behavior, blocked-path denial, and elevated-script gating. It uses temporary fixtures for denied write and blocked-path probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
+The self-test is deterministic and local. It validates the MCP tool registry, `tools/list` schema, required read and gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, safety-compatible descriptions, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery, denied docs-write behavior, blocked-path denial, and elevated-script gating. It uses temporary fixtures for denied write, blocked-path, and multi-workspace probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
 
 The JSON output is intended for release validation and Builder Reports. It must remain redacted and must not expose secrets, tokens, OAuth stores, local config contents, full private user paths, release binary contents, logs, or generated output contents.
 
@@ -179,6 +181,8 @@ ChatGPT.com registration should not be attempted until `npm test` passes, includ
 All file tools require a `root` value that matches one configured allowed root. Paths are resolved to canonical absolute paths before use. Relative paths that contain traversal segments, drive specifiers, UNC-style escapes, absolute paths, null bytes, or colon characters are rejected.
 
 Configured roots can come from `config/allowed-roots.local.json` or `CHAMPCITY_GPT_ALLOWED_ROOTS`, separated by semicolons. Environment variables override local config. If neither is set, the server defaults to the current working directory only.
+
+Named workspaces are also configured in `allowed-roots.local.json`. A workspace root must be inside the configured allowed roots; when only `workspaces` are configured, their roots become the allowed roots. ChatGPT-facing toolbox calls receive only workspace IDs, not arbitrary root paths. The legacy absolute-root tools remain available for compatibility and still require a configured allowed root.
 
 Installed mode reads local config from Electron `userData\config`; portable mode reads from `data\config` beside the executable. Packaged runtime must not depend on repo-local `config/*.local.json` files or a hardcoded source checkout path.
 

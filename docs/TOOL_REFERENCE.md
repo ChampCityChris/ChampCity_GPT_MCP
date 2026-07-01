@@ -51,12 +51,14 @@ Each toolbox accepts:
 ```json
 {
   "action": "status",
-  "workspaceId": "default",
+  "workspaceId": "champcity_gpt",
   "params": {}
 }
 ```
 
 The public schema stays stable, but action-specific server-side validation is strict. Unknown actions, unknown services, missing required params, and unsafe params return structured `ok: false` results with supported values where applicable. The toolbox schema does not expose raw roots, absolute paths, shell commands, arbitrary git commands, approval tokens, force/reset/merge/rebase/stash/delete controls, raw tokens, or service secrets.
+
+Workspace routing is stateless per call. Use `diagnostics_toolbox` with `action: "list_workspaces"` to discover safe server-defined workspace IDs such as `champcity_gpt`, then pass the chosen ID on project-specific toolbox calls. `workspaceId: "default"` is accepted only when deterministic: a single workspace is configured, or `defaultWorkspaceId` is explicitly configured. With multiple workspaces and no explicit default, project-specific calls fail with `WORKSPACE_REQUIRED` and safe available workspace IDs.
 
 Toolbox calls return:
 
@@ -84,7 +86,7 @@ Initial actions:
 - `search_files`
 - `write_markdown_artifact`
 
-Read actions use the configured default workspace and existing file safety policy. `write_markdown_artifact` uses the existing Markdown artifact writer and requires `files.write` plus write mode `docs`, `patch`, or `elevated`.
+Read actions route through the selected workspace and existing file safety policy. `write_markdown_artifact` uses the existing Markdown artifact writer and requires `files.write` plus write mode `docs`, `patch`, or `elevated`.
 
 ### `git_toolbox`
 
@@ -123,9 +125,10 @@ Initial actions:
 - `tool_exposure_status`
 - `oauth_scope_status`
 - `chatgpt_discovery_status`
+- `list_workspaces`
 - `public_safety_status`
 
-Diagnostics are redacted and include runtime package version, commit, branch, runtime start time where available, registered tool count, registered tool-name hash, registered toolbox names, observed OAuth scope booleans, local write mode, local write-mode booleans, and latest discovery counts when a discovery trace is available. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, or raw credential stores are returned.
+Diagnostics are redacted and include runtime package version, commit, branch, runtime start time where available, registered tool count, registered tool-name hash, registered toolbox names, workspace-routing summary, observed OAuth scope booleans, local write mode, local write-mode booleans, and latest discovery counts when a discovery trace is available. `list_workspaces` returns safe catalog metadata only: workspace IDs, labels, repository name when available, branch when safely readable, default marker, and expected-remote match status. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, raw credential stores, or unnecessary absolute roots are returned.
 
 `get_write_access_status` also includes a nested diagnostics block when called through MCP so older visible tool surfaces can report runtime, scope, and tool-count state.
 
@@ -186,7 +189,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-This self-test checks the local tool registry, MCP `tools/list` schema validity, required read and gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, tool description safety phrases, safe read-only facade calls, toolbox read-only diagnostics, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, elevated-script gating, and gated branch workflow tool coverage. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
+This self-test checks the local tool registry, MCP `tools/list` schema validity, required read and gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, tool description safety phrases, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, elevated-script gating, and gated branch workflow tool coverage. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
 
 This self-test complements but does not replace live ChatGPT connector validation.
 
@@ -599,7 +602,7 @@ Input:
 }
 ```
 
-`workspaceId` may be `default`, `all_allowed`, or a safe alias derived from a configured allowed root folder name or git remote repo name. It is never interpreted as a filesystem path. `maxResults` defaults to `25` and is capped at `50`.
+`workspaceId` may be an explicit configured workspace ID, a safe ID derived from a legacy configured allowed root folder name, `default` when deterministic, or `all_allowed` for index scans. It is never interpreted as a filesystem path. `maxResults` defaults to `25` and is capped at `50`.
 
 Output summary: workspace ID/label, optional repository name, query metadata, report metadata, result count, truncation flag, warnings, and safety notes. Report paths are repository-relative. The index returns metadata only, not report contents.
 

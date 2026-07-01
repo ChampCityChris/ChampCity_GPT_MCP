@@ -167,12 +167,24 @@ ChatGPT may bind tool schemas for the connector or chat lifecycle. Adding new to
 
 Existing narrow tools remain available for backward compatibility. The new toolbox tools are visible with `files.read`; write-capable actions inside them still require OAuth `files.write` plus the same local write-mode policy as the mapped legacy tool. A read-only caller can still use diagnostics/read-only toolbox actions, while write actions fail with a clear missing-scope or write-mode denial.
 
+Use explicit workspace IDs when more than one project is configured. Ask ChatGPT to call `diagnostics_toolbox` with `action: "list_workspaces"` to see safe IDs, then pass the chosen ID on project-specific calls:
+
+```json
+{
+  "action": "status",
+  "workspaceId": "champcity_gpt",
+  "params": {}
+}
+```
+
+`workspaceId: "default"` is safe only for a single workspace or when `defaultWorkspaceId` is explicitly configured. With multiple workspaces and no explicit default, project-specific toolbox calls fail with `WORKSPACE_REQUIRED` instead of using a mutable active workspace.
+
 Initial action groups:
 
 - `repo_toolbox`: `status`, `list_files`, `read_file`, `search_files`, `write_markdown_artifact`
 - `git_toolbox`: `status`, `diff`, `prepare_work_branch`, `pre_commit_scan`, `stage_paths`, `commit_staged`, `push_current_branch`, `readiness_summary`
 - `artifact_toolbox`: `builder_report_index`, `builder_report_summary`, `release_artifact_summary`, `release_publication_summary`, `local_package_summary`, `create_codex_handoff_prompt`
-- `diagnostics_toolbox`: `runtime_status`, `write_access_status`, `tool_exposure_status`, `oauth_scope_status`, `chatgpt_discovery_status`, `public_safety_status`
+- `diagnostics_toolbox`: `runtime_status`, `write_access_status`, `tool_exposure_status`, `oauth_scope_status`, `chatgpt_discovery_status`, `list_workspaces`, `public_safety_status`
 - `integration_toolbox`: `list_supported_services`, `get_service_status`, `list_service_capabilities`, `validate_service_configuration`, `prepare_external_handoff`
 - `browser_toolbox`: `get_browser_capabilities`, `validate_public_endpoint`
 - `knowledge_toolbox`: `list_supported_sources`, `get_project_memory_status`, `get_reference_capabilities`
@@ -196,7 +208,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-The self-test validates the local MCP tool registry, `tools/list` schema, required read and gated tools, stable toolbox registration, safe facade and toolbox schema narrowness, safe read-only facade calls, toolbox read-only diagnostics, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial with write mode off, blocked-path denial, elevated-script gating, and gated branch workflow tool coverage. JSON mode is suitable for Builder Reports and release validation evidence.
+The self-test validates the local MCP tool registry, `tools/list` schema, required read and gated tools, stable toolbox registration, safe facade and toolbox schema narrowness, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial with write mode off, blocked-path denial, elevated-script gating, and gated branch workflow tool coverage. JSON mode is suitable for Builder Reports and release validation evidence.
 
 This self-test complements but does not replace live ChatGPT connector validation. It does not contact ChatGPT.com, use browser automation or UI scraping, launch Cloudflare, mutate OAuth/DCR state, package, tag, push, publish, or run elevated scripts.
 

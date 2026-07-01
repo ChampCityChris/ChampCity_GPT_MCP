@@ -35,8 +35,12 @@ afterEach(() => {
 });
 
 function git(args: string[]): string {
+  return gitIn(tempRoot, args);
+}
+
+function gitIn(root: string, args: string[]): string {
   const result = spawnSync("git", args, {
-    cwd: tempRoot,
+    cwd: root,
     encoding: "utf8",
     shell: false,
     windowsHide: true
@@ -46,7 +50,11 @@ function git(args: string[]): string {
 }
 
 function writeFile(relativePath: string, content: string): void {
-  const absolutePath = path.join(tempRoot, ...relativePath.split("/"));
+  writeFileIn(tempRoot, relativePath, content);
+}
+
+function writeFileIn(root: string, relativePath: string, content: string): void {
+  const absolutePath = path.join(root, ...relativePath.split("/"));
   fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
   fs.writeFileSync(absolutePath, content, "utf8");
 }
@@ -61,6 +69,28 @@ function initRepo(): void {
   git(["add", "README.md", "package.json"]);
   git(["commit", "-m", "Initial commit"]);
   git(["checkout", "-b", "dev"]);
+}
+
+function initRepoAt(root: string, branch: string, packageName: string, reportMarker?: string): void {
+  fs.mkdirSync(root, { recursive: true });
+  gitIn(root, ["init"]);
+  gitIn(root, ["config", "user.email", "test@example.com"]);
+  gitIn(root, ["config", "user.name", "Test User"]);
+  gitIn(root, ["checkout", "-b", branch]);
+  writeFileIn(root, "README.md", `# ${packageName}\n`);
+  writeFileIn(root, "package.json", `${JSON.stringify({ name: packageName, version: "0.1.2" }, null, 2)}\n`);
+  if (reportMarker) {
+    writeFileIn(
+      root,
+      "planning/phases/phase-v1.0/Builder_Reports/BUILDER_REPORT_WC-V1-FIX04_fixture.md",
+      `# ${packageName} Report\n\n${reportMarker}\n`
+    );
+  }
+  gitIn(root, ["add", "README.md", "package.json"]);
+  if (reportMarker) {
+    gitIn(root, ["add", "planning/phases/phase-v1.0/Builder_Reports/BUILDER_REPORT_WC-V1-FIX04_fixture.md"]);
+  }
+  gitIn(root, ["commit", "-m", "Initial commit"]);
 }
 
 function testConfig(
@@ -194,11 +224,91 @@ describe("stable domain toolbox tools", () => {
     const legacyGit = await legacyGitStatus({ root: tempRoot }, config);
 
     assert.equal(unknownWorkspace.ok, false);
-    assert.equal(unknownWorkspace.error?.code, "INVALID_INPUT");
+    assert.equal(unknownWorkspace.error?.code, "WORKSPACE_NOT_FOUND");
     assert.equal(rootParamSmuggle.ok, false);
     assert.equal(rootParamSmuggle.error?.code, "INVALID_INPUT");
     assert.equal(legacyRead.relativePath, "README.md");
     assert.equal(legacyGit.branch, "dev");
+  });
+
+  it("routes repo, git, artifact, and diagnostics toolbox actions by explicit workspace ID", async () => {
+    const gptRoot = path.join(tempRoot, "ChampCity_GPT");
+    const aiRoot = path.join(tempRoot, "ChampCity_AI");
+    const rpRoot = path.join(tempRoot, "ChampCity_RP_Desktop");
+    initRepoAt(gptRoot, "feature/gpt-fixture", "champcity-gpt-fixture", "GPT report marker");
+    initRepoAt(aiRoot, "feature/ai-fixture", "champcity-ai-fixture", "AI report marker");
+    initRepoAt(rpRoot, "feature/rp-fixture", "champcity-rp-fixture", "RP report marker");
+
+    const config: AppConfig = {
+      ...testConfig("off", gptRoot, [gptRoot, aiRoot, rpRoot], undefined),
+      workspaces: [
+        { workspaceId: "champcity_gpt", label: "ChampCity GPT MCP", root: gptRoot, source: "configured" },
+        { workspaceId: "champcity_ai", label: "ChampCity AI", root: aiRoot, source: "configured" },
+        { workspaceId: "champcity_rp_desktop", label: "ChampCity RP Desktop", root: rpRoot, source: "configured" }
+      ]
+    };
+    const toolboxContext = context(config, "files.read");
+
+    const gptPackage = await repoToolbox(
+      { action: "read_file", workspaceId: "champcity_gpt", params: { relativePath: "package.json" } },
+      config,
+      toolboxContext
+    );
+    const aiPackage = await repoToolbox(
+      { action: "read_file", workspaceId: "champcity_ai", params: { relativePath: "package.json" } },
+      config,
+      toolboxContext
+    );
+    const rpPackage = await repoToolbox(
+      { action: "read_file", workspaceId: "champcity_rp_desktop", params: { relativePath: "package.json" } },
+      config,
+      toolboxContext
+    );
+    const gptGit = await gitToolbox({ action: "status", workspaceId: "champcity_gpt" }, config, toolboxContext);
+    const aiGit = await gitToolbox({ action: "status", workspaceId: "champcity_ai" }, config, toolboxContext);
+    const aiReport = await artifactToolbox(
+      {
+        action: "builder_report_summary",
+        workspaceId: "champcity_ai",
+        params: { phaseFolder: "phase-v1.0", workCardId: "WC-V1-FIX04" }
+      },
+      config,
+      toolboxContext
+    );
+    const catalog = await diagnosticsToolbox({ action: "list_workspaces" }, config, toolboxContext);
+    const ambiguousDefault = await repoToolbox({ action: "status", workspaceId: "default" }, config, toolboxContext);
+    const unknownWorkspace = await repoToolbox({ action: "status", workspaceId: "unknown_workspace" }, config, toolboxContext);
+
+    assert.equal(gptPackage.ok, true);
+    assert.match((gptPackage.result as { content?: string }).content ?? "", /champcity-gpt-fixture/u);
+    assert.equal(aiPackage.ok, true);
+    assert.match((aiPackage.result as { content?: string }).content ?? "", /champcity-ai-fixture/u);
+    assert.equal(rpPackage.ok, true);
+    assert.match((rpPackage.result as { content?: string }).content ?? "", /champcity-rp-fixture/u);
+    assert.equal(gptGit.ok, true);
+    assert.equal((gptGit.result as { branch?: string }).branch, "feature/gpt-fixture");
+    assert.equal(aiGit.ok, true);
+    assert.equal((aiGit.result as { branch?: string }).branch, "feature/ai-fixture");
+    assert.equal(aiReport.ok, true);
+    assert.match((aiReport.result as { contentPreview?: string }).contentPreview ?? "", /AI report marker/u);
+    assert.equal(catalog.ok, true);
+    const catalogResult = catalog.result as { workspaces?: Array<{ workspaceId?: string }>; diagnostics?: { registeredWorkspaceCount?: number } };
+    assert.equal(catalogResult.diagnostics?.registeredWorkspaceCount, 3);
+    assert.deepEqual(catalogResult.workspaces?.map((workspace) => workspace.workspaceId).sort(), [
+      "champcity_ai",
+      "champcity_gpt",
+      "champcity_rp_desktop"
+    ]);
+    assert.doesNotMatch(JSON.stringify(catalog.result), new RegExp(tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+    assert.equal(ambiguousDefault.ok, false);
+    assert.equal(ambiguousDefault.error?.code, "WORKSPACE_REQUIRED");
+    assert.deepEqual(ambiguousDefault.error?.details?.availableWorkspaceIds, [
+      "champcity_ai",
+      "champcity_gpt",
+      "champcity_rp_desktop"
+    ]);
+    assert.equal(unknownWorkspace.ok, false);
+    assert.equal(unknownWorkspace.error?.code, "WORKSPACE_NOT_FOUND");
   });
 
   it("git_toolbox.prepare_work_branch delegates to the safe branch tool in a temp repo", async () => {

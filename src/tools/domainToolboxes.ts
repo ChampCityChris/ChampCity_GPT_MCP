@@ -9,7 +9,6 @@ import { getOAuthEndpointPaths, scopeIncludes } from "../oauth.js";
 import { readLastMcpDiscoveryTrace } from "../server/discoveryTrace.js";
 import { serializeError, AppError } from "../utils/errors.js";
 import { runGit } from "../utils/git.js";
-import { resolveDefaultWorkspaceRoot } from "../workspaceRoot.js";
 import { getBuilderReportIndex, getBuilderReportSummary } from "./builderReportFacade.js";
 import {
   createCodexUiHandoffPromptTool,
@@ -38,6 +37,14 @@ import {
   MAX_QUERY_LENGTH,
   MAX_RELATIVE_PATH_LENGTH
 } from "./inputLimits.js";
+import {
+  DEFAULT_WORKSPACE_ID,
+  WORKSPACE_ID_PATTERN,
+  type WorkspaceDiagnostics,
+  getWorkspaceDiagnostics,
+  listWorkspaceCatalog,
+  resolveWorkspaceRoot
+} from "../workspaces.js";
 
 export const TOOLBOX_TOOL_NAMES = [
   "repo_toolbox",
@@ -71,6 +78,7 @@ export interface RuntimeScopeToolDiagnostics {
     commit: string | "unknown";
     branch: string | "unknown";
     startedAt: string;
+    workspaceRouting: WorkspaceDiagnostics;
   };
   oauth: {
     filesReadGranted: boolean | "unknown";
@@ -103,8 +111,6 @@ interface ToolboxResult {
 }
 
 const TOOLBOX_RUNTIME_STARTED_AT = new Date().toISOString();
-const DEFAULT_WORKSPACE_ID = "default";
-const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SERVICE_ID_PATTERN = /^[a-z0-9_]+$/u;
 
 const ToolboxInputSchema = z
@@ -266,6 +272,7 @@ const SUPPORTED_DIAGNOSTICS_ACTIONS = [
   "tool_exposure_status",
   "oauth_scope_status",
   "chatgpt_discovery_status",
+  "list_workspaces",
   "public_safety_status"
 ] as const;
 const SUPPORTED_INTEGRATION_ACTIONS = [
@@ -317,16 +324,6 @@ function parseToolboxInput(rawInput: unknown): ToolboxInput {
     workspaceId: input.workspaceId,
     params: input.params
   };
-}
-
-function repoRootForDefaultWorkspace(workspaceId: string, config: AppConfig): string {
-  if (workspaceId !== DEFAULT_WORKSPACE_ID) {
-    throw new AppError("INVALID_INPUT", "Only the default workspace is supported by this toolbox action.", {
-      availableWorkspaceIds: [DEFAULT_WORKSPACE_ID]
-    });
-  }
-
-  return resolveDefaultWorkspaceRoot(config);
 }
 
 function assertFilesWrite(context: ToolboxRuntimeContext, mappedToolName: string, toolbox: ToolboxName, action: string): void {
@@ -392,7 +389,8 @@ export async function buildRuntimeScopeToolDiagnostics(
       packageVersion: packageVersion(config.repoRoot),
       commit,
       branch,
-      startedAt: TOOLBOX_RUNTIME_STARTED_AT
+      startedAt: TOOLBOX_RUNTIME_STARTED_AT,
+      workspaceRouting: getWorkspaceDiagnostics(config)
     },
     oauth: {
       filesReadGranted: context.callerScope ? scopeIncludes(context.callerScope, "files.read") : "unknown",
@@ -516,7 +514,7 @@ function sanitizeToolboxValue(value: unknown): unknown {
 
 export async function repoToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
   return runToolboxAction("repo_toolbox", rawInput, SUPPORTED_REPO_ACTIONS, async (input) => {
-    const root = repoRootForDefaultWorkspace(input.workspaceId, config);
+    const root = resolveWorkspaceRoot(input.workspaceId, config);
 
     switch (input.action) {
       case "status":
@@ -547,7 +545,7 @@ export async function repoToolbox(rawInput: unknown, config: AppConfig, context:
 
 export async function gitToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
   return runToolboxAction("git_toolbox", rawInput, SUPPORTED_GIT_ACTIONS, async (input) => {
-    const root = repoRootForDefaultWorkspace(input.workspaceId, config);
+    const root = resolveWorkspaceRoot(input.workspaceId, config);
 
     switch (input.action) {
       case "status":
@@ -633,10 +631,10 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
       }
       case "local_package_summary":
         EmptyParamsSchema.parse(input.params);
-        return ok("artifact_toolbox", input.action, localPackageSummary(repoRootForDefaultWorkspace(input.workspaceId, config)));
+        return ok("artifact_toolbox", input.action, localPackageSummary(resolveWorkspaceRoot(input.workspaceId, config)));
       case "create_codex_handoff_prompt": {
         assertFilesWrite(context, "create_codex_ui_handoff_prompt", "artifact_toolbox", input.action);
-        const root = repoRootForDefaultWorkspace(input.workspaceId, config);
+        const root = resolveWorkspaceRoot(input.workspaceId, config);
         const params = CodexHandoffPromptParamsSchema.parse(input.params);
         return ok("artifact_toolbox", input.action, await createCodexUiHandoffPromptTool({ root, ...params }, config));
       }
@@ -649,7 +647,9 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
 export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
   return runToolboxAction("diagnostics_toolbox", rawInput, SUPPORTED_DIAGNOSTICS_ACTIONS, async (input) => {
     EmptyParamsSchema.parse(input.params);
-    repoRootForDefaultWorkspace(input.workspaceId, config);
+    if (input.action !== "list_workspaces") {
+      resolveWorkspaceRoot(input.workspaceId, config);
+    }
 
     const diagnostics = await buildRuntimeScopeToolDiagnostics(config, context);
     switch (input.action) {
@@ -695,6 +695,8 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
               warnings: ["No last ChatGPT MCP discovery trace is available."]
             });
       }
+      case "list_workspaces":
+        return ok("diagnostics_toolbox", input.action, await listWorkspaceCatalog(config));
       case "public_safety_status":
         return ok("diagnostics_toolbox", input.action, await getChangeSetReadinessSummary({ workspaceId: input.workspaceId, targetBranch: "feature" }, config));
       default:
@@ -820,7 +822,7 @@ export async function integrationToolbox(rawInput: unknown, config: AppConfig, c
       }
       case "prepare_external_handoff": {
         assertFilesWrite(context, "write_markdown_artifact", "integration_toolbox", input.action);
-        const root = repoRootForDefaultWorkspace(input.workspaceId, config);
+        const root = resolveWorkspaceRoot(input.workspaceId, config);
         const params = IntegrationHandoffParamsSchema.parse(input.params);
         assertSupportedService(params.serviceId);
         const relativePath = params.targetFile ?? defaultIntegrationHandoffPath(params.serviceId);
@@ -849,7 +851,7 @@ export async function integrationToolbox(rawInput: unknown, config: AppConfig, c
 
 export async function browserToolbox(rawInput: unknown, config: AppConfig): Promise<ToolboxResult> {
   return runToolboxAction("browser_toolbox", rawInput, SUPPORTED_BROWSER_ACTIONS, async (input) => {
-    repoRootForDefaultWorkspace(input.workspaceId, config);
+    resolveWorkspaceRoot(input.workspaceId, config);
     switch (input.action) {
       case "get_browser_capabilities":
         EmptyParamsSchema.parse(input.params);
@@ -885,7 +887,7 @@ export async function browserToolbox(rawInput: unknown, config: AppConfig): Prom
 
 export async function knowledgeToolbox(rawInput: unknown, config: AppConfig): Promise<ToolboxResult> {
   return runToolboxAction("knowledge_toolbox", rawInput, SUPPORTED_KNOWLEDGE_ACTIONS, async (input) => {
-    repoRootForDefaultWorkspace(input.workspaceId, config);
+    resolveWorkspaceRoot(input.workspaceId, config);
     switch (input.action) {
       case "list_supported_sources":
         EmptyParamsSchema.parse(input.params);

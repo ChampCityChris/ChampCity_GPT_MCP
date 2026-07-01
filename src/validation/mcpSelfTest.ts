@@ -14,6 +14,7 @@ import {
 } from "../server/registerTools.js";
 import { getBuilderReportIndex, getBuilderReportSummary } from "../tools/builderReportFacade.js";
 import {
+  artifactToolbox,
   diagnosticsToolbox,
   gitToolbox,
   integrationToolbox,
@@ -296,6 +297,12 @@ function gitOutputOptional(repoRoot: string, args: string[]): string | undefined
   } catch {
     return undefined;
   }
+}
+
+function writeFixtureFile(root: string, relativePath: string, content: string): void {
+  const absolutePath = path.join(root, ...relativePath.split("/"));
+  fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+  fs.writeFileSync(absolutePath, content, "utf8");
 }
 
 function readPackageVersion(repoRoot: string): string {
@@ -850,6 +857,106 @@ export async function runIntegrationToolboxUnknownServiceDeniedCheck(config: App
   });
 }
 
+function initWorkspaceRoutingFixtureRepo(root: string, branch: string, packageName: string, reportMarker: string): void {
+  fs.mkdirSync(root, { recursive: true });
+  gitOutput(root, ["init"]);
+  gitOutput(root, ["config", "user.email", "test@example.com"]);
+  gitOutput(root, ["config", "user.name", "Test User"]);
+  gitOutput(root, ["checkout", "-b", branch]);
+  writeFixtureFile(root, "README.md", `# ${packageName}\n`);
+  writeFixtureFile(root, "package.json", `${JSON.stringify({ name: packageName, version: "0.1.2" }, null, 2)}\n`);
+  writeFixtureFile(
+    root,
+    "planning/phases/phase-v1.0/Builder_Reports/BUILDER_REPORT_WC-V1-FIX04_fixture.md",
+    `# ${packageName} Builder Report\n\n${reportMarker}\n`
+  );
+  gitOutput(root, ["add", "README.md", "package.json", "planning/phases/phase-v1.0/Builder_Reports/BUILDER_REPORT_WC-V1-FIX04_fixture.md"]);
+  gitOutput(root, ["commit", "-m", "Initial workspace routing fixture"]);
+}
+
+export async function runExplicitMultiWorkspaceRoutingWorksCheck(): Promise<McpSelfTestCheck> {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "champcity-mcp-self-test-workspaces-"));
+  const auditRoot = fs.mkdtempSync(path.join(os.tmpdir(), "champcity-mcp-self-test-audit-"));
+  const workspaceA = path.join(tempRoot, "Workspace_A");
+  const workspaceB = path.join(tempRoot, "Workspace_B");
+
+  try {
+    initWorkspaceRoutingFixtureRepo(workspaceA, "feature/workspace-a", "workspace-a-fixture", "Workspace A report marker");
+    initWorkspaceRoutingFixtureRepo(workspaceB, "feature/workspace-b", "workspace-b-fixture", "Workspace B report marker");
+    const config = makeConfig(workspaceA, auditRoot, "off", {
+      allowedRoots: [workspaceA, workspaceB],
+      workspaces: [
+        { workspaceId: "workspace_a", label: "Workspace A", root: workspaceA, source: "configured" },
+        { workspaceId: "workspace_b", label: "Workspace B", root: workspaceB, source: "configured" }
+      ]
+    });
+    const context = createToolboxRuntimeContext(config, { scope: "files.read" });
+    const [packageA, packageB, gitA, gitB, reportB, catalog, ambiguousDefault] = await Promise.all([
+      repoToolbox({ action: "read_file", workspaceId: "workspace_a", params: { relativePath: "package.json" } }, config, context),
+      repoToolbox({ action: "read_file", workspaceId: "workspace_b", params: { relativePath: "package.json" } }, config, context),
+      gitToolbox({ action: "status", workspaceId: "workspace_a" }, config, context),
+      gitToolbox({ action: "status", workspaceId: "workspace_b" }, config, context),
+      artifactToolbox(
+        {
+          action: "builder_report_summary",
+          workspaceId: "workspace_b",
+          params: { phaseFolder: "phase-v1.0", workCardId: "WC-V1-FIX04" }
+        },
+        config,
+        context
+      ),
+      diagnosticsToolbox({ action: "list_workspaces" }, config, context),
+      repoToolbox({ action: "status", workspaceId: "default" }, config, context)
+    ]);
+
+    const packageAContent = (packageA.result as { content?: string } | undefined)?.content ?? "";
+    const packageBContent = (packageB.result as { content?: string } | undefined)?.content ?? "";
+    const branchA = (gitA.result as { branch?: string } | undefined)?.branch;
+    const branchB = (gitB.result as { branch?: string } | undefined)?.branch;
+    const reportPreview = (reportB.result as { contentPreview?: string } | undefined)?.contentPreview ?? "";
+    const catalogWorkspaces = (catalog.result as { workspaces?: Array<{ workspaceId?: string }> } | undefined)?.workspaces ?? [];
+    const catalogWorkspaceIds = catalogWorkspaces.map((workspace) => workspace.workspaceId).sort();
+
+    if (
+      !packageA.ok ||
+      !packageB.ok ||
+      !gitA.ok ||
+      !gitB.ok ||
+      !reportB.ok ||
+      !catalog.ok ||
+      ambiguousDefault.ok ||
+      ambiguousDefault.error?.code !== "WORKSPACE_REQUIRED" ||
+      !packageAContent.includes("workspace-a-fixture") ||
+      !packageBContent.includes("workspace-b-fixture") ||
+      branchA !== "feature/workspace-a" ||
+      branchB !== "feature/workspace-b" ||
+      !reportPreview.includes("Workspace B report marker") ||
+      JSON.stringify(catalog.result).includes(tempRoot) ||
+      catalogWorkspaceIds.join(",") !== "workspace_a,workspace_b"
+    ) {
+      return fail("EXPLICIT_MULTI_WORKSPACE_ROUTING_WORKS", "Explicit workspace routing did not return isolated workspace results.", {
+        packageA,
+        packageB,
+        gitA,
+        gitB,
+        reportB,
+        catalog,
+        ambiguousDefault
+      });
+    }
+
+    return pass("EXPLICIT_MULTI_WORKSPACE_ROUTING_WORKS", "Explicit multi-workspace toolbox routing works without a mutable active workspace.", {
+      workspaceIds: catalogWorkspaceIds,
+      branchA,
+      branchB,
+      ambiguousDefaultCode: ambiguousDefault.error.code
+    });
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    fs.rmSync(auditRoot, { recursive: true, force: true });
+  }
+}
+
 function summarize(checks: McpSelfTestCheck[]): McpSelfTestReport["summary"] {
   return {
     passed: checks.filter((check) => check.status === "PASS").length,
@@ -902,6 +1009,9 @@ export async function runMcpSelfTest(options: RunMcpSelfTestOptions = {}): Promi
       await runRequiredCheck("INTEGRATION_TOOLBOX_UNKNOWN_SERVICE_DENIED", () =>
         runIntegrationToolboxUnknownServiceDeniedCheck(readConfig)
       )
+    );
+    checks.push(
+      await runRequiredCheck("EXPLICIT_MULTI_WORKSPACE_ROUTING_WORKS", () => runExplicitMultiWorkspaceRoutingWorksCheck())
     );
     checks.push(await runRequiredCheck("WORKSPACE_STATUS_SUMMARY_WORKS", () => runWorkspaceStatusSummaryWorksCheck(readConfig)));
     checks.push(await runRequiredCheck("CHANGE_SET_READINESS_WORKS", () => runChangeSetReadinessWorksCheck(repoRoot, readConfig)));

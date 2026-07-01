@@ -142,6 +142,19 @@ This queue is derived from the answered operator intake file:
 - Validation: Typecheck, unit tests, lint, build, public safety scan, MCP self-test, ChatGPT evidence template validation, diff check, and live ChatGPT connector validation by the operator after runtime update.
 - Dependencies or notes: Depends on `WC-V1-FIX01` and `prepare_git_work_branch`. This card reduces top-level MCP schema churn but does not migrate or remove existing narrow tools.
 
+### WC-V1-FIX04 — Add explicit multi-workspace routing for toolbox actions
+
+- ID: `WC-V1-FIX04`
+- Title: Add explicit multi-workspace routing for toolbox actions
+- Priority: P0
+- Owner mode: Codex/Builder
+- Type: MCP reliability / workspace routing
+- Objective: Route project-specific toolbox actions through server-defined workspace IDs instead of a single global default workspace.
+- Scope: Add a workspace registry to runtime config, preserve legacy `allowedRoots`, add safe workspace discovery, and route repo/git/artifact/diagnostics/integration/browser/knowledge toolbox actions through explicit `workspaceId` resolution. Preserve legacy tools and do not add `figma_toolbox`.
+- Acceptance criteria: Multiple allowed workspaces produce stable safe workspace IDs; `diagnostics_toolbox.list_workspaces` returns safe metadata without unnecessary absolute roots; explicit workspace IDs route repo/git/artifact actions to the selected fixture repo; ambiguous `workspaceId: default` fails safely when multiple workspaces exist and no explicit default is configured; public toolbox schemas remain `action`, `workspaceId`, and `params`.
+- Validation: Typecheck, unit tests, lint, build, public safety scan, MCP self-test including multi-workspace fixtures, ChatGPT evidence template validation, diff check, and live ChatGPT connector validation by the operator after package promotion.
+- Dependencies or notes: Depends on `WC-V1-FIX02`. Do not implement mutable active workspace state, fallback routing, public root params, OAuth changes, Cloudflare changes, packaging, release publication, or `WC-V1-0401`.
+
 ### WC-V1-0201 — Replace arbitrary command execution with purpose-built tools
 
 - ID: `WC-V1-0201`
@@ -468,4 +481,4 @@ This queue is derived from the answered operator intake file:
 
 ## Work Card Count
 
-This queue contains 33 P0 Work Cards.
+This queue contains 34 P0 Work Cards.

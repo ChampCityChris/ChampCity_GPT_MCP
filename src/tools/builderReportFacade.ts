@@ -8,40 +8,44 @@ import { z } from "zod";
 
 import { type AppConfig } from "../config.js";
 import { assertReadableTextFile, getFilePolicyDenial } from "../security/filePolicy.js";
-import { assertSafeRelativePath, isPathInside, resolveAllowedRoot, toRootRelativePath } from "../security/pathPolicy.js";
+import { assertSafeRelativePath, isPathInside, toRootRelativePath } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
 import { runGit } from "../utils/git.js";
-import { resolveDefaultWorkspaceRoot } from "../workspaceRoot.js";
+import {
+  ALL_ALLOWED_WORKSPACE_ID,
+  DEFAULT_WORKSPACE_ID,
+  WORKSPACE_ID_MAX_LENGTH,
+  WORKSPACE_ID_PATTERN,
+  getAvailableWorkspaceIds,
+  getWorkspaceRegistry,
+  resolveWorkspace
+} from "../workspaces.js";
 import { withAudit } from "./common.js";
 import { MAX_RELATIVE_PATH_LENGTH } from "./inputLimits.js";
 
-const DEFAULT_WORKSPACE_ID = "default";
-const ALL_ALLOWED_WORKSPACE_ID = "all_allowed";
 const DEFAULT_INDEX_MAX_RESULTS = 25;
 const INDEX_MAX_RESULTS_CAP = 50;
 const DEFAULT_SUMMARY_MAX_CHARS = 6000;
 const SUMMARY_MAX_CHARS_CAP = 12_000;
-const MAX_WORKSPACE_ID_LENGTH = 64;
 const MAX_PHASE_FOLDER_LENGTH = 128;
 const MAX_WORK_CARD_ID_LENGTH = 128;
 const MAX_BUILDER_REPORT_BYTES = 1_000_000;
 const MAX_TITLE_SCAN_BYTES = 64_000;
 
-const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const PHASE_FOLDER_PATTERN = /^phase-[a-z0-9]+(?:[.-][a-z0-9]+)*$/iu;
 const WORK_CARD_ID_PATTERN = /^[A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)*$/u;
 const REPORT_FILE_PATTERN = /^BUILDER_REPORT[^/\\]*\.md$/u;
 const REPORT_RELATIVE_PATH_PATTERN = /^planning\/phases\/(?<phaseFolder>[^/]+)\/Builder_Reports\/(?<fileName>BUILDER_REPORT[^/]*\.md)$/u;
 
 const BuilderReportIndexInputSchema = z.object({
-  workspaceId: z.string().min(1).max(MAX_WORKSPACE_ID_LENGTH).regex(WORKSPACE_ID_PATTERN).default(DEFAULT_WORKSPACE_ID),
+  workspaceId: z.string().min(1).max(WORKSPACE_ID_MAX_LENGTH).regex(WORKSPACE_ID_PATTERN).default(DEFAULT_WORKSPACE_ID),
   phaseFolder: z.string().min(1).max(MAX_PHASE_FOLDER_LENGTH).regex(PHASE_FOLDER_PATTERN).optional(),
   workCardId: z.string().min(1).max(MAX_WORK_CARD_ID_LENGTH).regex(WORK_CARD_ID_PATTERN).optional(),
   maxResults: z.number().int().positive().optional()
 });
 
 const BuilderReportSummaryInputSchema = z.object({
-  workspaceId: z.string().min(1).max(MAX_WORKSPACE_ID_LENGTH).regex(WORKSPACE_ID_PATTERN).default(DEFAULT_WORKSPACE_ID),
+  workspaceId: z.string().min(1).max(WORKSPACE_ID_MAX_LENGTH).regex(WORKSPACE_ID_PATTERN).default(DEFAULT_WORKSPACE_ID),
   reportPath: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH).optional(),
   phaseFolder: z.string().min(1).max(MAX_PHASE_FOLDER_LENGTH).regex(PHASE_FOLDER_PATTERN).optional(),
   workCardId: z.string().min(1).max(MAX_WORK_CARD_ID_LENGTH).regex(WORK_CARD_ID_PATTERN).optional(),
@@ -53,7 +57,6 @@ interface WorkspaceOption {
   workspaceLabel: string;
   repositoryName?: string;
   root: string;
-  aliases: string[];
 }
 
 interface BuilderReportRecord {
@@ -79,15 +82,6 @@ interface BuilderReportCandidate {
   fileName: string;
   phaseFolder: string;
   workCardId?: string;
-}
-
-function normalizeAlias(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/gu, "_")
-    .replace(/^_+|_+$/gu, "")
-    .slice(0, MAX_WORKSPACE_ID_LENGTH);
 }
 
 function normalizeWorkCardId(value: string): string {
@@ -146,96 +140,33 @@ async function repositoryName(root: string): Promise<string | undefined> {
   return parseRepositoryNameFromRemote(result.stdout);
 }
 
-function publicWorkspaceIds(workspaces: WorkspaceOption[], includeAllAllowed: boolean): string[] {
-  const ids = new Set<string>([DEFAULT_WORKSPACE_ID]);
-  if (includeAllAllowed) {
-    ids.add(ALL_ALLOWED_WORKSPACE_ID);
-  }
-
-  for (const workspace of workspaces) {
-    for (const alias of workspace.aliases) {
-      ids.add(alias);
-    }
-  }
-
-  return [...ids].sort();
-}
-
-async function workspaceOptions(config: AppConfig): Promise<WorkspaceOption[]> {
-  let defaultRoot: string;
-  try {
-    defaultRoot = resolveDefaultWorkspaceRoot(config);
-  } catch (error) {
-    if (error instanceof AppError) {
-      throw new AppError(error.code, error.message);
-    }
-    throw error;
-  }
-
-  const roots: string[] = [];
-  for (const candidate of [defaultRoot, ...config.allowedRoots]) {
-    try {
-      const root = resolveAllowedRoot(candidate, config.allowedRoots).rootRealPath;
-      if (!roots.some((entry) => entry.toLowerCase() === root.toLowerCase())) {
-        roots.push(root);
-      }
-    } catch {
-      // Ignore invalid non-default allowed roots here; config startup validation owns that failure mode.
-    }
-  }
-
-  const options = await Promise.all(
-    roots.map(async (root, index): Promise<WorkspaceOption> => {
-      const repoName = await repositoryName(root);
-      const folderAlias = normalizeAlias(path.basename(root));
-      const repoAlias = repoName ? normalizeAlias(repoName.split("/").at(-1) ?? repoName) : "";
-      const aliases = [...new Set([folderAlias, repoAlias].filter(Boolean))];
-      const isDefault = root.toLowerCase() === defaultRoot.toLowerCase();
-      const workspaceId = isDefault ? DEFAULT_WORKSPACE_ID : aliases[0] ?? `workspace_${index + 1}`;
-
-      return {
-        workspaceId,
-        workspaceLabel: path.basename(root),
-        repositoryName: repoName,
-        root,
-        aliases: isDefault ? [...new Set([DEFAULT_WORKSPACE_ID, ...aliases])] : aliases
-      };
-    })
-  );
-
-  return options;
+async function workspaceOption(workspace: { workspaceId: string; label: string; root: string }): Promise<WorkspaceOption> {
+  return {
+    workspaceId: workspace.workspaceId,
+    workspaceLabel: workspace.label,
+    repositoryName: await repositoryName(workspace.root),
+    root: workspace.root
+  };
 }
 
 async function resolveIndexWorkspaces(workspaceId: string, config: AppConfig): Promise<{
   selected: WorkspaceOption[];
   availableWorkspaceIds: string[];
 }> {
-  const options = await workspaceOptions(config);
-  const availableWorkspaceIds = publicWorkspaceIds(options, true);
+  const availableWorkspaceIds = [...new Set([...getAvailableWorkspaceIds(config), ALL_ALLOWED_WORKSPACE_ID])].sort();
 
   if (workspaceId === ALL_ALLOWED_WORKSPACE_ID) {
+    const registry = getWorkspaceRegistry(config);
     return {
-      selected: options,
+      selected: await Promise.all(registry.workspaces.map((entry) => workspaceOption(entry))),
       availableWorkspaceIds
     };
   }
 
-  const normalized = normalizeAlias(workspaceId);
-  const selected = options.filter((option) => option.aliases.includes(normalized) || option.workspaceId === workspaceId);
-  if (selected.length === 0) {
-    throw new AppError("INVALID_INPUT", "Unknown workspaceId. Use one of the available safe workspace IDs.", {
-      availableWorkspaceIds
-    });
-  }
-
-  if (selected.length > 1) {
-    throw new AppError("INVALID_INPUT", "workspaceId matches more than one configured allowed workspace.", {
-      availableWorkspaceIds
-    });
-  }
+  const workspace = resolveWorkspace(workspaceId, config);
 
   return {
-    selected,
+    selected: [await workspaceOption(workspace)],
     availableWorkspaceIds
   };
 }
@@ -244,8 +175,7 @@ async function resolveSummaryWorkspace(workspaceId: string, config: AppConfig): 
   workspace: WorkspaceOption;
   availableWorkspaceIds: string[];
 }> {
-  const options = await workspaceOptions(config);
-  const availableWorkspaceIds = publicWorkspaceIds(options, false);
+  const availableWorkspaceIds = getAvailableWorkspaceIds(config);
 
   if (workspaceId === ALL_ALLOWED_WORKSPACE_ID) {
     throw new AppError("INVALID_INPUT", "all_allowed is only supported by get_builder_report_index.", {
@@ -253,22 +183,10 @@ async function resolveSummaryWorkspace(workspaceId: string, config: AppConfig): 
     });
   }
 
-  const normalized = normalizeAlias(workspaceId);
-  const selected = options.filter((option) => option.aliases.includes(normalized) || option.workspaceId === workspaceId);
-  if (selected.length === 0) {
-    throw new AppError("INVALID_INPUT", "Unknown workspaceId. Use one of the available safe workspace IDs.", {
-      availableWorkspaceIds
-    });
-  }
-
-  if (selected.length > 1) {
-    throw new AppError("INVALID_INPUT", "workspaceId matches more than one configured allowed workspace.", {
-      availableWorkspaceIds
-    });
-  }
+  const workspace = resolveWorkspace(workspaceId, config);
 
   return {
-    workspace: selected[0],
+    workspace: await workspaceOption(workspace),
     availableWorkspaceIds
   };
 }

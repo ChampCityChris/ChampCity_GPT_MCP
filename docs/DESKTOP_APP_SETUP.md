@@ -184,6 +184,25 @@ The local config shape is:
 }
 ```
 
+For concurrent project work, the same file may define server-named workspaces:
+
+```json
+{
+  "workspaces": [
+    {
+      "workspaceId": "champcity_gpt",
+      "label": "ChampCity GPT MCP",
+      "root": "C:\\Users\\<you>\\Projects\\ChampCity_GPT",
+      "remote": "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git"
+    }
+  ],
+  "defaultWorkspaceId": "champcity_gpt",
+  "requireGitRoot": true
+}
+```
+
+`allowedRoots` remains supported. If only `allowedRoots` is configured, the server derives safe workspace IDs from folder names. ChatGPT-facing toolbox calls should use `diagnostics_toolbox.list_workspaces` and pass explicit workspace IDs instead of local paths.
+
 Environment variables still override the local config. The local config overrides safe defaults.
 
 ## Configure ChatGPT OAuth

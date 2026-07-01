@@ -16,6 +16,7 @@ This queue is derived from the answered operator intake file:
 - No Work Card in this queue authorizes fallback architecture, release publication, tag movement, package generation, source implementation, or protected-subsystem changes outside its own future approved scope.
 - Active implementation Work Cards should use `dev` or a generated `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` branch. `main` is reserved for stable release or baseline checkpoints.
 - `prepare_git_work_branch` is the safe MCP branch-preparation path. It refuses dirty working trees and `main` as the active work target, and it does not push, merge, rebase, reset, stash, delete, force, or run arbitrary commands.
+- Stable domain toolbox expansion should prefer internal allowlisted actions under `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox` instead of adding new top-level MCP tools when possible. Figma belongs under `integration_toolbox`; do not add `figma_toolbox`.
 - Normal source-control flow after branch preparation is validate, stage reviewed files, run pre-commit safety scan, commit, push the current `dev` or feature branch, and merge to `main` only at a stable checkpoint.
 
 ## Phase 0 — Scope Lock And Baseline
@@ -127,6 +128,19 @@ This queue is derived from the answered operator intake file:
 - Dependencies or notes: Evidence capture must not rely on browser scraping or screenshots unless separately authorized. Builder implementation adds the redacted evidence template, `npm run chatgpt:evidence:validate`, and local redaction/completeness checks; it does not itself perform live ChatGPT connector validation. Supports CAV-007 through CAV-011 and CAV-027 through CAV-031, and also helps CAV-033.
 
 ## Phase 2 — Safe Purpose-Built MCP Tool Architecture
+
+### WC-V1-FIX02 — Add stable domain toolbox tools
+
+- ID: `WC-V1-FIX02`
+- Title: Add stable domain toolbox tools
+- Priority: P0
+- Owner mode: Codex/Builder
+- Type: MCP reliability / tool governance
+- Objective: Add a durable small set of top-level MCP toolbox tools so future capability expansion can prefer internal allowlisted actions over new top-level MCP tools.
+- Scope: Add `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox` with minimal safe initial actions. Preserve existing legacy tools. Do not add `figma_toolbox`; Figma and other external services belong under `integration_toolbox`.
+- Acceptance criteria: The seven toolbox tools are registered and visible with `files.read`; write-capable actions fail safely without OAuth `files.write` and local write-mode permission; unknown actions and unknown services fail with structured errors; toolbox schemas avoid forbidden root, command, token, force/reset/merge/rebase/stash/delete, and secret fields; MCP self-test covers the toolbox surface.
+- Validation: Typecheck, unit tests, lint, build, public safety scan, MCP self-test, ChatGPT evidence template validation, diff check, and live ChatGPT connector validation by the operator after runtime update.
+- Dependencies or notes: Depends on `WC-V1-FIX01` and `prepare_git_work_branch`. This card reduces top-level MCP schema churn but does not migrate or remove existing narrow tools.
 
 ### WC-V1-0201 — Replace arbitrary command execution with purpose-built tools
 
@@ -454,4 +468,4 @@ This queue is derived from the answered operator intake file:
 
 ## Work Card Count
 
-This queue contains 32 P0 Work Cards.
+This queue contains 33 P0 Work Cards.

@@ -14,6 +14,18 @@ import { scopeIncludes } from "../oauth.js";
 import { applyApprovedPatch } from "../tools/applyApprovedPatch.js";
 import { getBuilderReportIndex, getBuilderReportSummary } from "../tools/builderReportFacade.js";
 import {
+  artifactToolbox,
+  browserToolbox,
+  buildRuntimeScopeToolDiagnostics,
+  diagnosticsToolbox,
+  gitToolbox,
+  integrationToolbox,
+  knowledgeToolbox,
+  repoToolbox,
+  TOOLBOX_TOOL_NAMES,
+  type ToolboxRuntimeContext
+} from "../tools/domainToolboxes.js";
+import {
   createCodexUiHandoffPromptTool,
   createFigmaHandoffPackageTool,
   fetchFigmaFileSummary,
@@ -69,6 +81,21 @@ const workspaceIdSchema = { ...textSchema, maxLength: 64, default: "default" };
 const phaseFolderSchema = { ...textSchema, maxLength: 128 };
 const workCardIdSchema = { ...textSchema, maxLength: 128 };
 const branchSlugSchema = { ...textSchema, maxLength: 80 };
+const toolboxActionSchema = { ...textSchema, maxLength: 80 };
+const toolboxParamsSchema = {
+  type: "object",
+  description: "Optional action-specific parameters. Unknown action parameters are rejected by server-side validation.",
+  additionalProperties: true
+};
+const toolboxInputSchema = {
+  type: "object",
+  properties: {
+    action: toolboxActionSchema,
+    workspaceId: workspaceIdSchema,
+    params: toolboxParamsSchema
+  },
+  required: ["action"]
+};
 
 export const tools = [
   {
@@ -396,6 +423,48 @@ export const tools = [
     }
   },
   {
+    name: "repo_toolbox",
+    description:
+      "Stable repository toolbox. Routes allowlisted file and Markdown artifact actions through existing safety checks; write actions still require OAuth files.write and local write mode.",
+    inputSchema: toolboxInputSchema
+  },
+  {
+    name: "git_toolbox",
+    description:
+      "Stable git workflow toolbox. Routes allowlisted status, diff, readiness, branch, stage, commit, and push actions without accepting raw git commands.",
+    inputSchema: toolboxInputSchema
+  },
+  {
+    name: "artifact_toolbox",
+    description:
+      "Stable artifact toolbox. Routes allowlisted Builder Report, release-summary, package-summary, and handoff-prompt actions through existing safeguards.",
+    inputSchema: toolboxInputSchema
+  },
+  {
+    name: "diagnostics_toolbox",
+    description:
+      "Stable diagnostics toolbox. Returns redacted runtime, write-access, tool-exposure, OAuth-scope, ChatGPT-discovery, and public-safety status.",
+    inputSchema: toolboxInputSchema
+  },
+  {
+    name: "integration_toolbox",
+    description:
+      "Stable integration toolbox. Provides an allowlisted service broker for status, capabilities, configuration checks, and handoff artifacts; it is not arbitrary upstream MCP passthrough.",
+    inputSchema: toolboxInputSchema
+  },
+  {
+    name: "browser_toolbox",
+    description:
+      "Stable constrained browser-validation toolbox. Reports safe capabilities and configured endpoint validation guidance without browser automation or arbitrary browsing.",
+    inputSchema: toolboxInputSchema
+  },
+  {
+    name: "knowledge_toolbox",
+    description:
+      "Stable knowledge toolbox. Reports safe project reference capabilities without web fetches, connector scraping, hidden memory writes, or external document retrieval.",
+    inputSchema: toolboxInputSchema
+  },
+  {
     name: "git_status",
     description: "Return git status --short and the current branch for an allowed root.",
     inputSchema: {
@@ -533,6 +602,7 @@ export const READ_TOOL_NAMES = [
   "get_release_publication_summary",
   "get_builder_report_index",
   "get_builder_report_summary",
+  ...TOOLBOX_TOOL_NAMES,
   "get_write_access_status",
   "get_figma_status",
   "parse_figma_url",
@@ -1011,6 +1081,23 @@ export function assertWriteToolEnabled(toolName: string, config: AppConfig): voi
   }
 }
 
+export function createToolboxRuntimeContext(config: AppConfig, options: ToolExposureOptions = {}): ToolboxRuntimeContext {
+  const diagnostics = getToolExposureDiagnostics(config, options);
+  return {
+    callerScope: diagnostics.scope,
+    internalRegisteredToolCount: diagnostics.internalRegisteredToolCount,
+    schemaValidExposedToolCount: diagnostics.schemaValidExposedToolCount,
+    scopeFilteredToolCount: diagnostics.scopeFilteredToolCount,
+    registeredToolNames: diagnostics.internalToolNames,
+    readToolNames: diagnostics.readToolNames,
+    writeToolNames: diagnostics.writeToolNames,
+    exposedToolNames: diagnostics.exposedToolNames,
+    writeToolNamesBlockedByLocalMode: diagnostics.writeToolNamesBlockedByLocalMode,
+    scopeFilteredTools: diagnostics.scopeFilteredTools,
+    assertWriteToolEnabled: (toolName: string) => assertWriteToolEnabled(toolName, config)
+  };
+}
+
 export function registerTools(server: Server, config: AppConfig, exposureOptions: ToolExposureOptions = {}): void {
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({
     resources: []
@@ -1036,6 +1123,7 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
 
     try {
       assertWriteToolEnabled(request.params.name, config);
+      const toolboxContext = () => createToolboxRuntimeContext(config, exposureOptions);
 
       switch (request.params.name) {
         case "list_project_files":
@@ -1045,7 +1133,7 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
         case "search_project_files":
           return toolResponse(await searchProjectFiles(args, config));
         case "get_write_access_status":
-          return toolResponse(await getWriteAccessStatus(args, config));
+          return toolResponse(await getWriteAccessStatus(args, config, await buildRuntimeScopeToolDiagnostics(config, toolboxContext())));
         case "get_figma_status":
           return toolResponse(await getFigmaStatusTool(args, config));
         case "parse_figma_url":
@@ -1076,6 +1164,20 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
           return toolResponse(await getBuilderReportIndex(args, config));
         case "get_builder_report_summary":
           return toolResponse(await getBuilderReportSummary(args, config));
+        case "repo_toolbox":
+          return toolResponse(await repoToolbox(args, config, toolboxContext()));
+        case "git_toolbox":
+          return toolResponse(await gitToolbox(args, config, toolboxContext()));
+        case "artifact_toolbox":
+          return toolResponse(await artifactToolbox(args, config, toolboxContext()));
+        case "diagnostics_toolbox":
+          return toolResponse(await diagnosticsToolbox(args, config, toolboxContext()));
+        case "integration_toolbox":
+          return toolResponse(await integrationToolbox(args, config, toolboxContext()));
+        case "browser_toolbox":
+          return toolResponse(await browserToolbox(args, config));
+        case "knowledge_toolbox":
+          return toolResponse(await knowledgeToolbox(args, config));
         case "propose_patch":
           return toolResponse(await proposePatch(args, config));
         case "apply_approved_patch":

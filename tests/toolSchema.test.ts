@@ -49,6 +49,16 @@ const publicSafeFacadeToolNames = [
   "get_builder_report_summary"
 ] as const;
 
+const toolboxToolNames = [
+  "repo_toolbox",
+  "git_toolbox",
+  "artifact_toolbox",
+  "diagnostics_toolbox",
+  "integration_toolbox",
+  "browser_toolbox",
+  "knowledge_toolbox"
+] as const;
+
 const mutationInputFields = new Set([
   "root",
   "absolutePath",
@@ -87,6 +97,26 @@ const unsafeBranchToolFields = new Set([
   "stash",
   "delete",
   "clobber"
+]);
+
+const forbiddenToolboxFields = new Set([
+  "root",
+  "absolutePath",
+  "command",
+  "script",
+  "shell",
+  "args",
+  "argv",
+  "approvalToken",
+  "force",
+  "reset",
+  "merge",
+  "rebase",
+  "stash",
+  "delete",
+  "clobber",
+  "token",
+  "secret"
 ]);
 
 const riskyDescriptionPhrases = [
@@ -175,6 +205,27 @@ describe("MCP tool schemas", () => {
         assert.doesNotMatch(registeredTool.description, new RegExp(phrase, "iu"), `${registeredTool.name} description contains ${phrase}`);
       }
     }
+  });
+
+  it("registers stable domain toolbox tools as read-visible narrow action dispatchers", () => {
+    for (const toolName of toolboxToolNames) {
+      const toolbox = tool(toolName);
+      const properties = toolbox.inputSchema.properties ?? {};
+
+      assert.equal(isReadToolName(toolName), true, `${toolName} should be visible with files.read`);
+      assert.equal(isWriteToolName(toolName), false, `${toolName} must enforce write actions internally`);
+      assert.deepEqual(toolbox.inputSchema.required, ["action"]);
+      assert.deepEqual(Object.keys(properties).sort(), ["action", "params", "workspaceId"]);
+      assert.ok(properties.action);
+      assert.ok(properties.workspaceId);
+      assert.ok(properties.params);
+
+      for (const fieldName of Object.keys(properties)) {
+        assert.equal(forbiddenToolboxFields.has(fieldName), false, `${toolName} must not expose forbidden field ${fieldName}`);
+      }
+    }
+
+    assert.equal((tools as readonly { name: string }[]).some((entry) => entry.name === "figma_toolbox"), false);
   });
 
   it("exposes narrow git workflow tools", () => {
@@ -297,6 +348,9 @@ describe("MCP tool schemas", () => {
     assert.ok(diagnostics.exposedToolNames.includes("read_project_file"));
     assert.ok(diagnostics.exposedToolNames.includes("search_project_files"));
     assert.ok(diagnostics.exposedToolNames.includes("get_figma_status"));
+    for (const toolName of toolboxToolNames) {
+      assert.ok(diagnostics.exposedToolNames.includes(toolName), `${toolName} should remain visible with files.read`);
+    }
     assert.equal(diagnostics.exposedToolNames.includes("write_markdown_artifact"), false);
     assert.equal(diagnostics.exposedToolNames.includes("run_figma_make_file_handoff"), false);
     assert.ok(diagnostics.scopeFilteredTools.some((entry) => entry.name === "run_figma_make_file_handoff" && /files\.write/u.test(entry.reason)));

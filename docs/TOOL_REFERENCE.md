@@ -16,7 +16,7 @@ OAuth metadata:
 
 Scope mapping:
 
-- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `pre_commit_safety_scan`, and `get_commit_readiness`.
+- `files.read`: `tools/list`, `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, `knowledge_toolbox`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `pre_commit_safety_scan`, and `get_commit_readiness`.
 - `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `prepare_git_work_branch`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
 
 Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=off|docs|patch|elevated` is preferred, with `config/write-access.local.json` as the local-file source. Legacy `CHAMPCITY_GPT_ENABLE_WRITE_TOOLS=true` maps to `docs`.
@@ -32,6 +32,151 @@ These facade tools are part of the WC-V1-0102 remediation path for `CAV-011`, `C
 
 Builder Report discovery should use `get_builder_report_index`. Specific report review should use `get_builder_report_summary`, or `read_project_file` only with a narrow expected report path already returned by the index. Normal ChatGPT workflows should avoid broad `list_project_files` calls that combine `planning/phases`, `**/BUILDER_REPORT*.md`, high `maxResults`, and absolute local roots. The Builder Report facade supports `CAV-033`; live ChatGPT validation is still required before claiming platform safety-layer remediation.
 
+## Stable Domain Toolbox Tools
+
+WC-V1-FIX02 adds stable top-level toolbox tools so future capability expansion can prefer internal allowlisted actions over new top-level MCP tool names. ChatGPT may bind tool schemas for the connector or chat lifecycle, so adding new top-level tools can require connector rediscovery, app reauthorization, or a new chat. Existing narrow tools remain registered for backward compatibility.
+
+The stable domain toolbox tools are:
+
+- `repo_toolbox`
+- `git_toolbox`
+- `artifact_toolbox`
+- `diagnostics_toolbox`
+- `integration_toolbox`
+- `browser_toolbox`
+- `knowledge_toolbox`
+
+Each toolbox accepts:
+
+```json
+{
+  "action": "status",
+  "workspaceId": "default",
+  "params": {}
+}
+```
+
+The public schema stays stable, but action-specific server-side validation is strict. Unknown actions, unknown services, missing required params, and unsafe params return structured `ok: false` results with supported values where applicable. The toolbox schema does not expose raw roots, absolute paths, shell commands, arbitrary git commands, approval tokens, force/reset/merge/rebase/stash/delete controls, raw tokens, or service secrets.
+
+Toolbox calls return:
+
+```ts
+{
+  toolbox: string;
+  action: string;
+  ok: boolean;
+  result?: unknown;
+  error?: { code: string; message: string; details?: unknown };
+  warnings?: string[];
+  recommendedNextSteps?: string[];
+}
+```
+
+Toolbox visibility uses `files.read`. Write-capable toolbox actions still fail unless the caller has OAuth `files.write` and the local write mode permits the mapped operation. The correct ChatGPT app scopes are `files.read files.write`; `file.read` is a typo and does not grant the required read scope.
+
+### `repo_toolbox`
+
+Initial actions:
+
+- `status`
+- `list_files`
+- `read_file`
+- `search_files`
+- `write_markdown_artifact`
+
+Read actions use the configured default workspace and existing file safety policy. `write_markdown_artifact` uses the existing Markdown artifact writer and requires `files.write` plus write mode `docs`, `patch`, or `elevated`.
+
+### `git_toolbox`
+
+Initial actions:
+
+- `status`
+- `diff`
+- `prepare_work_branch`
+- `pre_commit_scan`
+- `stage_paths`
+- `commit_staged`
+- `push_current_branch`
+- `readiness_summary`
+
+The toolbox does not accept arbitrary git commands, reset, rebase, merge, stash, branch delete, force push, checkout path, or raw branch-name controls. Mutating actions require `files.write` and write mode `elevated`. `prepare_work_branch` delegates to the safe `prepare_git_work_branch` behavior.
+
+### `artifact_toolbox`
+
+Initial actions:
+
+- `builder_report_index`
+- `builder_report_summary`
+- `release_artifact_summary`
+- `release_publication_summary`
+- `local_package_summary`
+- `create_codex_handoff_prompt`
+
+Read actions return bounded project-artifact summaries. Handoff prompt creation writes only a local Markdown artifact through existing docs-write policy.
+
+### `diagnostics_toolbox`
+
+Initial actions:
+
+- `runtime_status`
+- `write_access_status`
+- `tool_exposure_status`
+- `oauth_scope_status`
+- `chatgpt_discovery_status`
+- `public_safety_status`
+
+Diagnostics are redacted and include runtime package version, commit, branch, runtime start time where available, registered tool count, registered tool-name hash, registered toolbox names, observed OAuth scope booleans, local write mode, local write-mode booleans, and latest discovery counts when a discovery trace is available. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, or raw credential stores are returned.
+
+`get_write_access_status` also includes a nested diagnostics block when called through MCP so older visible tool surfaces can report runtime, scope, and tool-count state.
+
+### `integration_toolbox`
+
+Initial actions:
+
+- `list_supported_services`
+- `get_service_status`
+- `list_service_capabilities`
+- `validate_service_configuration`
+- `prepare_external_handoff`
+
+Initial service IDs:
+
+```text
+figma
+figma_make
+github
+cloudflare
+playwright
+docker_mcp
+sentry
+linear
+jira
+slack
+notion
+custom
+```
+
+`integration_toolbox` is a governed allowlisted broker, not arbitrary MCP passthrough. It does not accept raw tokens, arbitrary upstream server URLs, arbitrary HTTP methods, arbitrary upstream MCP tool names, or arbitrary service API methods. Figma belongs under `integration_toolbox` as service IDs `figma` and `figma_make`; no permanent `figma_toolbox` is added. Existing Figma-specific tools remain legacy/backward-compatible for now.
+
+### `browser_toolbox`
+
+Initial actions:
+
+- `get_browser_capabilities`
+- `validate_public_endpoint`
+
+This toolbox is constrained validation, not browser scraping. WC-V1-FIX02 does not add live browser automation, Playwright MCP invocation, credential entry, cookies, screenshots by default, raw network headers, or ChatGPT UI scraping.
+
+### `knowledge_toolbox`
+
+Initial actions:
+
+- `list_supported_sources`
+- `get_project_memory_status`
+- `get_reference_capabilities`
+
+This toolbox is an optional reference/context facade. It does not add arbitrary web fetch, private document connector scraping, hidden persistent memory mutation, or memory writes.
+
 ## Local MCP Protocol Self-Test
 
 Release validation can run the deterministic local MCP protocol self-test after building:
@@ -41,7 +186,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-This self-test checks the local tool registry, MCP `tools/list` schema validity, required read and gated tool registration, narrow safe-facade schemas, tool description safety phrases, safe read-only facade calls, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, elevated-script gating, and gated branch workflow tool coverage. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
+This self-test checks the local tool registry, MCP `tools/list` schema validity, required read and gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, tool description safety phrases, safe read-only facade calls, toolbox read-only diagnostics, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, elevated-script gating, and gated branch workflow tool coverage. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
 
 This self-test complements but does not replace live ChatGPT connector validation.
 
@@ -183,7 +328,7 @@ Input:
 {}
 ```
 
-Output summary: `writeMode`, `writeModeSource`, docs/patch/elevated booleans, whether the elevated token is configured, pending patch proposal count, and `oauthFilesWriteGranted` as `unknown` when the tool layer cannot see OAuth context.
+Output summary: `writeMode`, `writeModeSource`, docs/patch/elevated booleans, whether the elevated token is configured, pending patch proposal count, `oauthFilesWriteGranted`, and a nested redacted diagnostics block when MCP call context is available.
 
 ## `get_figma_status`
 

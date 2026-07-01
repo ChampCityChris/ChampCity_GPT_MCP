@@ -151,6 +151,42 @@ After branch preparation, the normal sequence is:
 5. Push the current `dev` or feature branch with `push_current_branch`.
 6. Merge to `main` only at a stable release or baseline checkpoint.
 
+## Stable Domain Toolbox Tools
+
+WC-V1-FIX02 adds stable top-level toolbox tools for ChatGPT:
+
+- `repo_toolbox`
+- `git_toolbox`
+- `artifact_toolbox`
+- `diagnostics_toolbox`
+- `integration_toolbox`
+- `browser_toolbox`
+- `knowledge_toolbox`
+
+ChatGPT may bind tool schemas for the connector or chat lifecycle. Adding new top-level MCP tools can require connector rediscovery, app reauthorization, or a new chat. Future capability expansion should prefer adding allowlisted internal toolbox actions over adding new top-level tools when that fits the domain.
+
+Existing narrow tools remain available for backward compatibility. The new toolbox tools are visible with `files.read`; write-capable actions inside them still require OAuth `files.write` plus the same local write-mode policy as the mapped legacy tool. A read-only caller can still use diagnostics/read-only toolbox actions, while write actions fail with a clear missing-scope or write-mode denial.
+
+Initial action groups:
+
+- `repo_toolbox`: `status`, `list_files`, `read_file`, `search_files`, `write_markdown_artifact`
+- `git_toolbox`: `status`, `diff`, `prepare_work_branch`, `pre_commit_scan`, `stage_paths`, `commit_staged`, `push_current_branch`, `readiness_summary`
+- `artifact_toolbox`: `builder_report_index`, `builder_report_summary`, `release_artifact_summary`, `release_publication_summary`, `local_package_summary`, `create_codex_handoff_prompt`
+- `diagnostics_toolbox`: `runtime_status`, `write_access_status`, `tool_exposure_status`, `oauth_scope_status`, `chatgpt_discovery_status`, `public_safety_status`
+- `integration_toolbox`: `list_supported_services`, `get_service_status`, `list_service_capabilities`, `validate_service_configuration`, `prepare_external_handoff`
+- `browser_toolbox`: `get_browser_capabilities`, `validate_public_endpoint`
+- `knowledge_toolbox`: `list_supported_sources`, `get_project_memory_status`, `get_reference_capabilities`
+
+Do not expect a `figma_toolbox`. Figma is represented under `integration_toolbox` as `figma` and `figma_make`; existing Figma-specific tools remain legacy/backward-compatible for now. `integration_toolbox` is a governed broker, not arbitrary upstream MCP passthrough. `browser_toolbox` is constrained validation, not browser scraping. `knowledge_toolbox` is optional project reference capability, not hidden memory mutation.
+
+When approving ChatGPT app scopes, use:
+
+```text
+files.read files.write
+```
+
+`file.read` is wrong; the required read scope is `files.read`.
+
 ## Local MCP Protocol Self-Test
 
 For deterministic local release validation after a build, run:
@@ -160,7 +196,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-The self-test validates the local MCP tool registry, `tools/list` schema, required read and gated tools, safe facade schema narrowness, safe read-only facade calls, Builder Report discovery and summary, docs-write denial with write mode off, blocked-path denial, elevated-script gating, and gated branch workflow tool coverage. JSON mode is suitable for Builder Reports and release validation evidence.
+The self-test validates the local MCP tool registry, `tools/list` schema, required read and gated tools, stable toolbox registration, safe facade and toolbox schema narrowness, safe read-only facade calls, toolbox read-only diagnostics, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial with write mode off, blocked-path denial, elevated-script gating, and gated branch workflow tool coverage. JSON mode is suitable for Builder Reports and release validation evidence.
 
 This self-test complements but does not replace live ChatGPT connector validation. It does not contact ChatGPT.com, use browser automation or UI scraping, launch Cloudflare, mutate OAuth/DCR state, package, tag, push, publish, or run elevated scripts.
 
@@ -196,7 +232,7 @@ Start read-only first. Set write mode above `off` only after confirming:
 - Audit logging is enabled and reviewed.
 - Read-only tools work through ChatGPT.
 
-In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers read/list/search/git status/git diff, the safe status/release/Builder Report facade tools, `get_write_access_status`, Figma status/URL parsing/file summaries, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, Figma frame export, Figma handoff package generation, Figma Make URL handoff orchestration, Figma Make `.make` file handoff orchestration, Codex UI handoff prompt generation, `prepare_git_work_branch`, source-control stage/commit/push tools, and `run_allowed_script`, but write access still has local write-mode gates. Markdown/Figma handoff writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Branch preparation, staging, committing, pushing, and `run_allowed_script` require mode `elevated`; `run_allowed_script` also requires an allowlisted maintenance task and the elevated approval token. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
+In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers the stable toolbox tools, read/list/search/git status/git diff, the safe status/release/Builder Report facade tools, `get_write_access_status`, Figma status/URL parsing/file summaries, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, Figma frame export, Figma handoff package generation, Figma Make URL handoff orchestration, Figma Make `.make` file handoff orchestration, Codex UI handoff prompt generation, `prepare_git_work_branch`, source-control stage/commit/push tools, and `run_allowed_script`, but write access still has local write-mode gates. Markdown/Figma handoff writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Branch preparation, staging, committing, pushing, and `run_allowed_script` require mode `elevated`; `run_allowed_script` also requires an allowlisted maintenance task and the elevated approval token. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
 
 ## Figma Make Handoff Flow
 

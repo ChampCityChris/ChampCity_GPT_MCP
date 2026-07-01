@@ -40,7 +40,7 @@ If ChatGPT reports `PKCE S256 code_challenge is required`, inspect the launcher 
 
 Scope mapping:
 
-- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `test_figma_mcp_connection`, `pre_commit_safety_scan`, and `get_commit_readiness`.
+- `files.read`: `tools/list`, `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, `knowledge_toolbox`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `test_figma_mcp_connection`, `pre_commit_safety_scan`, and `get_commit_readiness`.
 - `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `prepare_git_work_branch`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
 
 Write access uses local write modes instead of a per-write token for every write. OAuth `files.write` is still required, but it is not enough by itself. The local write mode must also permit the operation:
@@ -75,6 +75,38 @@ The Builder Report facade tools are limited to `planning/phases/<phaseFolder>/Bu
 
 These tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, `CAV-030`, and `CAV-033`. Local tests can verify registration and schema safety, but live ChatGPT validation is still required before claiming full platform safety-layer remediation.
 
+## Stable Domain Toolbox Security Model
+
+WC-V1-FIX02 adds seven stable read-visible domain toolbox tools:
+
+- `repo_toolbox`
+- `git_toolbox`
+- `artifact_toolbox`
+- `diagnostics_toolbox`
+- `integration_toolbox`
+- `browser_toolbox`
+- `knowledge_toolbox`
+
+These tools reduce future top-level MCP schema churn. ChatGPT may bind tool schemas for a connector or chat lifecycle, so future expansion should prefer new internal allowlisted toolbox actions over new top-level MCP tools when possible. Existing narrow tools remain registered for backward compatibility.
+
+The toolbox input shape is stable: `action`, optional `workspaceId`, and optional `params`. The schema is not a security boundary. Each action has strict server-side validation and rejects unknown actions, unknown services, unsafe params, and missing required params with structured errors.
+
+Toolbox visibility requires `files.read`. Mixed read/write toolboxes are safe because write-capable actions enforce OAuth `files.write` and the same local write-mode policy as the mapped legacy operation. A caller with only `files.read` can see and call read-only diagnostics, but write actions fail with a clear missing `files.write` or write-mode error. This avoids hiding diagnostics from read-only sessions.
+
+The toolbox surface must not expose or accept raw local filesystem roots from public ChatGPT callers, arbitrary shell, arbitrary git commands, arbitrary URL fetch, arbitrary upstream MCP tool calls, arbitrary service API methods, arbitrary browser actions, raw JSON passthrough as execution authority, raw tokens, OAuth stores, `.env`, local config, credential stores, private tunnel URLs, cookies, or browser profile credentials.
+
+Figma belongs under `integration_toolbox` as the `figma` and `figma_make` service IDs. No `figma_toolbox` is added. Existing Figma-specific tools remain legacy/backward-compatible until a future scoped migration card changes that.
+
+`integration_toolbox` is a governed allowlisted service broker, not arbitrary MCP passthrough. `browser_toolbox` is constrained validation, not browser scraping. `knowledge_toolbox` is optional project-reference capability, not hidden memory mutation.
+
+The correct ChatGPT OAuth scopes are:
+
+```text
+files.read files.write
+```
+
+`file.read` is a typo and does not grant the required `files.read` scope.
+
 ## Local MCP Protocol Self-Test
 
 Release validation can run:
@@ -84,7 +116,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-The self-test is deterministic and local. It validates the MCP tool registry, `tools/list` schema, required read and gated tool registration, narrow safe-facade schemas, safety-compatible descriptions, safe read-only facade calls, Builder Report discovery, denied docs-write behavior, blocked-path denial, and elevated-script gating. It uses temporary fixtures for denied write and blocked-path probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
+The self-test is deterministic and local. It validates the MCP tool registry, `tools/list` schema, required read and gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, safety-compatible descriptions, safe read-only facade calls, toolbox read-only diagnostics, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery, denied docs-write behavior, blocked-path denial, and elevated-script gating. It uses temporary fixtures for denied write and blocked-path probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
 
 The JSON output is intended for release validation and Builder Reports. It must remain redacted and must not expose secrets, tokens, OAuth stores, local config contents, full private user paths, release binary contents, logs, or generated output contents.
 

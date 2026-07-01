@@ -7,11 +7,19 @@ import { ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { type AppConfig } from "../config.js";
 import {
+  createToolboxRuntimeContext,
   createMcpToolsListResult,
   getToolExposureDiagnostics,
   tools
 } from "../server/registerTools.js";
 import { getBuilderReportIndex, getBuilderReportSummary } from "../tools/builderReportFacade.js";
+import {
+  diagnosticsToolbox,
+  gitToolbox,
+  integrationToolbox,
+  repoToolbox,
+  TOOLBOX_TOOL_NAMES
+} from "../tools/domainToolboxes.js";
 import { readProjectFile } from "../tools/readProjectFile.js";
 import { runAllowedScript } from "../tools/runAllowedScript.js";
 import {
@@ -61,6 +69,13 @@ const REQUIRED_READ_TOOLS = [
   "list_project_files",
   "read_project_file",
   "search_project_files",
+  "repo_toolbox",
+  "git_toolbox",
+  "artifact_toolbox",
+  "diagnostics_toolbox",
+  "integration_toolbox",
+  "browser_toolbox",
+  "knowledge_toolbox",
   "git_status",
   "git_diff",
   "get_workspace_status_summary",
@@ -94,6 +109,8 @@ const SAFE_FACADE_TOOLS = [
   "get_builder_report_summary"
 ] as const;
 
+const TOOLBOX_TOOLS = TOOLBOX_TOOL_NAMES;
+
 const DISALLOWED_SAFE_FACADE_FIELDS = new Set([
   "root",
   "absolutePath",
@@ -107,6 +124,26 @@ const DISALLOWED_SAFE_FACADE_FIELDS = new Set([
   "force",
   "delete",
   "clobber"
+]);
+
+const DISALLOWED_TOOLBOX_FIELDS = new Set([
+  "root",
+  "absolutePath",
+  "command",
+  "script",
+  "shell",
+  "args",
+  "argv",
+  "approvalToken",
+  "force",
+  "reset",
+  "merge",
+  "rebase",
+  "stash",
+  "delete",
+  "clobber",
+  "token",
+  "secret"
 ]);
 
 const RISKY_DESCRIPTION_PHRASES = [
@@ -408,6 +445,58 @@ export function evaluateSafeFacadeSchemasNarrow(toolDefinitions: readonly ToolDe
   });
 }
 
+export function evaluateToolboxToolsRegistered(
+  registeredToolNames: readonly string[],
+  readToolNames: readonly string[]
+): McpSelfTestCheck {
+  const registered = new Set(registeredToolNames);
+  const read = new Set(readToolNames);
+  const missingRegistered = TOOLBOX_TOOLS.filter((toolName) => !registered.has(toolName));
+  const missingReadClassified = TOOLBOX_TOOLS.filter((toolName) => !read.has(toolName));
+
+  if (missingRegistered.length > 0 || missingReadClassified.length > 0) {
+    return fail("TOOLBOX_TOOLS_REGISTERED", "One or more stable domain toolbox tools are missing or not read-visible.", {
+      missingRegistered,
+      missingReadClassified
+    });
+  }
+
+  return pass("TOOLBOX_TOOLS_REGISTERED", "Stable domain toolbox tools are registered and read-visible.", {
+    toolboxToolNames: [...TOOLBOX_TOOLS]
+  });
+}
+
+export function evaluateToolboxSchemasNarrow(toolDefinitions: readonly ToolDefinition[] = asToolDefinitions(tools)): McpSelfTestCheck {
+  const failures: Array<{ toolName: string; disallowedFields: string[] }> = [];
+  const missingTools: string[] = [];
+
+  for (const toolName of TOOLBOX_TOOLS) {
+    const tool = toolDefinitions.find((entry) => entry.name === toolName);
+    if (!tool) {
+      missingTools.push(toolName);
+      continue;
+    }
+
+    const propertyNames = new Set<string>();
+    collectSchemaPropertyNames(tool.inputSchema, propertyNames);
+    const disallowedFields = [...propertyNames].filter((fieldName) => DISALLOWED_TOOLBOX_FIELDS.has(fieldName)).sort();
+    if (disallowedFields.length > 0) {
+      failures.push({ toolName, disallowedFields });
+    }
+  }
+
+  if (missingTools.length > 0 || failures.length > 0) {
+    return fail("TOOLBOX_SCHEMAS_NARROW", "One or more toolbox schemas expose forbidden fields.", {
+      missingTools,
+      failures
+    });
+  }
+
+  return pass("TOOLBOX_SCHEMAS_NARROW", "Toolbox schemas expose only action, workspaceId, and params.", {
+    checkedTools: [...TOOLBOX_TOOLS]
+  });
+}
+
 export function evaluateToolDescriptionsSafetyCompatible(toolDefinitions: readonly ToolDefinition[] = asToolDefinitions(tools)): McpSelfTestCheck {
   const failures: Array<{ toolName: string; phrase: string }> = [];
 
@@ -689,6 +778,78 @@ export async function runElevatedScriptGatedCheck(): Promise<McpSelfTestCheck> {
   }
 }
 
+export async function runDiagnosticsToolboxRuntimeStatusWorksCheck(config: AppConfig): Promise<McpSelfTestCheck> {
+  const context = createToolboxRuntimeContext(config, { scope: "files.read" });
+  const result = await diagnosticsToolbox({ action: "runtime_status" }, config, context);
+  const runtime = result.result as { packageVersion?: unknown; commit?: unknown; branch?: unknown } | undefined;
+
+  if (!result.ok || typeof runtime?.packageVersion !== "string" || typeof runtime.commit !== "string" || typeof runtime.branch !== "string") {
+    return fail("DIAGNOSTICS_TOOLBOX_RUNTIME_STATUS_WORKS", "diagnostics_toolbox.runtime_status returned malformed output.", result);
+  }
+
+  return pass("DIAGNOSTICS_TOOLBOX_RUNTIME_STATUS_WORKS", "diagnostics_toolbox.runtime_status returned redacted runtime data.", {
+    packageVersion: runtime.packageVersion,
+    commit: runtime.commit,
+    branch: runtime.branch
+  });
+}
+
+export async function runToolboxReadOnlyCallerWorksCheck(config: AppConfig): Promise<McpSelfTestCheck> {
+  const context = createToolboxRuntimeContext(config, { scope: "files.read" });
+  const result = await diagnosticsToolbox({ action: "oauth_scope_status" }, config, context);
+  const status = result.result as { filesReadGranted?: unknown; filesWriteGranted?: unknown } | undefined;
+
+  if (!result.ok || status?.filesReadGranted !== true || status.filesWriteGranted !== false) {
+    return fail("TOOLBOX_READ_ONLY_CALLER_WORKS", "Read-only caller could not use diagnostics toolbox read-only actions.", result);
+  }
+
+  return pass("TOOLBOX_READ_ONLY_CALLER_WORKS", "Read-only caller can use diagnostics toolbox read-only actions.", status);
+}
+
+export async function runToolboxWriteDeniedWithoutFilesWriteCheck(config: AppConfig): Promise<McpSelfTestCheck> {
+  const context = createToolboxRuntimeContext(config, { scope: "files.read" });
+  const result = await gitToolbox({ action: "stage_paths", params: { paths: ["README.md"] } }, config, context);
+
+  if (result.ok || result.error?.code !== "APPROVAL_REQUIRED" || !/files\.write/u.test(result.error.message)) {
+    return fail("TOOLBOX_WRITE_DENIED_WITHOUT_FILES_WRITE", "Toolbox write action was not denied clearly without files.write.", result);
+  }
+
+  return pass("TOOLBOX_WRITE_DENIED_WITHOUT_FILES_WRITE", "Toolbox write action fails safely without files.write.", {
+    errorCode: result.error.code,
+    message: result.error.message
+  });
+}
+
+export async function runToolboxUnknownActionDeniedCheck(config: AppConfig): Promise<McpSelfTestCheck> {
+  const context = createToolboxRuntimeContext(config, { scope: "files.read" });
+  const result = await repoToolbox({ action: "not_supported" }, config, context);
+  const supportedActions = result.error?.details?.supportedActions;
+
+  if (result.ok || result.error?.code !== "INVALID_INPUT" || !Array.isArray(supportedActions)) {
+    return fail("TOOLBOX_UNKNOWN_ACTION_DENIED", "Toolbox unknown action was not rejected with supported actions.", result);
+  }
+
+  return pass("TOOLBOX_UNKNOWN_ACTION_DENIED", "Toolbox unknown action fails safely with supported actions.", {
+    errorCode: result.error.code,
+    supportedActionCount: supportedActions.length
+  });
+}
+
+export async function runIntegrationToolboxUnknownServiceDeniedCheck(config: AppConfig): Promise<McpSelfTestCheck> {
+  const context = createToolboxRuntimeContext(config, { scope: "files.read" });
+  const result = await integrationToolbox({ action: "get_service_status", params: { serviceId: "unknown_service" } }, config, context);
+  const supportedServices = result.error?.details?.supportedServices;
+
+  if (result.ok || result.error?.code !== "INVALID_INPUT" || !Array.isArray(supportedServices)) {
+    return fail("INTEGRATION_TOOLBOX_UNKNOWN_SERVICE_DENIED", "integration_toolbox unknown service was not rejected with supported services.", result);
+  }
+
+  return pass("INTEGRATION_TOOLBOX_UNKNOWN_SERVICE_DENIED", "integration_toolbox unknown service fails safely.", {
+    errorCode: result.error.code,
+    supportedServiceCount: supportedServices.length
+  });
+}
+
 function summarize(checks: McpSelfTestCheck[]): McpSelfTestReport["summary"] {
   return {
     passed: checks.filter((check) => check.status === "PASS").length,
@@ -717,12 +878,31 @@ export async function runMcpSelfTest(options: RunMcpSelfTestOptions = {}): Promi
       )
     );
     checks.push(
+      await runRequiredCheck("TOOLBOX_TOOLS_REGISTERED", () => evaluateToolboxToolsRegistered(diagnostics.internalToolNames, diagnostics.readToolNames))
+    );
+    checks.push(
       await runRequiredCheck("REQUIRED_GATED_TOOLS_PRESENT", () =>
         evaluateRequiredGatedToolsPresent(diagnostics.internalToolNames, diagnostics.writeToolNames)
       )
     );
     checks.push(await runRequiredCheck("SAFE_FACADE_SCHEMAS_NARROW", () => evaluateSafeFacadeSchemasNarrow()));
+    checks.push(await runRequiredCheck("TOOLBOX_SCHEMAS_NARROW", () => evaluateToolboxSchemasNarrow()));
     checks.push(await runRequiredCheck("TOOL_DESCRIPTIONS_SAFETY_COMPATIBLE", () => evaluateToolDescriptionsSafetyCompatible()));
+    checks.push(
+      await runRequiredCheck("DIAGNOSTICS_TOOLBOX_RUNTIME_STATUS_WORKS", () => runDiagnosticsToolboxRuntimeStatusWorksCheck(readConfig))
+    );
+    checks.push(await runRequiredCheck("TOOLBOX_READ_ONLY_CALLER_WORKS", () => runToolboxReadOnlyCallerWorksCheck(readConfig)));
+    checks.push(
+      await runRequiredCheck("TOOLBOX_WRITE_DENIED_WITHOUT_FILES_WRITE", () =>
+        runToolboxWriteDeniedWithoutFilesWriteCheck(elevatedRegistryConfig)
+      )
+    );
+    checks.push(await runRequiredCheck("TOOLBOX_UNKNOWN_ACTION_DENIED", () => runToolboxUnknownActionDeniedCheck(readConfig)));
+    checks.push(
+      await runRequiredCheck("INTEGRATION_TOOLBOX_UNKNOWN_SERVICE_DENIED", () =>
+        runIntegrationToolboxUnknownServiceDeniedCheck(readConfig)
+      )
+    );
     checks.push(await runRequiredCheck("WORKSPACE_STATUS_SUMMARY_WORKS", () => runWorkspaceStatusSummaryWorksCheck(readConfig)));
     checks.push(await runRequiredCheck("CHANGE_SET_READINESS_WORKS", () => runChangeSetReadinessWorksCheck(repoRoot, readConfig)));
     checks.push(

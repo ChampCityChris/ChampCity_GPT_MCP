@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { type AppConfig } from "../src/config.js";
 import { applyApprovedPatch } from "../src/tools/applyApprovedPatch.js";
 import { getWriteAccessStatus } from "../src/tools/getWriteAccessStatus.js";
+import { writeJsonArtifact } from "../src/tools/writeJsonArtifact.js";
 import { writeMarkdownArtifact } from "../src/tools/writeMarkdownArtifact.js";
 import { proposePatch } from "../src/tools/proposePatch.js";
 import { runAllowedScript } from "../src/tools/runAllowedScript.js";
@@ -104,6 +105,87 @@ describe("write approval token enforcement", () => {
         ),
       /Environment files are blocked/i
     );
+  });
+
+  it("write_json_artifact refuses when write mode is off", async () => {
+    await assert.rejects(
+      () =>
+        writeJsonArtifact(
+          {
+            root: tempRoot,
+            relativePath: "data/example.json",
+            content: "{}"
+          },
+          testConfig({ writeMode: "off", writeToolsEnabled: false, docsWritesAllowed: false })
+        ),
+      /write_json_artifact requires writeMode/i
+    );
+  });
+
+  it("write_json_artifact writes normalized JSON with metadata", async () => {
+    const result = await writeJsonArtifact(
+      {
+        root: tempRoot,
+        relativePath: "data/example.json",
+        content: "{\"z\":1,\"a\":[true,false]}"
+      },
+      testConfig({ writeApprovalToken: { source: "none" } })
+    );
+
+    assert.equal(result.relativePath, "data/example.json");
+    assert.equal(result.sizeBytes, Buffer.byteLength("{\n  \"z\": 1,\n  \"a\": [\n    true,\n    false\n  ]\n}\n", "utf8"));
+    assert.match(result.sha256, /^[a-f0-9]{64}$/u);
+    assert.doesNotThrow(() => new Date(result.modifiedTime).toISOString());
+    assert.equal(
+      fs.readFileSync(path.join(tempRoot, "data", "example.json"), "utf8"),
+      "{\n  \"z\": 1,\n  \"a\": [\n    true,\n    false\n  ]\n}\n"
+    );
+  });
+
+  it("write_json_artifact rejects invalid JSON and non-json paths", async () => {
+    await assert.rejects(
+      () =>
+        writeJsonArtifact(
+          {
+            root: tempRoot,
+            relativePath: "data/example.json",
+            content: "{broken"
+          },
+          testConfig()
+        ),
+      /must parse as valid JSON/i
+    );
+
+    await assert.rejects(
+      () =>
+        writeJsonArtifact(
+          {
+            root: tempRoot,
+            relativePath: "data/example.txt",
+            content: "{}"
+          },
+          testConfig()
+        ),
+      /only allow \.json files/i
+    );
+  });
+
+  it("write_json_artifact rejects blocked and generated-risk paths", async () => {
+    for (const relativePath of [".env.secret.json", "config/figma.local.json", "logs/status.json", "release/app.json", "dist/app.json"]) {
+      await assert.rejects(
+        () =>
+          writeJsonArtifact(
+            {
+              root: tempRoot,
+              relativePath,
+              content: "{}"
+            },
+            testConfig()
+          ),
+        /blocked|must not be|Environment files|Log directories|Release artifacts|Build output|Local config/i,
+        relativePath
+      );
+    }
   });
 
   it("apply_approved_patch refuses in docs mode", async () => {

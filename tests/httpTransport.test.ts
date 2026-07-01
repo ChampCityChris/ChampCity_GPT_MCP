@@ -25,6 +25,15 @@ import { runHttpTransport, validateHttpBinding } from "../src/transports/httpTra
 
 let tempRoot: string;
 const originalPublicBaseUrl = process.env.CHAMPCITY_GPT_PUBLIC_BASE_URL;
+const toolboxToolNames = [
+  "repo_toolbox",
+  "git_toolbox",
+  "artifact_toolbox",
+  "diagnostics_toolbox",
+  "integration_toolbox",
+  "browser_toolbox",
+  "knowledge_toolbox"
+] as const;
 
 beforeEach(() => {
   tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "champcity-http-"));
@@ -289,9 +298,7 @@ describe("HTTP MCP transport safety", () => {
   it("refuses guarded write tools when write mode is insufficient", () => {
     assert.throws(() => assertWriteToolEnabled("apply_approved_patch", testConfig()), /writeMode patch or elevated/i);
     assert.throws(() => assertWriteToolEnabled("write_markdown_artifact", testConfig()), /writeMode docs, patch, or elevated/i);
-    assert.throws(() => assertWriteToolEnabled("create_figma_handoff_package", testConfig()), /writeMode docs, patch, or elevated/i);
-    assert.throws(() => assertWriteToolEnabled("run_figma_make_handoff", testConfig()), /writeMode docs, patch, or elevated/i);
-    assert.throws(() => assertWriteToolEnabled("run_figma_make_file_handoff", testConfig()), /writeMode docs, patch, or elevated/i);
+    assert.throws(() => assertWriteToolEnabled("write_json_artifact", testConfig()), /writeMode docs, patch, or elevated/i);
     assert.throws(() => assertWriteToolEnabled("run_allowed_script", testConfig()), /writeMode elevated/i);
     assert.throws(() => assertWriteToolEnabled("safe_stage_changes", testConfig()), /writeMode elevated/i);
     assert.throws(() => assertWriteToolEnabled("commit_validated_changes", testConfig()), /writeMode elevated/i);
@@ -1073,10 +1080,8 @@ describe("HTTP MCP transport safety", () => {
       const toolsResult = firstResult(toolsList.messages, 2);
       assert.doesNotThrow(() => ListToolsResultSchema.parse(toolsResult));
       const toolNames = (toolsResult.tools as Array<{ name: string }>).map((entry) => entry.name);
-      assert.ok(toolNames.includes("list_project_files"));
-      assert.ok(toolNames.includes("read_project_file"));
-      assert.ok(toolNames.includes("search_project_files"));
-      assert.equal(toolNames.includes("write_markdown_artifact"), false);
+      assert.deepEqual(toolNames, [...toolboxToolNames]);
+      assert.equal((toolNames as string[]).includes("write_markdown_artifact"), false);
 
       const read = await postMcp(
         handle.url,
@@ -1085,11 +1090,13 @@ describe("HTTP MCP transport safety", () => {
           id: 3,
           method: "tools/call",
           params: {
-            name: "read_project_file",
+            name: "repo_toolbox",
             arguments: {
-              root: tempRoot,
-              relativePath: "alpha.md",
-              maxBytes: 1000
+              action: "read_file",
+              params: {
+                relativePath: "alpha.md",
+                maxBytes: 1000
+              }
             }
           }
         },
@@ -1128,12 +1135,65 @@ describe("HTTP MCP transport safety", () => {
       assert.doesNotThrow(() => ListToolsResultSchema.parse(toolsResult));
       const toolNames = (toolsResult.tools as Array<{ name: string }>).map((entry) => entry.name);
 
-      assert.ok(toolNames.includes("list_project_files"));
-      assert.ok(toolNames.includes("read_project_file"));
-      assert.ok(toolNames.includes("search_project_files"));
-      assert.ok(toolNames.includes("get_figma_status"));
-      assert.equal(toolNames.includes("write_markdown_artifact"), false);
-      assert.equal(toolNames.includes("run_figma_make_file_handoff"), false);
+      assert.deepEqual(toolNames, [...toolboxToolNames]);
+      assert.equal((toolNames as string[]).includes("write_markdown_artifact"), false);
+      assert.equal((toolNames as string[]).includes("run_figma_make_file_handoff"), false);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("rejects direct legacy public tool calls after toolbox consolidation", async () => {
+    fs.writeFileSync(path.join(tempRoot, "alpha.md"), "# Alpha\n", "utf8");
+    const config = testConfig({ writeMode: "docs" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read files.write");
+      const legacyRead = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "read_project_file",
+            arguments: {
+              root: tempRoot,
+              relativePath: "alpha.md"
+            }
+          }
+        },
+        sessionHeaders
+      );
+      const legacyScript = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: {
+            name: "run_allowed_script",
+            arguments: {
+              root: tempRoot,
+              command: "npm test",
+              approvalToken: "test-write-token"
+            }
+          }
+        },
+        sessionHeaders
+      );
+
+      assert.equal(legacyRead.response.status, 200);
+      assert.match(JSON.stringify(legacyRead.messages), /not exposed on the public toolbox surface/u);
+      assert.equal(legacyScript.response.status, 200);
+      assert.match(JSON.stringify(legacyScript.messages), /not exposed on the public toolbox surface|writeMode elevated/u);
     } finally {
       await handle.close();
     }
@@ -1167,12 +1227,9 @@ describe("HTTP MCP transport safety", () => {
       const diagnostics = getToolExposureDiagnostics(config, { scope: "files.read files.write" });
 
       assert.deepEqual(toolNames, diagnostics.exposedToolNames);
-      assert.ok(toolNames.includes("list_project_files"));
-      assert.ok(toolNames.includes("read_project_file"));
-      assert.ok(toolNames.includes("search_project_files"));
-      assert.ok(toolNames.includes("get_figma_status"));
-      assert.ok(toolNames.includes("run_figma_make_file_handoff"));
-      assert.equal(toolNames.includes("safe_stage_changes"), false);
+      assert.deepEqual(toolNames, [...toolboxToolNames]);
+      assert.equal((toolNames as string[]).includes("run_figma_make_file_handoff"), false);
+      assert.equal((toolNames as string[]).includes("safe_stage_changes"), false);
     } finally {
       await handle.close();
     }
@@ -1207,12 +1264,7 @@ describe("HTTP MCP transport safety", () => {
       const toolsResult = firstResult(toolsList.messages, 22);
       assert.doesNotThrow(() => ListToolsResultSchema.parse(toolsResult));
       const toolNames = (toolsResult.tools as Array<{ name: string }>).map((entry) => entry.name);
-      assert.ok(toolNames.includes("list_project_files"));
-      assert.ok(toolNames.includes("read_project_file"));
-      assert.ok(toolNames.includes("search_project_files"));
-      assert.ok(toolNames.includes("get_write_access_status"));
-      assert.ok(toolNames.includes("get_figma_status"));
-      assert.ok(toolNames.includes("run_figma_make_file_handoff"));
+      assert.deepEqual(toolNames, [...toolboxToolNames]);
 
       const trace = readLastMcpDiscoveryTrace(config);
       assert.ok(trace);
@@ -1321,9 +1373,9 @@ describe("HTTP MCP transport safety", () => {
         "prompts/list",
         "tools/list"
       ]);
-      assert.equal(trace.tools.finalToolNamesReturned.includes("list_project_files"), true);
-      assert.equal(trace.tools.finalToolNamesReturned.includes("write_markdown_artifact"), false);
-      assert.ok(trace.tools.scopeFilteredTools.some((entry) => entry.name === "write_markdown_artifact" && /files\.write/u.test(entry.reason)));
+      assert.deepEqual(trace.tools.finalToolNamesReturned, [...toolboxToolNames]);
+      assert.equal((trace.tools.finalToolNamesReturned as string[]).includes("write_markdown_artifact"), false);
+      assert.deepEqual(trace.tools.scopeFilteredTools, []);
     } finally {
       await handle.close();
     }
@@ -1331,7 +1383,7 @@ describe("HTTP MCP transport safety", () => {
 
   it("refuses write tool calls without files.write scope", async () => {
     const config = testConfig({ writeToolsEnabled: true });
-    const handle = await runHttpTransport(() => createMcpServer(config, "0.1.0-test"), config, {
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
       host: "127.0.0.1",
       port: 0,
       version: "0.1.0-test",
@@ -1366,12 +1418,13 @@ describe("HTTP MCP transport safety", () => {
           id: 2,
           method: "tools/call",
           params: {
-            name: "write_markdown_artifact",
+            name: "repo_toolbox",
             arguments: {
-              root: tempRoot,
-              relativePath: "new.md",
-              content: "# New\n",
-              approvalToken: "test-write-token"
+              action: "write_markdown_artifact",
+              params: {
+                relativePath: "new.md",
+                content: "# New\n"
+              }
             }
           }
         },
@@ -1380,7 +1433,7 @@ describe("HTTP MCP transport safety", () => {
           "mcp-session-id": sessionId
         }
       );
-      assert.equal(write.response.status, 403);
+      assert.equal(write.response.status, 200);
       assert.match(JSON.stringify(write.messages), /files\.write/u);
     } finally {
       await handle.close();
@@ -1424,12 +1477,13 @@ describe("HTTP MCP transport safety", () => {
           id: 2,
           method: "tools/call",
           params: {
-            name: "write_markdown_artifact",
+            name: "repo_toolbox",
             arguments: {
-              root: tempRoot,
-              relativePath: "new.md",
-              content: "# New\n",
-              approvalToken: "test-write-token"
+              action: "write_markdown_artifact",
+              params: {
+                relativePath: "new.md",
+                content: "# New\n"
+              }
             }
           }
         },
@@ -1482,12 +1536,13 @@ describe("HTTP MCP transport safety", () => {
           id: 2,
           method: "tools/call",
           params: {
-            name: "write_markdown_artifact",
+            name: "repo_toolbox",
             arguments: {
-              root: tempRoot,
-              relativePath: "new.md",
-              content: "# New\n",
-              approvalToken: "wrong-write-token"
+              action: "write_markdown_artifact",
+              params: {
+                relativePath: "new.md",
+                content: "# New\n"
+              }
             }
           }
         },
@@ -1541,11 +1596,13 @@ describe("HTTP MCP transport safety", () => {
           id: 2,
           method: "tools/call",
           params: {
-            name: "write_markdown_artifact",
+            name: "repo_toolbox",
             arguments: {
-              root: tempRoot,
-              relativePath: "new.md",
-              content: "# New\n"
+              action: "write_markdown_artifact",
+              params: {
+                relativePath: "new.md",
+                content: "# New\n"
+              }
             }
           }
         },
@@ -1654,8 +1711,7 @@ describe("HTTP MCP transport safety", () => {
       const toolsResult = firstResult(toolsList.messages, 2);
       assert.ok(Array.isArray(toolsResult.tools));
       const toolNames = toolsResult.tools.map((tool) => (tool as { name: string }).name);
-      assert.ok(toolNames.includes("read_project_file"));
-      assert.ok(toolNames.includes("list_project_files"));
+      assert.deepEqual(toolNames, [...toolboxToolNames]);
 
       const callResult = await postMcp(
         handle.url,
@@ -1664,12 +1720,14 @@ describe("HTTP MCP transport safety", () => {
           id: 3,
           method: "tools/call",
           params: {
-            name: "list_project_files",
+            name: "repo_toolbox",
             arguments: {
-              root: tempRoot,
-              relativePath: ".",
-              glob: "**/*",
-              maxResults: 10
+              action: "list_files",
+              params: {
+                relativePath: ".",
+                glob: "**/*",
+                maxResults: 10
+              }
             }
           }
         },
@@ -1680,9 +1738,10 @@ describe("HTTP MCP transport safety", () => {
       const toolResult = firstResult(callResult.messages, 3);
       assert.ok(Array.isArray(toolResult.content));
       const text = (toolResult.content[0] as { text: string }).text;
-      const parsedToolText = JSON.parse(text) as { files: string[]; truncated: boolean };
-      assert.deepEqual(parsedToolText.files, ["alpha.md"]);
-      assert.equal(parsedToolText.truncated, false);
+      const parsedToolText = JSON.parse(text) as { ok: boolean; result: { files: string[]; truncated: boolean } };
+      assert.equal(parsedToolText.ok, true);
+      assert.deepEqual(parsedToolText.result.files, ["alpha.md"]);
+      assert.equal(parsedToolText.result.truncated, false);
     } finally {
       await handle.close();
     }

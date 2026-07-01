@@ -11,12 +11,9 @@ import {
 
 import { type AppConfig } from "../config.js";
 import { scopeIncludes } from "../oauth.js";
-import { applyApprovedPatch } from "../tools/applyApprovedPatch.js";
-import { getBuilderReportIndex, getBuilderReportSummary } from "../tools/builderReportFacade.js";
 import {
   artifactToolbox,
   browserToolbox,
-  buildRuntimeScopeToolDiagnostics,
   diagnosticsToolbox,
   gitToolbox,
   integrationToolbox,
@@ -26,29 +23,10 @@ import {
   type ToolboxRuntimeContext
 } from "../tools/domainToolboxes.js";
 import {
-  createCodexUiHandoffPromptTool,
-  createFigmaHandoffPackageTool,
-  fetchFigmaFileSummary,
-  fetchFigmaFrameImage,
-  getFigmaStatusTool,
-  parseFigmaUrlTool,
-  runFigmaMakeFileHandoffTool,
-  runFigmaMakeHandoffTool,
-  testFigmaMcpConnectionTool
-} from "../tools/figma/index.js";
-import { commitValidatedChanges } from "../tools/gitWorkflow/commitValidatedChanges.js";
-import { getCommitReadiness } from "../tools/gitWorkflow/getCommitReadiness.js";
-import { preCommitSafetyScan } from "../tools/gitWorkflow/preCommitSafetyScan.js";
-import { prepareGitWorkBranch } from "../tools/gitWorkflow/prepareGitWorkBranch.js";
-import { pushCurrentBranch } from "../tools/gitWorkflow/pushCurrentBranch.js";
-import { safeStageChanges } from "../tools/gitWorkflow/safeStageChanges.js";
-import { getWriteAccessStatus } from "../tools/getWriteAccessStatus.js";
-import { gitDiff } from "../tools/gitDiff.js";
-import { gitStatus } from "../tools/gitStatus.js";
-import {
   MAX_APPROVAL_TOKEN_LENGTH,
   MAX_COMMAND_LENGTH,
   MAX_GLOB_LENGTH,
+  MAX_JSON_ARTIFACT_CONTENT_LENGTH,
   MAX_MARKDOWN_ARTIFACT_CONTENT_LENGTH,
   MAX_PATCH_LENGTH,
   MAX_PROPOSE_PATCH_TEXT_LENGTH,
@@ -56,27 +34,12 @@ import {
   MAX_RELATIVE_PATH_LENGTH,
   MAX_ROOT_LENGTH
 } from "../tools/inputLimits.js";
-import { listProjectFiles } from "../tools/listProjectFiles.js";
-import { proposePatch } from "../tools/proposePatch.js";
-import {
-  getChangeSetReadinessSummary,
-  getReleaseArtifactSummary,
-  getReleasePublicationSummary,
-  getWorkspaceStatusSummary
-} from "../tools/publicSafeFacade.js";
-import { readProjectFile } from "../tools/readProjectFile.js";
-import { runAllowedScript } from "../tools/runAllowedScript.js";
-import { searchProjectFiles } from "../tools/searchProjectFiles.js";
-import { writeMarkdownArtifact } from "../tools/writeMarkdownArtifact.js";
 import { serializeError, AppError } from "../utils/errors.js";
 
 const textSchema = { type: "string" };
 const rootSchema = { type: "string", maxLength: MAX_ROOT_LENGTH, description: "Absolute configured allowed root." };
 const relativePathSchema = { ...textSchema, maxLength: MAX_RELATIVE_PATH_LENGTH };
 const approvalTokenSchema = { ...textSchema, maxLength: MAX_APPROVAL_TOKEN_LENGTH };
-const figmaUrlSchema = { ...textSchema, maxLength: 4096 };
-const figmaFileKeySchema = { ...textSchema, maxLength: 256 };
-const figmaNodeIdSchema = { ...textSchema, maxLength: 256 };
 const workspaceIdSchema = { ...textSchema, maxLength: 64, default: "default" };
 const phaseFolderSchema = { ...textSchema, maxLength: 128 };
 const workCardIdSchema = { ...textSchema, maxLength: 128 };
@@ -199,143 +162,26 @@ export const tools = [
     }
   },
   {
+    name: "write_json_artifact",
+    description:
+      "Internal gated implementation for repo_toolbox.write_json_artifact. Requires OAuth files.write through the toolbox action and local write mode docs, patch, or elevated. Enforces allowed roots, .json-only writes, blocked-file policy, JSON parsing/normalization, overwrite rules, atomic write, and audit logging.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        root: rootSchema,
+        relativePath: relativePathSchema,
+        content: { ...textSchema, maxLength: MAX_JSON_ARTIFACT_CONTENT_LENGTH },
+        overwrite: { type: "boolean", default: false }
+      },
+      required: ["root", "relativePath", "content"]
+    }
+  },
+  {
     name: "get_write_access_status",
     description: "Return the server-side write-mode status without exposing secrets.",
     inputSchema: {
       type: "object",
       properties: {},
-      required: []
-    }
-  },
-  {
-    name: "get_figma_status",
-    description: "Return whether a local Figma token is configured and its source without exposing the token value.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  },
-  {
-    name: "parse_figma_url",
-    description: "Parse a Figma design/file/proto URL into fileKey, normalized nodeId, and urlType without calling Figma.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        url: figmaUrlSchema
-      },
-      required: ["url"]
-    }
-  },
-  {
-    name: "fetch_figma_file_summary",
-    description:
-      "Fetch a Figma file with the locally configured Figma token and return only a compact metadata summary. Requires OAuth files.read for HTTP callers.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        fileKey: figmaFileKeySchema,
-        maxFrames: { type: "integer", default: 100, minimum: 1, maximum: 500 }
-      },
-      required: ["fileKey"]
-    }
-  },
-  {
-    name: "fetch_figma_frame_image",
-    description:
-      "Export one Figma frame image to an allowed root. Requires a local Figma token, OAuth files.write for HTTP callers, and local writeMode docs, patch, or elevated. Writes the requested png/svg file and returns path, size, and sha256.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        root: rootSchema,
-        fileKey: figmaFileKeySchema,
-        nodeId: figmaNodeIdSchema,
-        format: { type: "string", enum: ["png", "svg"] },
-        scale: { type: "integer", enum: [1, 2], default: 2 },
-        relativeOutputPath: relativePathSchema,
-        overwrite: { type: "boolean", default: false }
-      },
-      required: ["root", "fileKey", "nodeId", "format", "scale", "relativeOutputPath"]
-    }
-  },
-  {
-    name: "create_figma_handoff_package",
-    description:
-      "Create a structured Figma design handoff package under an allowed root. Requires a local Figma token, OAuth files.write for HTTP callers, and local writeMode docs, patch, or elevated. Writes Markdown specs, design tokens, screenshots when selected nodeIds export, and never includes the Figma token.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        root: rootSchema,
-        figmaUrl: figmaUrlSchema,
-        targetArea: { ...textSchema, maxLength: 500 },
-        frameNames: { type: "array", maxItems: 100, items: { ...textSchema, maxLength: 300 } },
-        nodeIds: { type: "array", maxItems: 100, items: figmaNodeIdSchema },
-        relativeOutputDir: relativePathSchema,
-        overwrite: { type: "boolean", default: false }
-      },
-      required: ["root", "figmaUrl", "targetArea"]
-    }
-  },
-  {
-    name: "create_codex_ui_handoff_prompt",
-    description:
-      "Create a Codex-ready UI implementation prompt that references an existing Figma handoff package. Requires OAuth files.write for HTTP callers and local writeMode docs, patch, or elevated. Writes a Markdown prompt and returns path, size, and sha256.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        root: rootSchema,
-        handoffPath: relativePathSchema,
-        targetFile: { ...relativePathSchema, default: "docs/handoffs/CODEX_UI_REDESIGN_HANDOFF.md" },
-        targetArea: { ...textSchema, maxLength: 500 },
-        overwrite: { type: "boolean", default: false }
-      },
-      required: ["root", "handoffPath", "targetFile"]
-    }
-  },
-  {
-    name: "run_figma_make_handoff",
-    description:
-      "One-shot Figma Make handoff orchestration for ChatGPT. Connects to the configured upstream official Figma MCP server, retrieves Make resources/files, writes a handoff package and Codex prompt, and never exposes tokens or session credentials.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        makeUrl: figmaUrlSchema,
-        targetUiArea: { ...textSchema, maxLength: 500, default: "ChampCity GPT UI" },
-        implementationScope: { ...textSchema, maxLength: 2000 },
-        outputDirectory: { ...relativePathSchema, default: "design/figma-handoff/make" },
-        codexPromptFile: { ...relativePathSchema, default: "docs/handoffs/CODEX_FIGMA_MAKE_UI_HANDOFF.md" },
-        notes: { ...textSchema, maxLength: 5000 }
-      },
-      required: ["makeUrl"]
-    }
-  },
-  {
-    name: "run_figma_make_file_handoff",
-    description:
-      "One-shot local Figma Make .make export handoff for ChatGPT. Reads a safe local .make package from allowed roots, parses package metadata/assets/chat history, reconstructs source where possible, writes a handoff package and Codex prompt, and never uses screenshots or browser scraping.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        makeFilePath: { ...textSchema, maxLength: MAX_ROOT_LENGTH },
-        targetUiArea: { ...textSchema, maxLength: 500, default: "ChampCity GPT UI" },
-        implementationScope: { ...textSchema, maxLength: 2000 },
-        outputDirectory: { ...relativePathSchema, default: "design/figma-handoff/make-file" },
-        codexPromptFile: { ...relativePathSchema, default: "docs/handoffs/CODEX_FIGMA_MAKE_FILE_HANDOFF.md" },
-        notes: { ...textSchema, maxLength: 5000 }
-      },
-      required: ["makeFilePath"]
-    }
-  },
-  {
-    name: "test_figma_mcp_connection",
-    description:
-      "Test the configured upstream Figma MCP server connection, list available MCP resources/templates/tools/prompts when reachable, and report whether Make resource retrieval appears available.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        endpoint: { ...figmaUrlSchema, description: "Optional override for the upstream Figma MCP endpoint." },
-        mode: { type: "string", enum: ["desktop", "remote"], description: "Optional override for upstream Figma MCP mode." }
-      },
       required: []
     }
   },
@@ -604,23 +450,15 @@ export const READ_TOOL_NAMES = [
   "get_builder_report_summary",
   ...TOOLBOX_TOOL_NAMES,
   "get_write_access_status",
-  "get_figma_status",
-  "parse_figma_url",
-  "fetch_figma_file_summary",
   "pre_commit_safety_scan",
-  "get_commit_readiness",
-  "test_figma_mcp_connection"
+  "get_commit_readiness"
 ] as const satisfies readonly RegisteredToolName[];
 
 export const WRITE_TOOL_NAMES = [
   "propose_patch",
   "apply_approved_patch",
   "write_markdown_artifact",
-  "fetch_figma_frame_image",
-  "create_figma_handoff_package",
-  "create_codex_ui_handoff_prompt",
-  "run_figma_make_handoff",
-  "run_figma_make_file_handoff",
+  "write_json_artifact",
   "run_allowed_script",
   "prepare_git_work_branch",
   "safe_stage_changes",
@@ -630,6 +468,7 @@ export const WRITE_TOOL_NAMES = [
 
 const READ_TOOL_NAME_SET = new Set<string>(READ_TOOL_NAMES);
 const WRITE_TOOL_NAME_SET = new Set<string>(WRITE_TOOL_NAMES);
+const PUBLIC_TOOL_NAME_SET = new Set<string>(TOOLBOX_TOOL_NAMES);
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 const SUPPORTED_JSON_SCHEMA_KEYS = new Set([
   "type",
@@ -951,7 +790,8 @@ export function getToolExposureDiagnostics(config: AppConfig, options: ToolExpos
       reason: record.errors.join(" ")
     }));
   const validTools = validationRecords.filter((record) => record.errors.length === 0).map((record) => record.tool);
-  const sanitizedRecords = validTools.map(sanitizeToolForChatGpt);
+  const publicTools = validTools.filter((tool) => PUBLIC_TOOL_NAME_SET.has(tool.name));
+  const sanitizedRecords = publicTools.map(sanitizeToolForChatGpt);
   const invalidChatGptToolSchemas = sanitizedRecords
     .filter((record) => record.errors.length > 0)
     .map((record) => ({
@@ -1051,23 +891,16 @@ export function assertWriteToolEnabled(toolName: string, config: AppConfig): voi
     throw new AppError("APPROVAL_REQUIRED", "write_markdown_artifact requires writeMode docs, patch, or elevated.");
   }
 
+  if (toolName === "write_json_artifact" && !config.docsWritesAllowed) {
+    throw new AppError("APPROVAL_REQUIRED", "write_json_artifact requires writeMode docs, patch, or elevated.");
+  }
+
   if (toolName === "apply_approved_patch" && !config.patchWritesAllowed) {
     throw new AppError("APPROVAL_REQUIRED", "apply_approved_patch requires writeMode patch or elevated.");
   }
 
   if (toolName === "run_allowed_script" && !config.elevatedOperationsAllowed) {
     throw new AppError("APPROVAL_REQUIRED", "run_allowed_script requires writeMode elevated.");
-  }
-
-  if (
-    (toolName === "fetch_figma_frame_image" ||
-      toolName === "create_figma_handoff_package" ||
-      toolName === "create_codex_ui_handoff_prompt" ||
-      toolName === "run_figma_make_handoff" ||
-      toolName === "run_figma_make_file_handoff") &&
-    !config.docsWritesAllowed
-  ) {
-    throw new AppError("APPROVAL_REQUIRED", `${toolName} requires writeMode docs, patch, or elevated.`);
   }
 
   if (
@@ -1122,48 +955,16 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
     const args = request.params.arguments ?? {};
 
     try {
+      if (!PUBLIC_TOOL_NAME_SET.has(request.params.name)) {
+        throw new AppError("INVALID_INPUT", "Tool is not exposed on the public toolbox surface.", {
+          publicTools: [...TOOLBOX_TOOL_NAMES]
+        });
+      }
+
       assertWriteToolEnabled(request.params.name, config);
       const toolboxContext = () => createToolboxRuntimeContext(config, exposureOptions);
 
       switch (request.params.name) {
-        case "list_project_files":
-          return toolResponse(await listProjectFiles(args, config));
-        case "read_project_file":
-          return toolResponse(await readProjectFile(args, config));
-        case "search_project_files":
-          return toolResponse(await searchProjectFiles(args, config));
-        case "get_write_access_status":
-          return toolResponse(await getWriteAccessStatus(args, config, await buildRuntimeScopeToolDiagnostics(config, toolboxContext())));
-        case "get_figma_status":
-          return toolResponse(await getFigmaStatusTool(args, config));
-        case "parse_figma_url":
-          return toolResponse(await parseFigmaUrlTool(args));
-        case "fetch_figma_file_summary":
-          return toolResponse(await fetchFigmaFileSummary(args, config));
-        case "fetch_figma_frame_image":
-          return toolResponse(await fetchFigmaFrameImage(args, config));
-        case "create_figma_handoff_package":
-          return toolResponse(await createFigmaHandoffPackageTool(args, config));
-        case "create_codex_ui_handoff_prompt":
-          return toolResponse(await createCodexUiHandoffPromptTool(args, config));
-        case "run_figma_make_handoff":
-          return toolResponse(await runFigmaMakeHandoffTool(args, config));
-        case "run_figma_make_file_handoff":
-          return toolResponse(await runFigmaMakeFileHandoffTool(args, config));
-        case "test_figma_mcp_connection":
-          return toolResponse(await testFigmaMcpConnectionTool(args, config));
-        case "get_workspace_status_summary":
-          return toolResponse(await getWorkspaceStatusSummary(args, config));
-        case "get_change_set_readiness_summary":
-          return toolResponse(await getChangeSetReadinessSummary(args, config));
-        case "get_release_artifact_summary":
-          return toolResponse(await getReleaseArtifactSummary(args, config));
-        case "get_release_publication_summary":
-          return toolResponse(await getReleasePublicationSummary(args, config));
-        case "get_builder_report_index":
-          return toolResponse(await getBuilderReportIndex(args, config));
-        case "get_builder_report_summary":
-          return toolResponse(await getBuilderReportSummary(args, config));
         case "repo_toolbox":
           return toolResponse(await repoToolbox(args, config, toolboxContext()));
         case "git_toolbox":
@@ -1178,30 +979,6 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
           return toolResponse(await browserToolbox(args, config));
         case "knowledge_toolbox":
           return toolResponse(await knowledgeToolbox(args, config));
-        case "propose_patch":
-          return toolResponse(await proposePatch(args, config));
-        case "apply_approved_patch":
-          return toolResponse(await applyApprovedPatch(args, config));
-        case "write_markdown_artifact":
-          return toolResponse(await writeMarkdownArtifact(args, config));
-        case "git_status":
-          return toolResponse(await gitStatus(args, config));
-        case "git_diff":
-          return toolResponse(await gitDiff(args, config));
-        case "pre_commit_safety_scan":
-          return toolResponse(await preCommitSafetyScan(args, config));
-        case "get_commit_readiness":
-          return toolResponse(await getCommitReadiness(args, config));
-        case "prepare_git_work_branch":
-          return toolResponse(await prepareGitWorkBranch(args, config));
-        case "safe_stage_changes":
-          return toolResponse(await safeStageChanges(args, config));
-        case "commit_validated_changes":
-          return toolResponse(await commitValidatedChanges(args, config));
-        case "push_current_branch":
-          return toolResponse(await pushCurrentBranch(args, config));
-        case "run_allowed_script":
-          return toolResponse(await runAllowedScript(args, config));
         default:
           return toolErrorResponse(new Error(`Unknown tool: ${request.params.name}`));
       }

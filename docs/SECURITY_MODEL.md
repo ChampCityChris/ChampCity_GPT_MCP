@@ -40,13 +40,13 @@ If ChatGPT reports `PKCE S256 code_challenge is required`, inspect the launcher 
 
 Scope mapping:
 
-- `files.read`: `tools/list`, `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, `knowledge_toolbox`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `test_figma_mcp_connection`, `pre_commit_safety_scan`, and `get_commit_readiness`.
-- `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `prepare_git_work_branch`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
+- `files.read`: `tools/list` and the seven public toolbox tools: `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox`.
+- `files.write`: required inside write-capable toolbox actions, including `repo_toolbox.write_markdown_artifact`, `repo_toolbox.write_json_artifact`, `repo_toolbox.propose_patch`, `repo_toolbox.apply_approved_patch`, `integration_toolbox.prepare_external_handoff`, and mutating actions under `git_toolbox`.
 
 Write access uses local write modes instead of a per-write token for every write. OAuth `files.write` is still required, but it is not enough by itself. The local write mode must also permit the operation:
 
 - `off`: no write tools are allowed.
-- `docs`: Markdown artifact writes are allowed without `approvalToken`.
+- `docs`: Markdown and JSON artifact writes are allowed without `approvalToken`.
 - `patch`: docs mode plus controlled application of patches that match a stored `propose_patch` proposal hash.
 - `elevated`: reserved for scripts, legacy approval-gated fallback operations, and safe git branch/stage/commit/push tools.
 
@@ -58,7 +58,7 @@ Static HTTP bearer tokens can remain for legacy/manual testing. Loading order is
 
 ## ChatGPT-Safe Read-Only Facade Tools
 
-WC-V1-0102 adds four purpose-built read-only facade tools for normal ChatGPT-facing status and release diagnostics:
+WC-V1-0102 added read-only facade implementations now routed through public toolbox actions for normal ChatGPT-facing status and release diagnostics:
 
 - `get_workspace_status_summary`
 - `get_change_set_readiness_summary`
@@ -69,15 +69,15 @@ WC-V1-0102 adds four purpose-built read-only facade tools for normal ChatGPT-fac
 
 These tools do not require absolute local Windows paths, do not accept command strings, do not accept executable file globs, and return bounded structured summaries with repository-relative paths where possible. They are the preferred ChatGPT-facing path for workspace status, change set readiness, release artifact inspection, and GitHub Release publication inspection.
 
-Legacy `git_status`, `get_commit_readiness`, `list_project_files`, and `run_allowed_script` remain available where their existing gates allow them, but `run_allowed_script` is not the normal v1.0 ChatGPT-facing status or release workflow. No write-scope, allowed-root, blocked-file, git safety, OAuth, or local write-mode checks are weakened by the facade tools.
+Legacy `git_status`, `get_commit_readiness`, `list_project_files`, and `run_allowed_script` are not top-level public ChatGPT tools after WC-V1-FIX05. Internal implementations remain where toolbox routers need them. No write-scope, allowed-root, blocked-file, git safety, OAuth, or local write-mode checks are weakened by the facade tools.
 
-The Builder Report facade tools are limited to `planning/phases/<phaseFolder>/Builder_Reports/BUILDER_REPORT*.md`. `get_builder_report_index` returns repository-relative metadata only; `get_builder_report_summary` returns one bounded preview by safe report lookup and redacts private local path-like and token-like content. They do not accept arbitrary roots, arbitrary globs, command strings, shell arguments, write controls, or mutation inputs. Normal ChatGPT workflows should avoid broad `list_project_files` calls that combine `planning/phases`, `**/BUILDER_REPORT*.md`, high `maxResults`, and absolute local roots.
+The Builder Report facade implementations are limited to `planning/phases/<phaseFolder>/Builder_Reports/BUILDER_REPORT*.md` and are public through `artifact_toolbox` actions. `builder_report_index` returns repository-relative metadata only; `builder_report_summary` returns one bounded preview by safe report lookup and redacts private local path-like and token-like content. They do not accept arbitrary roots, arbitrary globs, command strings, shell arguments, write controls, or mutation inputs. Normal ChatGPT workflows should avoid broad file-listing calls that combine `planning/phases`, `**/BUILDER_REPORT*.md`, high `maxResults`, and absolute local roots.
 
 These tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, `CAV-030`, and `CAV-033`. Local tests can verify registration and schema safety, but live ChatGPT validation is still required before claiming full platform safety-layer remediation.
 
 ## Stable Domain Toolbox Security Model
 
-WC-V1-FIX02 adds seven stable read-visible domain toolbox tools:
+WC-V1-FIX05 leaves exactly seven stable read-visible public domain toolbox tools:
 
 - `repo_toolbox`
 - `git_toolbox`
@@ -87,7 +87,7 @@ WC-V1-FIX02 adds seven stable read-visible domain toolbox tools:
 - `browser_toolbox`
 - `knowledge_toolbox`
 
-These tools reduce future top-level MCP schema churn. ChatGPT may bind tool schemas for a connector or chat lifecycle, so future expansion should prefer new internal allowlisted toolbox actions over new top-level MCP tools when possible. Existing narrow tools remain registered for backward compatibility.
+These tools reduce top-level MCP schema churn. ChatGPT may bind tool schemas for a connector or chat lifecycle, so future expansion should prefer new internal allowlisted toolbox actions over new top-level MCP tools when possible. Root-explicit legacy tools are hidden from public `tools/list` and direct public calls.
 
 The toolbox input shape is stable: `action`, optional `workspaceId`, and optional `params`. The schema is not a security boundary. Each action has strict server-side validation and rejects unknown actions, unknown services, unsafe params, and missing required params with structured errors.
 
@@ -97,7 +97,7 @@ Toolbox visibility requires `files.read`. Mixed read/write toolboxes are safe be
 
 The toolbox surface must not expose or accept raw local filesystem roots from public ChatGPT callers, arbitrary shell, arbitrary git commands, arbitrary URL fetch, arbitrary upstream MCP tool calls, arbitrary service API methods, arbitrary browser actions, raw JSON passthrough as execution authority, raw tokens, OAuth stores, `.env`, local config, credential stores, private tunnel URLs, cookies, or browser profile credentials.
 
-Figma belongs under `integration_toolbox` as the `figma` and `figma_make` service IDs. No `figma_toolbox` is added. Existing Figma-specific tools remain legacy/backward-compatible until a future scoped migration card changes that.
+Figma belongs under `integration_toolbox` as the `figma` and `figma_make` service IDs. No `figma_toolbox` is added. The obsolete direct Figma tools and handoff implementation were removed; Figma integration actions now return governed broker-not-implemented placeholders without calling old token/API/MCP code.
 
 `integration_toolbox` is a governed allowlisted service broker, not arbitrary MCP passthrough. `browser_toolbox` is constrained validation, not browser scraping. `knowledge_toolbox` is optional project-reference capability, not hidden memory mutation.
 
@@ -118,7 +118,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-The self-test is deterministic and local. It validates the MCP tool registry, `tools/list` schema, required read and gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, safety-compatible descriptions, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery, denied docs-write behavior, blocked-path denial, and elevated-script gating. It uses temporary fixtures for denied write, blocked-path, and multi-workspace probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
+The self-test is deterministic and local. It validates the MCP tool registry, `tools/list` schema, the exact seven-tool public toolbox surface, required internal gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, safety-compatible descriptions, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery, denied docs-write behavior, blocked-path denial, and hidden public exposure for `run_allowed_script`. It uses temporary fixtures for denied write, blocked-path, and multi-workspace probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
 
 The JSON output is intended for release validation and Builder Reports. It must remain redacted and must not expose secrets, tokens, OAuth stores, local config contents, full private user paths, release binary contents, logs, or generated output contents.
 
@@ -137,34 +137,15 @@ This evidence workflow is manual/operator-assisted or based on explicit ChatGPT 
 
 The validator fails evidence with obvious token-looking content, credential assignment text, private local user paths, `.env`-style secret lines, or private-key material. Evidence should use `%USERPROFILE%`, `%TEMP%`, `<REDACTED_LOCAL_PATH>`, `<REDACTED_PUBLIC_ENDPOINT>`, and `<REDACTED_SECRET>` placeholders. Local MCP self-test evidence supports release validation but does not prove live ChatGPT connector behavior.
 
-## Figma Token And Handoff Policy
+## Figma Broker Placeholder Policy
 
-v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
+The obsolete direct Figma and Figma Make implementation path was removed in WC-V1-FIX05. Public ChatGPT no longer sees `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, or `test_figma_mcp_connection`.
 
-Figma Design access uses the official Figma REST API directly. Figma Make URL access uses the configured official Figma MCP server as an MCP client. Figma Make file fallback access parses user-exported local `.make` packages from configured allowed roots. Do not add unofficial third-party Figma MCP packages, browser scraping, screenshot fallback, clipboard automation, or arbitrary network-fetch tools.
+Figma remains represented only as `figma` and `figma_make` service IDs under `integration_toolbox`. Current Figma service responses are governed broker placeholders: `status: "broker_not_implemented"`, `governedBrokerOnly: true`, `arbitraryUpstreamMcpPassthrough: false`, and `legacyDirectFigmaToolsRemoved: true`.
 
-Figma token loading order:
+Do not add arbitrary upstream MCP passthrough, unofficial browser scraping, screenshot fallback, clipboard automation, raw Figma tokens, or local package parsing under a new public top-level tool. A future scoped Work Card may add audited broker behavior under `integration_toolbox`.
 
-1. `CHAMPCITY_GPT_FIGMA_ACCESS_TOKEN`
-2. runtime config file `figma.local.json`
-3. development repo fallback `config\figma.local.json` when supported
-4. none
-
-The local file shape is:
-
-```json
-{
-  "figmaAccessToken": "<FIGMA_ACCESS_TOKEN>"
-}
-```
-
-In development, `config\figma.local.json` is ignored by git. Installed mode stores runtime config under Electron userData, and portable mode stores it under `data\config`; packaged runtime must not require the source repo config path. The launcher can save or clear only the local file. If the source is `env`, the environment variable must be changed outside the app.
-
-Tool results, generated docs, logs, audit entries, and errors must not include the token value. Figma API errors are redacted before being returned. `get_figma_status` returns only configured yes/no and source.
-
-Figma handoff writes require OAuth `files.write` for HTTP callers and local write mode `docs`, `patch`, or `elevated`. Writes still enforce allowed roots, safe relative paths, blocked-file policy, overwrite rules, and git-root requirements when enabled. The tools do not write outside allowed roots and do not enable write mode by default.
-
-Generated Design handoff packages can contain screenshots, frame names, component names, style names, text metadata, and design tokens from private Figma files. Generated Make handoff packages can contain private Make source/resources retrieved through Figma MCP. Treat generated handoffs as potentially sensitive and review them before committing or sharing. Public safety scans block `config/*.local.json`, real-looking `figmaAccessToken` values, and common Figma token-looking strings where practical.
+Public safety scans still block `config/*.local.json`, real-looking `figmaAccessToken` values, and common Figma token-looking strings where practical.
 
 Unauthenticated localhost testing requires the explicit opt-in `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true`. Treat that mode as `LOCAL TEST ONLY - DO NOT TUNNEL.`
 
@@ -241,6 +222,8 @@ The dedicated git tools run fixed git commands only. There is no MCP tool that a
 The old universal per-write `approvalToken` model was replaced because ChatGPT already authenticates with OAuth, allowed roots are narrow, blocked paths remain enforced, git provides rollback/review, and audit logging records MCP operations. The lower-friction model lets ChatGPT create Markdown planning artifacts in `docs` mode without pasting a token on every call.
 
 `write_markdown_artifact` requires OAuth `files.write` and write mode `docs`, `patch`, or `elevated`. It only writes `.md` files and refuses overwrites unless `overwrite` is `true`.
+
+`write_json_artifact` is available through `repo_toolbox`, requires OAuth `files.write` and write mode `docs`, `patch`, or `elevated`, accepts only repository-relative `.json` paths, rejects caller-supplied roots, parses and normalizes JSON before writing, blocks local/generated/risky paths, refuses overwrites unless `overwrite` is `true`, and audits the write.
 
 `propose_patch` requires OAuth `files.write`, generates a unified diff, computes a SHA-256 hash of the exact patch text, and stores short-lived metadata in `config/pending-patches.local.json`. The store contains proposal ID, root, hash, affected files, timestamps, expiry, and used status; it does not store the patch body.
 

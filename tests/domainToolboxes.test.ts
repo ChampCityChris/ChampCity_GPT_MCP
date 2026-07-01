@@ -342,6 +342,149 @@ describe("stable domain toolbox tools", () => {
     assert.match(result.error?.message ?? "", /files\.write/u);
   });
 
+  it("repo_toolbox writes Markdown and JSON artifacts while rejecting unsafe JSON params", async () => {
+    initRepo();
+    const config = testConfig("docs");
+    const toolboxContext = context(config, "files.read files.write");
+
+    const markdown = await repoToolbox(
+      { action: "write_markdown_artifact", params: { relativePath: "docs/note.md", content: "# Note\n" } },
+      config,
+      toolboxContext
+    );
+    const json = await repoToolbox(
+      { action: "write_json_artifact", params: { relativePath: "docs/data.json", content: "{\"b\":2,\"a\":1}" } },
+      config,
+      toolboxContext
+    );
+    const invalidJson = await repoToolbox(
+      { action: "write_json_artifact", params: { relativePath: "docs/bad.json", content: "{broken" } },
+      config,
+      toolboxContext
+    );
+    const nonJson = await repoToolbox(
+      { action: "write_json_artifact", params: { relativePath: "docs/data.txt", content: "{}" } },
+      config,
+      toolboxContext
+    );
+    const rootSmuggle = await repoToolbox(
+      { action: "write_json_artifact", params: { root: auditRoot, relativePath: "docs/data.json", content: "{}" } },
+      config,
+      toolboxContext
+    );
+    const blocked = await repoToolbox(
+      { action: "write_json_artifact", params: { relativePath: "logs/status.json", content: "{}" } },
+      config,
+      toolboxContext
+    );
+    const missingScope = await repoToolbox(
+      { action: "write_json_artifact", params: { relativePath: "docs/no-scope.json", content: "{}" } },
+      config,
+      context(config, "files.read")
+    );
+    const writeModeOff = await repoToolbox(
+      { action: "write_json_artifact", params: { relativePath: "docs/off.json", content: "{}" } },
+      testConfig("off"),
+      context(testConfig("off"), "files.read files.write")
+    );
+
+    assert.equal(markdown.ok, true);
+    assert.equal(fs.readFileSync(path.join(tempRoot, "docs", "note.md"), "utf8"), "# Note\n");
+    assert.equal(json.ok, true);
+    assert.equal(fs.readFileSync(path.join(tempRoot, "docs", "data.json"), "utf8"), "{\n  \"b\": 2,\n  \"a\": 1\n}\n");
+    assert.match((json.result as { sha256?: string }).sha256 ?? "", /^[a-f0-9]{64}$/u);
+    assert.equal(typeof (json.result as { modifiedTime?: string }).modifiedTime, "string");
+    assert.equal(invalidJson.ok, false);
+    assert.equal(invalidJson.error?.code, "INVALID_INPUT");
+    assert.equal(nonJson.ok, false);
+    assert.equal(nonJson.error?.code, "FILE_DENIED");
+    assert.equal(rootSmuggle.ok, false);
+    assert.equal(rootSmuggle.error?.code, "INVALID_INPUT");
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error?.code, "FILE_DENIED");
+    assert.equal(missingScope.ok, false);
+    assert.equal(missingScope.error?.code, "APPROVAL_REQUIRED");
+    assert.match(missingScope.error?.message ?? "", /files\.write/u);
+    assert.equal(writeModeOff.ok, false);
+    assert.equal(writeModeOff.error?.code, "APPROVAL_REQUIRED");
+    assert.match(writeModeOff.error?.message ?? "", /writeMode docs, patch, or elevated/u);
+  });
+
+  it("repo_toolbox proposes and applies approved patches without accepting public roots", async () => {
+    initRepo();
+    const config = testConfig("patch");
+    const toolboxContext = context(config, "files.read files.write");
+
+    const proposal = await repoToolbox(
+      {
+        action: "propose_patch",
+        params: {
+          changes: [{ relativePath: "README.md", originalText: "# Test", replacementText: "# Patched" }]
+        }
+      },
+      config,
+      toolboxContext
+    );
+    assert.equal(proposal.ok, true);
+    const proposed = proposal.result as { patch: string; proposalId: string; patchHash: string };
+
+    const apply = await repoToolbox(
+      {
+        action: "apply_approved_patch",
+        params: {
+          patch: proposed.patch,
+          proposalId: proposed.proposalId,
+          patchHash: proposed.patchHash
+        }
+      },
+      config,
+      toolboxContext
+    );
+    const rootSmuggle = await repoToolbox(
+      {
+        action: "propose_patch",
+        params: {
+          root: auditRoot,
+          changes: [{ relativePath: "README.md", originalText: "# Patched", replacementText: "# Smuggled" }]
+        }
+      },
+      config,
+      toolboxContext
+    );
+    const missingScope = await repoToolbox(
+      {
+        action: "propose_patch",
+        params: {
+          changes: [{ relativePath: "README.md", originalText: "# Patched", replacementText: "# No Scope" }]
+        }
+      },
+      config,
+      context(config, "files.read")
+    );
+    const docsApply = await repoToolbox(
+      {
+        action: "apply_approved_patch",
+        params: {
+          patch: proposed.patch,
+          proposalId: proposed.proposalId,
+          patchHash: proposed.patchHash
+        }
+      },
+      testConfig("docs"),
+      context(testConfig("docs"), "files.read files.write")
+    );
+
+    assert.equal(apply.ok, true);
+    assert.equal(fs.readFileSync(path.join(tempRoot, "README.md"), "utf8").replace(/\r\n/gu, "\n"), "# Patched\n");
+    assert.equal(rootSmuggle.ok, false);
+    assert.equal(rootSmuggle.error?.code, "INVALID_INPUT");
+    assert.equal(missingScope.ok, false);
+    assert.equal(missingScope.error?.code, "APPROVAL_REQUIRED");
+    assert.equal(docsApply.ok, false);
+    assert.equal(docsApply.error?.code, "APPROVAL_REQUIRED");
+    assert.match(docsApply.error?.message ?? "", /writeMode patch or elevated/u);
+  });
+
   it("integration_toolbox lists supported services and rejects unknown services", async () => {
     initRepo();
     const config = testConfig("off");
@@ -357,6 +500,58 @@ describe("stable domain toolbox tools", () => {
     assert.equal(unknown.ok, false);
     assert.equal(unknown.error?.code, "INVALID_INPUT");
     assert.ok(Array.isArray(unknown.error?.details?.supportedServices));
+  });
+
+  it("integration_toolbox returns static Figma broker placeholders", async () => {
+    initRepo();
+    const config = testConfig("off");
+    const toolboxContext = context(config, "files.read");
+
+    const status = await integrationToolbox(
+      { action: "get_service_status", params: { serviceId: "figma" } },
+      config,
+      toolboxContext
+    );
+    const capabilities = await integrationToolbox(
+      { action: "list_service_capabilities", params: { serviceId: "figma_make" } },
+      config,
+      toolboxContext
+    );
+    const validation = await integrationToolbox(
+      { action: "validate_service_configuration", params: { serviceId: "figma" } },
+      config,
+      toolboxContext
+    );
+
+    assert.equal(status.ok, true);
+    assert.deepEqual(status.result, {
+      serviceId: "figma",
+      status: "broker_not_implemented",
+      governedBrokerOnly: true,
+      arbitraryUpstreamMcpPassthrough: false,
+      legacyDirectFigmaToolsRemoved: true
+    });
+    assert.equal(capabilities.ok, true);
+    assert.equal((capabilities.result as { safetyModel?: { arbitraryUpstreamToolNameAccepted?: boolean } }).safetyModel?.arbitraryUpstreamToolNameAccepted, false);
+    assert.equal((capabilities.result as { safetyModel?: { legacyDirectFigmaToolsRemoved?: boolean } }).safetyModel?.legacyDirectFigmaToolsRemoved, true);
+    assert.equal(validation.ok, true);
+    assert.equal((validation.result as { status?: string }).status, "broker_not_implemented");
+    assert.equal((validation.result as { rawTokenAccepted?: boolean }).rawTokenAccepted, false);
+  });
+
+  it("artifact_toolbox no longer supports obsolete Codex handoff prompt creation", async () => {
+    initRepo();
+    const config = testConfig("docs");
+    const result = await artifactToolbox(
+      { action: "create_codex_handoff_prompt", params: { handoffPath: "design/figma-handoff", targetFile: "docs/handoffs/out.md" } },
+      config,
+      context(config, "files.read files.write")
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "INVALID_INPUT");
+    assert.ok((result.error?.details?.supportedActions as string[] | undefined)?.includes("local_package_summary"));
+    assert.equal((result.error?.details?.supportedActions as string[] | undefined)?.includes("create_codex_handoff_prompt"), false);
   });
 
   it("integration_toolbox rejects arbitrary upstream MCP tool names", async () => {

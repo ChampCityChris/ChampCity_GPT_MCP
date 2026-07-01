@@ -16,7 +16,7 @@ This queue is derived from the answered operator intake file:
 - No Work Card in this queue authorizes fallback architecture, release publication, tag movement, package generation, source implementation, or protected-subsystem changes outside its own future approved scope.
 - Active implementation Work Cards should use `dev` or a generated `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` branch. `main` is reserved for stable release or baseline checkpoints.
 - `prepare_git_work_branch` is the safe MCP branch-preparation path. It refuses dirty working trees and `main` as the active work target, and it does not push, merge, rebase, reset, stash, delete, force, or run arbitrary commands.
-- Stable domain toolbox expansion should prefer internal allowlisted actions under `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox` instead of adding new top-level MCP tools when possible. Figma belongs under `integration_toolbox`; do not add `figma_toolbox`.
+- Stable domain toolbox expansion should prefer internal allowlisted actions under `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox` instead of adding new top-level MCP tools when possible. After `WC-V1-FIX05`, these seven toolbox tools are the only public ChatGPT-visible tools. Figma belongs under `integration_toolbox` as governed broker behavior; do not add `figma_toolbox`.
 - Normal source-control flow after branch preparation is validate, stage reviewed files, run pre-commit safety scan, commit, push the current `dev` or feature branch, and merge to `main` only at a stable checkpoint.
 
 ## Phase 0 — Scope Lock And Baseline

@@ -90,67 +90,22 @@ Copy-Item config\write-access.example.json config\write-access.local.json
 
 Local files matching `config/*.local.json` are ignored by git. Do not commit OAuth stores, auth tokens, local paths, tunnel credentials, logs, generated configs, release outputs, or `.env` files.
 
-## Figma Design Handoff
+## Figma Broker Placeholder
 
-v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
+The old direct Figma/Figma Make handoff implementation was removed in WC-V1-FIX05. Public ChatGPT `tools/list` exposes only the seven toolbox tools and does not expose Figma-specific top-level tools or `figma_toolbox`.
 
-ChampCity GPT can fetch Figma file/frame metadata through the official Figma REST API and generate a Codex-ready UI implementation handoff. Configure a Figma personal access token locally:
-
-```powershell
-Copy-Item config\figma.example.json config\figma.local.json
-```
-
-Then edit `config\figma.local.json`:
-
-```json
-{
-  "figmaAccessToken": "<FIGMA_ACCESS_TOKEN>"
-}
-```
-
-`CHAMPCITY_GPT_FIGMA_ACCESS_TOKEN` overrides the local file. Installed mode stores the local file under the app userData config directory; portable mode stores it under `data\config`; development mode can use repo-local `config\figma.local.json`. The launcher can save or clear the local token, but never displays it after save. If the token comes from the environment, clear it outside the app.
-
-Figma tools:
-
-- `get_figma_status`: reports configured yes/no and source without the token.
-- `parse_figma_url`: parses `/design`, `/file`, and `/proto` URLs.
-- `fetch_figma_file_summary`: returns compact file/frame/component/style metadata.
-- `fetch_figma_frame_image`: writes one PNG/SVG export inside an allowed root.
-- `create_figma_handoff_package`: writes `design/figma-handoff` by default.
-- `create_codex_ui_handoff_prompt`: writes `docs/handoffs/CODEX_UI_REDESIGN_HANDOFF.md` by default.
-- `test_figma_mcp_connection`: probes the configured upstream Figma MCP server without exposing credentials.
-- `run_figma_make_handoff`: accepts a `/make/` URL, retrieves Make resources through the configured official Figma MCP server, writes `design/figma-handoff/make` and `docs/handoffs/CODEX_FIGMA_MAKE_UI_HANDOFF.md` by default, and returns paths plus warnings without exposing credentials.
-
-Default handoff package:
-
-```text
-design/figma-handoff/
-  README_DESIGN_HANDOFF.md
-  figma-link.txt
-  specs/
-    screen-map.md
-    component-inventory.md
-    interaction-notes.md
-    implementation-notes.md
-    acceptance-criteria.md
-  tokens/
-    design-tokens.json
-  screenshots/
-  assets/
-```
-
-Figma image export and Design handoff generation require OAuth `files.write` for HTTP callers and local write mode `docs`, `patch`, or `elevated`. Figma Make URLs use the dedicated `run_figma_make_handoff` path, are not sent through the Design REST parser, and require an upstream official Figma MCP server such as the desktop endpoint `http://127.0.0.1:3845/mcp` or a configured remote HTTPS endpoint. Make handoff success requires actual MCP resources/files under `design/figma-handoff/make/source`; screenshots are intentionally not generated for Make MCP resource handoffs.
+Figma and Figma Make remain represented under `integration_toolbox` as service IDs `figma` and `figma_make`. Current status, capability, and configuration responses are broker-not-implemented placeholders with governed broker behavior only, no arbitrary upstream MCP passthrough, and no old direct token/API/MCP calls.
 
 ## Recommended Git Workflow
 
 Use `dev` or a feature branch for normal work. `main` commits and pushes are refused by default unless the caller explicitly opts in.
 
 1. Validate locally with `npm run build`, `npm test`, `npm run typecheck`, `npm run lint`, and `npm run check:public`.
-2. Ask ChatGPT to run `get_commit_readiness`.
-3. Ask ChatGPT to run `safe_stage_changes` for all safe files or reviewed paths.
-4. Ask ChatGPT to run `pre_commit_safety_scan`.
-5. Ask ChatGPT to run `commit_validated_changes` with a reviewed commit message.
-6. Ask ChatGPT to run `push_current_branch` only after reviewing the commit result.
+2. Ask ChatGPT to run `git_toolbox.readiness_summary`.
+3. Ask ChatGPT to run `git_toolbox.stage_paths` for reviewed safe paths.
+4. Ask ChatGPT to run `git_toolbox.pre_commit_scan`.
+5. Ask ChatGPT to run `git_toolbox.commit_staged` with a reviewed commit message.
+6. Ask ChatGPT to run `git_toolbox.push_current_branch` only after reviewing the commit result.
 
 The staging tool never stages local config, logs, generated output, release artifacts, `dist`, `node_modules`, `.env`, ignored files, or files with blocker secret/private-path findings. Push is optional and never uses force flags. Releases are separate from commits; release binaries belong in GitHub Releases, not in the repository.
 

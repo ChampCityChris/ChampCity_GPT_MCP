@@ -106,7 +106,7 @@ describe("MCP protocol self-test", () => {
   });
 
   it("forced missing required read tool fixture produces a failed check", () => {
-    const check = evaluateRequiredReadToolsPresent(["list_project_files"], ["list_project_files"]);
+    const check = evaluateRequiredReadToolsPresent(["repo_toolbox"], ["repo_toolbox"]);
 
     assert.equal(check.status, "FAIL");
     assert.equal(check.id, "REQUIRED_READ_TOOLS_PRESENT");

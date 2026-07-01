@@ -306,42 +306,11 @@ Recommended workflow:
 4. Use `Elevated` rarely for scripts or legacy fallback, with the elevated token.
 5. Set write mode back to `Off`.
 
-## Figma Handoff
+## Figma Broker Placeholder
 
-v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
+The legacy direct Figma handoff flow was removed in WC-V1-FIX05. The launcher preserves the old UI/API surface as disabled placeholder controls, but saving tokens, parsing Figma URLs, testing direct Figma connections, and creating Figma/Codex handoff packages are no longer supported paths.
 
-Use the `Figma Handoff` section to save the Figma token once and monitor Figma handoff status. For Figma Make, the primary online workflow is ChatGPT calling `run_figma_make_handoff`; the local exported-package fallback is ChatGPT calling `run_figma_make_file_handoff` with a `.make` path under an allowed root. The URL fields and buttons can remain useful for manual Design-file debugging.
-
-Status fields:
-
-- Figma token configured: yes/no
-- Figma token source: env/local-file/dev-local-file/none
-- Figma config path
-- MCP Make handoff tool: available/unavailable
-- Last parsed node
-
-Actions:
-
-- `Save`: saves the masked Figma token to runtime-local `figma.local.json`.
-- `Clear Figma Token`: removes only the local token file. If the token source is `env`, change `CHAMPCITY_GPT_FIGMA_ACCESS_TOKEN` outside the app.
-- `Test Figma Connection`: fetches a compact file summary only after a Figma file key or URL is entered.
-- `Parse Figma URL`: extracts file key, normalized node ID, and URL type without a network call.
-- `Create Figma Handoff Package`: writes `design\figma-handoff` by default.
-- `Create Codex UI Handoff Prompt`: writes `docs\handoffs\CODEX_UI_REDESIGN_HANDOFF.md` by default.
-
-The local token file shape is:
-
-```json
-{
-  "figmaAccessToken": "<FIGMA_ACCESS_TOKEN>"
-}
-```
-
-The launcher never displays the token after saving and does not include it in generated setup notes. Figma handoff/package writes still require the configured MCP write mode to allow docs-style writes. Generated handoffs may include screenshots and metadata from private Figma files, so review them before committing or sharing.
-
-After the token is saved, ChatGPT can pass a Figma `/make/` URL to `run_figma_make_handoff`. The tool writes `design\figma-handoff\make` and `docs\handoffs\CODEX_FIGMA_MAKE_UI_HANDOFF.md` by default, returns artifact paths and warnings, and does not require the user to fill the launcher URL field or click `Create Figma Handoff Package`.
-
-If the user exports a `.make` package from Figma Make, places it under the repo or another configured allowed root, and gives ChatGPT that path, ChatGPT can call `run_figma_make_file_handoff`. The tool writes `design\figma-handoff\make-file` and `docs\handoffs\CODEX_FIGMA_MAKE_FILE_HANDOFF.md` by default. This fallback parses the local package directly, copies assets, preserves important raw package files, parses Make chat history, reconstructs source where deterministic, and is not a screenshot or browser-scraping workflow.
+Figma and Figma Make remain listed only as `integration_toolbox` service IDs. Current service status/capability/configuration responses report `broker_not_implemented`, `governedBrokerOnly: true`, `arbitraryUpstreamMcpPassthrough: false`, and `legacyDirectFigmaToolsRemoved: true`.
 
 ## Legacy HTTP Auth Token
 

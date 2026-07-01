@@ -107,7 +107,7 @@ If ChatGPT disconnects after the access token expires, refresh-token support may
 
 ChatGPT uses OAuth authorization code with PKCE. `/oauth/authorize` requires `code_challenge_method=S256` and a valid S256 `code_challenge`; plain PKCE is rejected. Use Dynamic Client Registration in ChatGPT rather than User-Defined OAuth Client unless a static client was intentionally registered. If ChatGPT reports `PKCE S256 code_challenge is required`, check the launcher OAuth troubleshooting fields or `config\oauth-authorize-last-error.local.json` to confirm whether `code_challenge` and `code_challenge_method` reached the authorize handler.
 
-Do not attempt ChatGPT.com registration until `npm test` passes, including the end-to-end Streamable HTTP MCP test that initializes, lists tools, and calls `list_project_files`.
+Do not attempt ChatGPT.com registration until `npm test` passes, including the end-to-end Streamable HTTP MCP test that initializes, lists tools, and calls `repo_toolbox.list_files`.
 
 Also verify `https://mcp.example.com/mcp` with `scripts\verify-public-endpoint.ps1` before ChatGPT registration.
 
@@ -119,20 +119,21 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify-oauth-pkce-local.ps1
 
 ## Safe Status And Release Checks
 
-For normal ChatGPT-facing read-only status and release diagnostics, prefer these WC-V1-0102 facade tools:
+For normal ChatGPT-facing read-only status and release diagnostics, use the toolbox actions that route to the WC-V1-0102 facade implementations:
 
-- `get_workspace_status_summary`
-- `get_change_set_readiness_summary`
-- `get_release_artifact_summary`
-- `get_release_publication_summary`
-- `get_builder_report_index`
-- `get_builder_report_summary`
+- `repo_toolbox.status`
+- `git_toolbox.readiness_summary`
+- `artifact_toolbox.release_artifact_summary`
+- `artifact_toolbox.release_publication_summary`
+- `artifact_toolbox.builder_report_index`
+- `artifact_toolbox.builder_report_summary`
+- `diagnostics_toolbox.public_safety_status`
 
-These tools avoid caller-supplied local roots, command-string inputs, and executable file globs. They return structured summaries with repository-relative paths where possible. `run_allowed_script` is not the normal v1.0 ChatGPT-facing status or release workflow.
+These actions avoid caller-supplied local roots, command-string inputs, and executable file globs. They return structured summaries with repository-relative paths where possible. `run_allowed_script` is not exposed publicly.
 
-For Builder Reports, ask ChatGPT to call `get_builder_report_index`, optionally with `phaseFolder` and `workCardId`. For a specific report, ask ChatGPT to call `get_builder_report_summary` with the returned repository-relative `reportPath`, or use a narrow expected-path `read_project_file` call only after the index has identified the path.
+For Builder Reports, ask ChatGPT to call `artifact_toolbox` with `action: "builder_report_index"`, optionally with `phaseFolder` and `workCardId`. For a specific report, ask ChatGPT to call `artifact_toolbox` with `action: "builder_report_summary"` and the returned repository-relative `reportPath`, or use a narrow expected-path `repo_toolbox.read_file` call only after the index has identified the path.
 
-Normal ChatGPT workflows should avoid broad `list_project_files` calls that combine an absolute local root, `planning/phases`, `**/BUILDER_REPORT*.md`, and high `maxResults`. The Builder Report facade supports `CAV-033` by avoiding that broad recursive query shape.
+Normal ChatGPT workflows should avoid broad file-listing calls that combine `planning/phases`, `**/BUILDER_REPORT*.md`, and high `maxResults`. The Builder Report facade supports `CAV-033` by avoiding that broad recursive query shape.
 
 These facade tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, `CAV-030`, and `CAV-033`. Live ChatGPT validation is still required before claiming the safety-layer false-positive issue is fully remediated.
 
@@ -179,17 +180,17 @@ Use explicit workspace IDs when more than one project is configured. Ask ChatGPT
 
 `workspaceId: "default"` is safe only for a single workspace or when `defaultWorkspaceId` is explicitly configured. With multiple workspaces and no explicit default, project-specific toolbox calls fail with `WORKSPACE_REQUIRED` instead of using a mutable active workspace.
 
-Initial action groups:
+Current public action groups:
 
-- `repo_toolbox`: `status`, `list_files`, `read_file`, `search_files`, `write_markdown_artifact`
+- `repo_toolbox`: `status`, `list_files`, `read_file`, `search_files`, `write_markdown_artifact`, `write_json_artifact`, `propose_patch`, `apply_approved_patch`
 - `git_toolbox`: `status`, `diff`, `prepare_work_branch`, `pre_commit_scan`, `stage_paths`, `commit_staged`, `push_current_branch`, `readiness_summary`
-- `artifact_toolbox`: `builder_report_index`, `builder_report_summary`, `release_artifact_summary`, `release_publication_summary`, `local_package_summary`, `create_codex_handoff_prompt`
+- `artifact_toolbox`: `builder_report_index`, `builder_report_summary`, `release_artifact_summary`, `release_publication_summary`, `local_package_summary`
 - `diagnostics_toolbox`: `runtime_status`, `write_access_status`, `tool_exposure_status`, `oauth_scope_status`, `chatgpt_discovery_status`, `list_workspaces`, `public_safety_status`
 - `integration_toolbox`: `list_supported_services`, `get_service_status`, `list_service_capabilities`, `validate_service_configuration`, `prepare_external_handoff`
 - `browser_toolbox`: `get_browser_capabilities`, `validate_public_endpoint`
 - `knowledge_toolbox`: `list_supported_sources`, `get_project_memory_status`, `get_reference_capabilities`
 
-Do not expect a `figma_toolbox`. Figma is represented under `integration_toolbox` as `figma` and `figma_make`; existing Figma-specific tools remain legacy/backward-compatible for now. `integration_toolbox` is a governed broker, not arbitrary upstream MCP passthrough. `browser_toolbox` is constrained validation, not browser scraping. `knowledge_toolbox` is optional project reference capability, not hidden memory mutation.
+Do not expect a `figma_toolbox`. Figma is represented under `integration_toolbox` as `figma` and `figma_make`, but current Figma responses are broker-not-implemented placeholders and do not call old direct Figma API/token/MCP code. `integration_toolbox` is a governed broker, not arbitrary upstream MCP passthrough. `browser_toolbox` is constrained validation, not browser scraping. `knowledge_toolbox` is optional project reference capability, not hidden memory mutation.
 
 When approving ChatGPT app scopes, use:
 
@@ -244,39 +245,13 @@ Start read-only first. Set write mode above `off` only after confirming:
 - Audit logging is enabled and reviewed.
 - Read-only tools work through ChatGPT.
 
-In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. `files.read` covers the stable toolbox tools, read/list/search/git status/git diff, the safe status/release/Builder Report facade tools, `get_write_access_status`, Figma status/URL parsing/file summaries, and `tools/list`. `files.write` covers `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, Figma frame export, Figma handoff package generation, Figma Make URL handoff orchestration, Figma Make `.make` file handoff orchestration, Codex UI handoff prompt generation, `prepare_git_work_branch`, source-control stage/commit/push tools, and `run_allowed_script`, but write access still has local write-mode gates. Markdown/Figma handoff writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Branch preparation, staging, committing, pushing, and `run_allowed_script` require mode `elevated`; `run_allowed_script` also requires an allowlisted maintenance task and the elevated approval token. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
+In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. Public `tools/list` exposes only `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox`. `files.read` covers `tools/list` and those toolbox tools. `files.write` is enforced inside write-capable toolbox actions, including Markdown/JSON artifact writes, patch proposal/application, integration handoff writing, and git mutating actions. Markdown and JSON artifact writes require mode `docs`, `patch`, or `elevated` and do not require `approvalToken`. Patch application requires mode `patch` or `elevated` and a matching pending proposal hash, unless elevated approval is used as a fallback. `run_allowed_script` is not exposed publicly. Unauthenticated localhost mode requires explicit opt-in with `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be used behind a tunnel. A Cloudflare Tunnel can expose a localhost-bound service to the public internet, so localhost binding is not a substitute for OAuth.
 
-## Figma Make Handoff Flow
+## Figma Broker Placeholder
 
-v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
+The old direct Figma/Figma Make handoff workflow was removed. Do not call `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, or `test_figma_mcp_connection`; they are not public tools.
 
-Configure the upstream official Figma MCP server once. Desktop mode defaults to `http://127.0.0.1:3845/mcp`; remote mode requires an explicitly configured HTTPS endpoint. If the upstream server requires Figma-side authentication or user interaction, complete that setup outside ChatGPT first. After that, the intended ChatGPT workflow is one MCP tool call:
-
-```text
-My Figma Make URL is <url>. Use it to create a handoff package and generate a Codex prompt.
-```
-
-ChatGPT should call `run_figma_make_handoff` with the `/make/` URL. The tool writes `design\figma-handoff\make` and `docs\handoffs\CODEX_FIGMA_MAKE_UI_HANDOFF.md` by default, returns created paths, `resourceFiles`, warnings, and errors, and never receives or returns Figma tokens, cookies, auth headers, or session credentials.
-
-Fallback local route: after exporting a `.make` package from Figma Make and placing it under the repo or another configured allowed root, ChatGPT should call `run_figma_make_file_handoff` with `makeFilePath`. The tool writes `design\figma-handoff\make-file` and `docs\handoffs\CODEX_FIGMA_MAKE_FILE_HANDOFF.md` by default, preserves raw important package files, copies package assets, parses `ai_chat.json` when present, reconstructs source files where deterministic, and reports partial/unresolved reconstruction honestly. This route is direct package parsing, not screenshot capture, browser scraping, network scraping, clipboard automation, or Figma Design conversion.
-
-The Make path must retrieve actual Make resources/files through official Figma MCP resource content. If no resources/files are retrieved, the status is `failed`; metadata-only output, screenshots, browser scraping, network scraping, clipboard automation, and Figma Design conversion are not fallback success paths. `/make/` URLs are not sent through the Design REST parser.
-
-## Figma Design Handoff Flow
-
-Configure a Figma personal access token locally before asking ChatGPT to fetch design metadata. Use the launcher Figma section or create `config\figma.local.json` from `config\figma.example.json`. `CHAMPCITY_GPT_FIGMA_ACCESS_TOKEN` overrides the local file.
-
-Recommended ChatGPT flow:
-
-1. Approve `files.read` first and call `get_figma_status`.
-2. Call `parse_figma_url` with the Figma file/frame URL.
-3. Call `fetch_figma_file_summary` to inspect pages, top-level frames, components, and styles.
-4. Switch local write mode to `docs`, `patch`, or `elevated`, and approve OAuth `files.write`.
-5. Call `create_figma_handoff_package` with the project root, Figma URL, target area, and selected frame/node IDs.
-6. Call `create_codex_ui_handoff_prompt` to write the Codex implementation prompt.
-7. Inspect generated files under `design\figma-handoff` and `docs\handoffs`.
-
-Do not paste the Figma token into ChatGPT. Do not include it in prompts, generated handoffs, docs, or logs. Generated handoff packages may contain private Figma screenshots and metadata; review them before committing or sharing.
+For now, use `integration_toolbox` service IDs `figma` and `figma_make` only to confirm the broker placeholder status. Future Figma support must be implemented as governed broker behavior under `integration_toolbox`, without arbitrary upstream MCP passthrough.
 
 Do not remove OAuth, do not expose unauthenticated `/mcp`, and do not enable write mode by default. Use `Revoke All OAuth Sessions` or `Revoke ChatGPT Sessions` in the launcher if a ChatGPT connection should be forced to reauthorize.
 

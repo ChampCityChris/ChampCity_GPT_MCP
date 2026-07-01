@@ -222,15 +222,18 @@ function baseAppStatus() {
       configured: false,
       source: "none" as const,
       configPath: path.join(tempRoot, "config", "figma.local.json"),
-      makeHandoffToolAvailable: true,
+      makeHandoffToolAvailable: false,
       figmaMcp: {
-        endpoint: "http://127.0.0.1:3845/mcp",
+        endpoint: "integration_toolbox",
         mode: "desktop" as const,
         source: "default" as const,
         connectionStatus: "not-tested" as const,
         authStatus: "unknown" as const,
         makeResourceRetrievalAvailable: "unknown" as const,
-        configPath: path.join(tempRoot, "config", "figma-mcp.local.json")
+        configPath: path.join(tempRoot, "config", "figma-mcp.local.json"),
+        governedBrokerOnly: true as const,
+        arbitraryUpstreamMcpPassthrough: false as const,
+        legacyDirectFigmaToolsRemoved: true as const
       }
     }
   };

@@ -37,15 +37,6 @@ import {
 } from "../src/writeAccess.js";
 import { clearPendingPatchProposals, getPendingPatchProposalCount } from "../src/pendingPatches.js";
 import { type McpDiscoveryTrace } from "../src/server/discoveryTrace.js";
-import {
-  clearLocalFigmaAccessToken,
-  getFigmaConfigPath,
-  getFigmaStatus,
-  saveLocalFigmaAccessToken,
-  type FigmaConfigSource
-} from "../src/figma/figmaConfig.js";
-import { getFigmaMcpStatus, type FigmaMcpStatus } from "../src/figma/figmaMcpConfig.js";
-import { parseFigmaUrl } from "../src/figma/figmaUrl.js";
 import { getRuntimeConfigFilePath, getRuntimeGeneratedDir, getRuntimeLogDir, getRuntimeServerEntrypoint } from "../src/runtimePaths.js";
 
 export const DEFAULT_REPO_ROOT = path.resolve(process.cwd());
@@ -169,6 +160,12 @@ export type OverallTunnelReadiness =
   | "blocked_down"
   | "unknown";
 export type LegacyTunnelReadinessStatus = "READY" | "NOT_READY" | "WARN";
+export type FigmaConfigSource = "env" | "local-file" | "dev-local-file" | "none";
+export type FigmaMcpMode = "desktop" | "remote";
+export type FigmaMcpConfigSource = "env" | "local-file" | "default";
+export type FigmaMcpConnectionStatus = "not-tested";
+export type FigmaMcpAuthStatus = "unknown" | "not-required" | "required" | "configured";
+export type FigmaMcpMakeResourceAvailability = "unknown";
 
 export interface LauncherDoctorCheckEvidence {
   name: string;
@@ -224,6 +221,19 @@ export interface LauncherFigmaStatus {
   configPath: string;
   makeHandoffToolAvailable: boolean;
   figmaMcp: FigmaMcpStatus;
+}
+
+export interface FigmaMcpStatus {
+  endpoint: string;
+  mode: FigmaMcpMode;
+  source: FigmaMcpConfigSource;
+  connectionStatus: FigmaMcpConnectionStatus;
+  authStatus: FigmaMcpAuthStatus;
+  makeResourceRetrievalAvailable: FigmaMcpMakeResourceAvailability;
+  configPath: string;
+  governedBrokerOnly: true;
+  arbitraryUpstreamMcpPassthrough: false;
+  legacyDirectFigmaToolsRemoved: true;
 }
 
 export function repoPath(...parts: string[]): string {
@@ -842,27 +852,47 @@ export function getLauncherWriteAccessStatus(
   };
 }
 
-export function getLauncherFigmaStatus(repoRoot: string, env: NodeJS.ProcessEnv = process.env): LauncherFigmaStatus {
+function getLegacyFigmaConfigPath(repoRoot: string): string {
+  return getRuntimeConfigFilePath(repoRoot, "figma.local.json");
+}
+
+function getLegacyFigmaMcpConfigPath(repoRoot: string): string {
+  return getRuntimeConfigFilePath(repoRoot, "figma-mcp.local.json");
+}
+
+export function getLauncherFigmaStatus(repoRoot: string, _env: NodeJS.ProcessEnv = process.env): LauncherFigmaStatus {
   return {
-    ...getFigmaStatus(repoRoot, env),
-    configPath: getFigmaConfigPath(repoRoot, env),
-    makeHandoffToolAvailable: true,
-    figmaMcp: getFigmaMcpStatus(repoRoot, env)
+    configured: false,
+    source: "none",
+    configPath: getLegacyFigmaConfigPath(repoRoot),
+    makeHandoffToolAvailable: false,
+    figmaMcp: {
+      endpoint: "integration_toolbox",
+      mode: "desktop",
+      source: "default",
+      connectionStatus: "not-tested",
+      authStatus: "unknown",
+      makeResourceRetrievalAvailable: "unknown",
+      configPath: getLegacyFigmaMcpConfigPath(repoRoot),
+      governedBrokerOnly: true,
+      arbitraryUpstreamMcpPassthrough: false,
+      legacyDirectFigmaToolsRemoved: true
+    }
   };
 }
 
 export function saveLauncherFigmaAccessToken(repoRoot: string, token: string, env: NodeJS.ProcessEnv = process.env): LauncherFigmaStatus {
-  saveLocalFigmaAccessToken(repoRoot, token, env);
+  void token;
   return getLauncherFigmaStatus(repoRoot, env);
 }
 
 export function clearLauncherFigmaAccessToken(repoRoot: string, env: NodeJS.ProcessEnv = process.env): LauncherFigmaStatus {
-  clearLocalFigmaAccessToken(repoRoot, env);
   return getLauncherFigmaStatus(repoRoot, env);
 }
 
 export function parseLauncherFigmaUrl(url: string) {
-  return parseFigmaUrl(url);
+  void url;
+  throw new Error("Legacy direct Figma URL parsing was removed. Future Figma support belongs under integration_toolbox governed broker behavior.");
 }
 
 export function setLauncherHttpWriteToolsEnabled(repoRoot: string, enabled: boolean): LauncherWriteAccessStatus {
@@ -1006,25 +1036,24 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 - Overall write readiness: ${writeAccessStatus.overallWriteReadiness} - ${writeAccessStatus.overallWriteReadinessReason}
 - In Architect Docs mode, ChatGPT can create Markdown planning artifacts without approvalToken.
 - Markdown artifact writes do not require approvalToken in docs, patch, or elevated mode.
-- In Controlled Patch mode, ChatGPT must use propose_patch first, then apply the matching proposal.
+- In Controlled Patch mode, ChatGPT must use repo_toolbox.propose_patch first, then repo_toolbox.apply_approved_patch with the matching proposal.
 - Elevated operations may still require a local elevated approval token.
 - Elevated approval is still required for scripts and elevated fallback operations.
 - Write mode off for first ChatGPT test: ${writeMode === "off" ? "yes" : "no - set off before first test"}
 - Write mode defaults to off: yes
 - Audit log: ${localConfig.auditLog}
 - Require git root: ${localConfig.requireGitRoot ? "yes" : "no"}
-- Figma token configured: ${getLauncherFigmaStatus(repoRoot, env).configured ? "yes" : "no"} (${getLauncherFigmaStatus(repoRoot, env).source})
-- Figma token value: not displayed or written by the launcher.
-- Figma MCP endpoint: ${getLauncherFigmaStatus(repoRoot, env).figmaMcp.endpoint}
-- Figma MCP mode: ${getLauncherFigmaStatus(repoRoot, env).figmaMcp.mode}
+- Legacy direct Figma tools removed: yes
+- Figma broker status: ${getLauncherFigmaStatus(repoRoot, env).figmaMcp.connectionStatus}
+- Figma arbitrary upstream MCP passthrough: no
 
 ## Scope Mapping
 
-- files.read: list_project_files, read_project_file, search_project_files, git_status, git_diff, get_write_access_status, and tools/list.
-- files.write: propose_patch, write_markdown_artifact, apply_approved_patch, fetch_figma_frame_image, create_figma_handoff_package, create_codex_ui_handoff_prompt, run_figma_make_handoff, run_figma_make_file_handoff, and run_allowed_script.
-- write_markdown_artifact requires writeMode docs, patch, or elevated.
-- apply_approved_patch requires writeMode patch or elevated and a matching pending proposal unless elevated approval is supplied in elevated mode.
-- run_allowed_script requires writeMode elevated, an allowlisted command, and the elevated approval token.
+- files.read: tools/list and the seven public toolbox tools: repo_toolbox, git_toolbox, artifact_toolbox, diagnostics_toolbox, integration_toolbox, browser_toolbox, and knowledge_toolbox.
+- files.write: required inside toolbox actions that write, including repo_toolbox.write_markdown_artifact, repo_toolbox.write_json_artifact, repo_toolbox.propose_patch, repo_toolbox.apply_approved_patch, integration_toolbox.prepare_external_handoff, and git_toolbox write actions.
+- repo_toolbox.write_markdown_artifact and repo_toolbox.write_json_artifact require writeMode docs, patch, or elevated.
+- repo_toolbox.apply_approved_patch requires writeMode patch or elevated and a matching pending proposal unless elevated approval is supplied in elevated mode.
+- run_allowed_script is not exposed publicly.
 
 ## DNS / Tunnel Checklist
 

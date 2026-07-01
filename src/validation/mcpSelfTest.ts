@@ -67,31 +67,18 @@ export interface RunMcpSelfTestOptions {
 }
 
 const REQUIRED_READ_TOOLS = [
-  "list_project_files",
-  "read_project_file",
-  "search_project_files",
   "repo_toolbox",
   "git_toolbox",
   "artifact_toolbox",
   "diagnostics_toolbox",
   "integration_toolbox",
   "browser_toolbox",
-  "knowledge_toolbox",
-  "git_status",
-  "git_diff",
-  "get_workspace_status_summary",
-  "get_change_set_readiness_summary",
-  "get_release_artifact_summary",
-  "get_release_publication_summary",
-  "get_builder_report_index",
-  "get_builder_report_summary",
-  "get_write_access_status",
-  "pre_commit_safety_scan",
-  "get_commit_readiness"
+  "knowledge_toolbox"
 ] as const;
 
 const REQUIRED_GATED_TOOLS = [
   "write_markdown_artifact",
+  "write_json_artifact",
   "propose_patch",
   "apply_approved_patch",
   "prepare_git_work_branch",
@@ -352,8 +339,17 @@ export function evaluateToolsListSchemaValid(config: AppConfig): McpSelfTestChec
     });
   }
 
+  const exposedToolNames = result.tools.map((tool) => tool.name);
+  if (exposedToolNames.length !== TOOLBOX_TOOLS.length || exposedToolNames.some((toolName, index) => toolName !== TOOLBOX_TOOLS[index])) {
+    return fail("TOOLS_LIST_SCHEMA_VALID", "tools/list did not expose exactly the seven public toolbox tools.", {
+      expectedToolNames: [...TOOLBOX_TOOLS],
+      exposedToolNames
+    });
+  }
+
   return pass("TOOLS_LIST_SCHEMA_VALID", "tools/list payload validates against the MCP SDK schema.", {
     exposedToolCount: result.tools.length,
+    exposedToolNames,
     schemaValidToolCount: diagnostics.schemaValidToolCount
   });
 }
@@ -738,8 +734,8 @@ export async function runElevatedScriptGatedCheck(): Promise<McpSelfTestCheck> {
   const auditRoot = fs.mkdtempSync(path.join(os.tmpdir(), "champcity-mcp-self-test-audit-"));
 
   try {
-    const blockedModes: WriteMode[] = ["off", "docs", "patch"];
-    const exposedInBlockedModes = blockedModes.filter((writeMode) => {
+    const checkedModes: WriteMode[] = ["off", "docs", "patch", "elevated"];
+    const exposedInAnyMode = checkedModes.filter((writeMode) => {
       const diagnostics = getToolExposureDiagnostics(makeConfig(tempRoot, auditRoot, writeMode, { requireGitRoot: false }), {
         scope: "files.read files.write"
       });
@@ -753,7 +749,6 @@ export async function runElevatedScriptGatedCheck(): Promise<McpSelfTestCheck> {
       requireGitRoot: false,
       writeApprovalToken: { source: "env", token: testApprovalValue }
     });
-    const elevatedDiagnostics = getToolExposureDiagnostics(elevatedConfig, { scope: "files.read files.write" });
     let error: unknown;
 
     try {
@@ -766,17 +761,16 @@ export async function runElevatedScriptGatedCheck(): Promise<McpSelfTestCheck> {
     const missingTokenDenied =
       structuredError?.code === "APPROVAL_REQUIRED" && /approval token is required/iu.test(structuredError.message);
 
-    if (exposedInBlockedModes.length > 0 || !elevatedDiagnostics.exposedToolNames.includes("run_allowed_script") || !missingTokenDenied) {
-      return fail("ELEVATED_SCRIPT_GATED", "run_allowed_script gating did not match write-mode and approval-token requirements.", {
-        exposedInBlockedModes,
-        elevatedExposesRunAllowedScript: elevatedDiagnostics.exposedToolNames.includes("run_allowed_script"),
+    if (exposedInAnyMode.length > 0 || !missingTokenDenied) {
+      return fail("ELEVATED_SCRIPT_GATED", "run_allowed_script public hiding or internal approval-token enforcement failed.", {
+        exposedInAnyMode,
         missingTokenDenied
       });
     }
 
-    return pass("ELEVATED_SCRIPT_GATED", "run_allowed_script stays hidden outside elevated mode and denies elevated calls without approval.", {
-      blockedModes,
-      elevatedExposesRunAllowedScript: true,
+    return pass("ELEVATED_SCRIPT_GATED", "run_allowed_script is hidden from the public toolbox surface and still denies internal calls without approval.", {
+      checkedModes,
+      publicExposure: false,
       missingTokenDenied: true
     });
   } finally {

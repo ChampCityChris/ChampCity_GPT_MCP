@@ -10,10 +10,7 @@ import { readLastMcpDiscoveryTrace } from "../server/discoveryTrace.js";
 import { serializeError, AppError } from "../utils/errors.js";
 import { runGit } from "../utils/git.js";
 import { getBuilderReportIndex, getBuilderReportSummary } from "./builderReportFacade.js";
-import {
-  createCodexUiHandoffPromptTool,
-  getFigmaStatusTool
-} from "./figma/index.js";
+import { applyApprovedPatch } from "./applyApprovedPatch.js";
 import { commitValidatedChanges } from "./gitWorkflow/commitValidatedChanges.js";
 import { getCommitReadiness } from "./gitWorkflow/getCommitReadiness.js";
 import { preCommitSafetyScan } from "./gitWorkflow/preCommitSafetyScan.js";
@@ -28,12 +25,18 @@ import {
 } from "./publicSafeFacade.js";
 import { gitDiff } from "./gitDiff.js";
 import { listProjectFiles } from "./listProjectFiles.js";
+import { proposePatch } from "./proposePatch.js";
 import { readProjectFile } from "./readProjectFile.js";
 import { searchProjectFiles } from "./searchProjectFiles.js";
+import { writeJsonArtifact } from "./writeJsonArtifact.js";
 import { writeMarkdownArtifact } from "./writeMarkdownArtifact.js";
 import {
   MAX_GLOB_LENGTH,
+  MAX_APPROVAL_TOKEN_LENGTH,
+  MAX_JSON_ARTIFACT_CONTENT_LENGTH,
   MAX_MARKDOWN_ARTIFACT_CONTENT_LENGTH,
+  MAX_PATCH_LENGTH,
+  MAX_PROPOSE_PATCH_TEXT_LENGTH,
   MAX_QUERY_LENGTH,
   MAX_RELATIVE_PATH_LENGTH
 } from "./inputLimits.js";
@@ -150,6 +153,33 @@ const RepoWriteMarkdownParamsSchema = z
     overwrite: z.boolean().default(false)
   })
   .strict();
+const RepoWriteJsonParamsSchema = z
+  .object({
+    relativePath: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH),
+    content: z.string().max(MAX_JSON_ARTIFACT_CONTENT_LENGTH),
+    overwrite: z.boolean().default(false)
+  })
+  .strict();
+const RepoPatchChangeParamsSchema = z
+  .object({
+    relativePath: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH),
+    originalText: z.string().max(MAX_PROPOSE_PATCH_TEXT_LENGTH),
+    replacementText: z.string().max(MAX_PROPOSE_PATCH_TEXT_LENGTH)
+  })
+  .strict();
+const RepoProposePatchParamsSchema = z
+  .object({
+    changes: z.array(RepoPatchChangeParamsSchema).min(1).max(50)
+  })
+  .strict();
+const RepoApplyApprovedPatchParamsSchema = z
+  .object({
+    patch: z.string().min(1).max(MAX_PATCH_LENGTH),
+    proposalId: z.string().uuid().optional(),
+    patchHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    approvalToken: z.string().max(MAX_APPROVAL_TOKEN_LENGTH).optional()
+  })
+  .strict();
 
 const GitDiffParamsSchema = z
   .object({
@@ -220,15 +250,6 @@ const ReleasePublicationParamsSchema = z
     includeAssets: z.boolean().default(false)
   })
   .strict();
-const CodexHandoffPromptParamsSchema = z
-  .object({
-    handoffPath: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH),
-    targetFile: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH).default("docs/handoffs/CODEX_UI_REDESIGN_HANDOFF.md"),
-    targetArea: z.string().max(500).optional(),
-    overwrite: z.boolean().default(false)
-  })
-  .strict();
-
 const IntegrationServiceParamsSchema = z
   .object({
     serviceId: z.string().min(1).max(64).regex(SERVICE_ID_PATTERN)
@@ -247,7 +268,16 @@ const BrowserEndpointParamsSchema = z
   })
   .strict();
 
-const SUPPORTED_REPO_ACTIONS = ["status", "list_files", "read_file", "search_files", "write_markdown_artifact"] as const;
+const SUPPORTED_REPO_ACTIONS = [
+  "status",
+  "list_files",
+  "read_file",
+  "search_files",
+  "write_markdown_artifact",
+  "write_json_artifact",
+  "propose_patch",
+  "apply_approved_patch"
+] as const;
 const SUPPORTED_GIT_ACTIONS = [
   "status",
   "diff",
@@ -263,8 +293,7 @@ const SUPPORTED_ARTIFACT_ACTIONS = [
   "builder_report_summary",
   "release_artifact_summary",
   "release_publication_summary",
-  "local_package_summary",
-  "create_codex_handoff_prompt"
+  "local_package_summary"
 ] as const;
 const SUPPORTED_DIAGNOSTICS_ACTIONS = [
   "runtime_status",
@@ -303,8 +332,8 @@ export const SUPPORTED_INTEGRATION_SERVICES = [
 type IntegrationServiceId = (typeof SUPPORTED_INTEGRATION_SERVICES)[number];
 
 const INTEGRATION_SERVICE_CAPABILITIES: Record<IntegrationServiceId, string[]> = {
-  figma: ["status", "configuration validation", "legacy Figma tools retained outside toolbox"],
-  figma_make: ["status", "configuration validation", "handoff preparation guidance"],
+  figma: ["governed broker placeholder", "legacy direct Figma tools removed", "no arbitrary upstream MCP passthrough"],
+  figma_make: ["governed broker placeholder", "legacy direct Figma Make handoff removed", "no arbitrary upstream MCP passthrough"],
   github: ["status placeholder", "handoff preparation guidance"],
   cloudflare: ["status placeholder", "public endpoint handoff guidance"],
   playwright: ["status placeholder", "browser automation deferred"],
@@ -537,6 +566,21 @@ export async function repoToolbox(rawInput: unknown, config: AppConfig, context:
         const params = RepoWriteMarkdownParamsSchema.parse(input.params);
         return ok("repo_toolbox", input.action, await writeMarkdownArtifact({ root, ...params }, config));
       }
+      case "write_json_artifact": {
+        assertFilesWrite(context, "write_json_artifact", "repo_toolbox", input.action);
+        const params = RepoWriteJsonParamsSchema.parse(input.params);
+        return ok("repo_toolbox", input.action, await writeJsonArtifact({ root, ...params }, config));
+      }
+      case "propose_patch": {
+        assertFilesWrite(context, "propose_patch", "repo_toolbox", input.action);
+        const params = RepoProposePatchParamsSchema.parse(input.params);
+        return ok("repo_toolbox", input.action, await proposePatch({ root, ...params }, config));
+      }
+      case "apply_approved_patch": {
+        assertFilesWrite(context, "apply_approved_patch", "repo_toolbox", input.action);
+        const params = RepoApplyApprovedPatchParamsSchema.parse(input.params);
+        return ok("repo_toolbox", input.action, await applyApprovedPatch({ root, ...params }, config));
+      }
       default:
         return supportedActionError("repo_toolbox", input.action, SUPPORTED_REPO_ACTIONS);
     }
@@ -632,12 +676,6 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
       case "local_package_summary":
         EmptyParamsSchema.parse(input.params);
         return ok("artifact_toolbox", input.action, localPackageSummary(resolveWorkspaceRoot(input.workspaceId, config)));
-      case "create_codex_handoff_prompt": {
-        assertFilesWrite(context, "create_codex_ui_handoff_prompt", "artifact_toolbox", input.action);
-        const root = resolveWorkspaceRoot(input.workspaceId, config);
-        const params = CodexHandoffPromptParamsSchema.parse(input.params);
-        return ok("artifact_toolbox", input.action, await createCodexUiHandoffPromptTool({ root, ...params }, config));
-      }
       default:
         return supportedActionError("artifact_toolbox", input.action, SUPPORTED_ARTIFACT_ACTIONS);
     }
@@ -713,23 +751,14 @@ function assertSupportedService(serviceId: string): asserts serviceId is Integra
   }
 }
 
-async function serviceStatus(serviceId: IntegrationServiceId, config: AppConfig) {
-  if (serviceId === "figma") {
+async function serviceStatus(serviceId: IntegrationServiceId, _config: AppConfig) {
+  if (serviceId === "figma" || serviceId === "figma_make") {
     return {
       serviceId,
-      status: await getFigmaStatusTool({}, config),
-      legacyToolsRetained: true,
-      governedBrokerOnly: true
-    };
-  }
-
-  if (serviceId === "figma_make") {
-    return {
-      serviceId,
-      status: "configuration_probe_deferred",
-      legacyToolsRetained: true,
+      status: "broker_not_implemented",
       governedBrokerOnly: true,
-      arbitraryUpstreamMcpPassthrough: false
+      arbitraryUpstreamMcpPassthrough: false,
+      legacyDirectFigmaToolsRemoved: true
     };
   }
 
@@ -748,6 +777,8 @@ function serviceCapabilities(serviceId: IntegrationServiceId) {
     capabilities: INTEGRATION_SERVICE_CAPABILITIES[serviceId],
     safetyModel: {
       allowlistedService: true,
+      governedBrokerOnly: serviceId === "figma" || serviceId === "figma_make" ? true : undefined,
+      legacyDirectFigmaToolsRemoved: serviceId === "figma" || serviceId === "figma_make" ? true : undefined,
       arbitraryUpstreamToolNameAccepted: false,
       arbitraryServerUrlAccepted: false,
       rawTokensAccepted: false,
@@ -757,9 +788,26 @@ function serviceCapabilities(serviceId: IntegrationServiceId) {
 }
 
 function validateServiceConfiguration(serviceId: IntegrationServiceId) {
+  if (serviceId === "figma" || serviceId === "figma_make") {
+    return {
+      serviceId,
+      status: "broker_not_implemented",
+      governedBrokerOnly: true,
+      arbitraryUpstreamMcpPassthrough: false,
+      legacyDirectFigmaToolsRemoved: true,
+      validatable: "broker_not_implemented",
+      rawTokenAccepted: false,
+      arbitraryServerUrlAccepted: false,
+      recommendedNextSteps: [
+        "Configure future governed broker support through a scoped Work Card.",
+        "Do not paste Figma tokens, cookies, private URLs, or upstream MCP server details into ChatGPT."
+      ]
+    };
+  }
+
   return {
     serviceId,
-    validatable: serviceId === "figma" || serviceId === "figma_make" ? "legacy_status_available" : "placeholder_only",
+    validatable: "placeholder_only",
     requiresOperatorConfiguration: serviceId !== "custom",
     arbitraryServerUrlAccepted: false,
     rawTokenAccepted: false,

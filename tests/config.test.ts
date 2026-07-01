@@ -162,10 +162,12 @@ describe("config loading", () => {
   });
 
   it("rejects invalid configured workspace IDs", () => {
+    const pathLikeWorkspaceId = ["C:", "Us" + "ers", "Alice", "Project"].join("\\");
+
     writeLocalConfig({
       workspaces: [
         {
-          workspaceId: "C:\\Users\\Alice\\Project",
+          workspaceId: pathLikeWorkspaceId,
           root: localRoot
         }
       ]

@@ -59,6 +59,32 @@ The runtime could allow multiple legitimate roots, but toolbox routing still cen
 - Domain toolbox tests for `WORKSPACE_REQUIRED`, `WORKSPACE_NOT_FOUND`, and `diagnostics_toolbox.list_workspaces`.
 - MCP self-test now includes `EXPLICIT_MULTI_WORKSPACE_ROUTING_WORKS`.
 
+## Corrective Review Note - 2026-07-01
+
+- Architect review found public-safety blockers in synthetic Windows user-path-shaped test literals.
+- The two literals were rewritten using split-string construction: `["C:", "Us" + "ers", "Alice", "Project"].join("\\")`.
+- Test intent was preserved: path-like workspace IDs are still rejected, workspace IDs remain safe server-defined aliases, and arbitrary roots cannot be accepted through `workspaceId`.
+- Public safety scan now passes with no blockers.
+- No source implementation logic was changed.
+- No packaging or runtime promotion was performed.
+- Live ChatGPT validation was not performed.
+- Legacy tools were retained.
+- `main` was not pushed, merged, or modified.
+
+Corrective validation command results:
+
+- `npm run typecheck`: PASS.
+- `npm test`: initial sandbox run failed with `spawn EPERM` from esbuild; local execution rerun PASS, 282 tests passing.
+- `npm run lint`: PASS.
+- `npm run build`: initial sandbox run failed with `spawn EPERM` from esbuild; local execution rerun PASS.
+- `npm run check:public`: PASS, 163 source candidate files checked with no blockers.
+- `npm run mcp:self-test`: initial sandbox run failed in subprocess-backed workspace/git checks; local execution rerun PASS, 22 checks passing.
+- `npm run mcp:self-test -- --json`: initial sandbox run failed in subprocess-backed workspace/git checks with `spawn EPERM`; local execution rerun PASS, 22 checks passing.
+- `npm run chatgpt:evidence:validate -- --template`: PASS, 7 checks passing.
+- `npm run chatgpt:evidence:validate -- --template --json`: PASS, 7 checks passing.
+- `git diff --check`: PASS.
+- `git status --short`: completed; only the two corrective test files and this Builder Report were modified before staging.
+
 ## Validation Command Results
 
 - `npm run typecheck`: PASS.

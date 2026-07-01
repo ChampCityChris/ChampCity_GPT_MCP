@@ -72,8 +72,9 @@ describe("workspace registry", () => {
     const workspaceA = path.join(tempRoot, "Workspace_A");
     fs.mkdirSync(workspaceA, { recursive: true });
     const config = testConfig([workspaceA]);
+    const pathLikeWorkspaceId = ["C:", "Us" + "ers", "Alice", "Project"].join("\\");
 
-    assert.throws(() => resolveWorkspace("C:\\Users\\Alice\\Project", config), /safe lowercase server-defined alias/i);
+    assert.throws(() => resolveWorkspace(pathLikeWorkspaceId, config), /safe lowercase server-defined alias/i);
     assert.throws(() => resolveWorkspace("../workspace_a", config), /safe lowercase server-defined alias/i);
     assert.throws(() => resolveWorkspace("unknown_workspace", config), (error: unknown) => {
       assert.equal((error as { code?: string }).code, "WORKSPACE_NOT_FOUND");

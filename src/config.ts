@@ -17,6 +17,8 @@ import { getRuntimeConfigDir, getRuntimeLogDir } from "./runtimePaths.js";
 export interface AppConfig {
   repoRoot: string;
   allowedRoots: string[];
+  defaultWorkspaceRoot?: string;
+  defaultWorkspaceRootSource?: DefaultWorkspaceRootSource;
   auditLogPath: string;
   requireGitRoot: boolean;
   allowedCommands: string[];
@@ -38,6 +40,8 @@ export const DEFAULT_ALLOWED_COMMANDS = [
   "git status",
   "git diff"
 ];
+
+export type DefaultWorkspaceRootSource = "env" | "local-file" | "repoRoot";
 
 interface LocalConfigFile {
   allowedRoots?: string[];
@@ -141,16 +145,30 @@ function loadLocalConfig(repoRoot: string, env: NodeJS.ProcessEnv): LocalConfigF
   return localConfig;
 }
 
+function isPackagedApplicationRoot(value: string): boolean {
+  return /(?:^|[\\/])app\.asar(?:$|[\\/])/iu.test(path.resolve(value));
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd(), options: LoadConfigOptions = {}): AppConfig {
   const repoRoot = path.resolve(cwd);
   const localConfig = loadLocalConfig(repoRoot, env);
 
   const rawAllowedRoots = splitSemicolonList(env.CHAMPCITY_GPT_ALLOWED_ROOTS);
+  const localAllowedRoots = localConfig.allowedRoots && localConfig.allowedRoots.length > 0 ? localConfig.allowedRoots : [];
+  const defaultWorkspaceRootSource: DefaultWorkspaceRootSource =
+    rawAllowedRoots.length > 0 ? "env" : localAllowedRoots.length > 0 ? "local-file" : "repoRoot";
+  if (defaultWorkspaceRootSource === "repoRoot" && isPackagedApplicationRoot(repoRoot)) {
+    throw new AppError(
+      "INVALID_INPUT",
+      "Packaged runtime workspace configuration is missing. Configure at least one allowed workspace root before starting the MCP server."
+    );
+  }
   const allowedRootSource =
-    rawAllowedRoots.length > 0 ? rawAllowedRoots : localConfig.allowedRoots && localConfig.allowedRoots.length > 0 ? localConfig.allowedRoots : [repoRoot];
+    defaultWorkspaceRootSource === "env" ? rawAllowedRoots : defaultWorkspaceRootSource === "local-file" ? localAllowedRoots : [repoRoot];
   const allowedRoots = allowedRootSource.map((root) =>
     assertAbsolutePath(root, rawAllowedRoots.length > 0 ? "CHAMPCITY_GPT_ALLOWED_ROOTS entry" : "config allowedRoots entry")
   );
+  const defaultWorkspaceRoot = allowedRoots[0];
 
   const auditLogPath = assertAbsolutePath(
     env.CHAMPCITY_GPT_AUDIT_LOG ?? localConfig.auditLog ?? path.join(getRuntimeLogDir(repoRoot, env), "audit.log"),
@@ -165,6 +183,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   return {
     repoRoot,
     allowedRoots,
+    defaultWorkspaceRoot,
+    defaultWorkspaceRootSource,
     auditLogPath,
     requireGitRoot,
     allowedCommands: allowedCommands.length > 0 ? allowedCommands : localConfig.allowedCommands && localConfig.allowedCommands.length > 0 ? localConfig.allowedCommands : DEFAULT_ALLOWED_COMMANDS,

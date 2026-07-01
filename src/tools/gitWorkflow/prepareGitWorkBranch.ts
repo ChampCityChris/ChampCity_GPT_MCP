@@ -7,6 +7,7 @@ import { type AppConfig } from "../../config.js";
 import { resolveAllowedRoot } from "../../security/pathPolicy.js";
 import { AppError } from "../../utils/errors.js";
 import { runGit, type ProcessResult } from "../../utils/git.js";
+import { resolveDefaultWorkspaceRoot } from "../../workspaceRoot.js";
 import { MAX_RELATIVE_PATH_LENGTH } from "../inputLimits.js";
 import { auditGitWorkflow, auditGitWorkflowError } from "./audit.js";
 import { currentBranch, parseStatusPaths, sanitizeProcessText, statusShort, uniqueSorted } from "./safety.js";
@@ -123,10 +124,10 @@ function publicWorkspaceIds(workspaces: WorkspaceOption[]): string[] {
 async function workspaceOptions(config: AppConfig): Promise<WorkspaceOption[]> {
   let defaultRoot: string;
   try {
-    defaultRoot = resolveAllowedRoot(config.repoRoot, config.allowedRoots).rootRealPath;
+    defaultRoot = resolveDefaultWorkspaceRoot(config);
   } catch (error) {
     if (error instanceof AppError) {
-      throw new AppError(error.code, "Configured default workspace is not in the allowed root list.");
+      throw new AppError(error.code, error.message);
     }
     throw error;
   }

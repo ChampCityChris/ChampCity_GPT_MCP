@@ -9,6 +9,7 @@ import { getOAuthEndpointPaths, scopeIncludes } from "../oauth.js";
 import { readLastMcpDiscoveryTrace } from "../server/discoveryTrace.js";
 import { serializeError, AppError } from "../utils/errors.js";
 import { runGit } from "../utils/git.js";
+import { resolveDefaultWorkspaceRoot } from "../workspaceRoot.js";
 import { getBuilderReportIndex, getBuilderReportSummary } from "./builderReportFacade.js";
 import {
   createCodexUiHandoffPromptTool,
@@ -325,7 +326,7 @@ function repoRootForDefaultWorkspace(workspaceId: string, config: AppConfig): st
     });
   }
 
-  return config.repoRoot;
+  return resolveDefaultWorkspaceRoot(config);
 }
 
 function assertFilesWrite(context: ToolboxRuntimeContext, mappedToolName: string, toolbox: ToolboxName, action: string): void {
@@ -590,9 +591,9 @@ export async function gitToolbox(rawInput: unknown, config: AppConfig, context: 
   });
 }
 
-function localPackageSummary(config: AppConfig) {
-  const packageJson = readPackageJson(config.repoRoot);
-  const builderConfig = readOptionalJson(config.repoRoot, "electron-builder.json");
+function localPackageSummary(root: string) {
+  const packageJson = readPackageJson(root);
+  const builderConfig = readOptionalJson(root, "electron-builder.json");
   const directories = builderConfig.directories && typeof builderConfig.directories === "object" ? builderConfig.directories as Record<string, unknown> : {};
   const win = builderConfig.win && typeof builderConfig.win === "object" ? builderConfig.win as Record<string, unknown> : {};
 
@@ -632,8 +633,7 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
       }
       case "local_package_summary":
         EmptyParamsSchema.parse(input.params);
-        repoRootForDefaultWorkspace(input.workspaceId, config);
-        return ok("artifact_toolbox", input.action, localPackageSummary(config));
+        return ok("artifact_toolbox", input.action, localPackageSummary(repoRootForDefaultWorkspace(input.workspaceId, config)));
       case "create_codex_handoff_prompt": {
         assertFilesWrite(context, "create_codex_ui_handoff_prompt", "artifact_toolbox", input.action);
         const root = repoRootForDefaultWorkspace(input.workspaceId, config);

@@ -6,7 +6,7 @@ import path from "node:path";
 import { z } from "zod";
 
 import { type AppConfig } from "../config.js";
-import { resolveAllowedRoot } from "../security/pathPolicy.js";
+import { resolveDefaultWorkspaceRoot } from "../workspaceRoot.js";
 import { AppError } from "../utils/errors.js";
 import { runGit, type ProcessResult } from "../utils/git.js";
 import { withAudit } from "./common.js";
@@ -140,10 +140,10 @@ function resolveWorkspace(workspaceId: string, config: AppConfig): WorkspaceCont
 
   let root: string;
   try {
-    root = resolveAllowedRoot(config.repoRoot, config.allowedRoots).rootRealPath;
+    root = resolveDefaultWorkspaceRoot(config);
   } catch (error) {
     if (error instanceof AppError) {
-      throw new AppError(error.code, "Configured workspace is not in the allowed root list.");
+      throw new AppError(error.code, error.message);
     }
     throw error;
   }

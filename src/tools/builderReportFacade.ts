@@ -11,6 +11,7 @@ import { assertReadableTextFile, getFilePolicyDenial } from "../security/filePol
 import { assertSafeRelativePath, isPathInside, resolveAllowedRoot, toRootRelativePath } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
 import { runGit } from "../utils/git.js";
+import { resolveDefaultWorkspaceRoot } from "../workspaceRoot.js";
 import { withAudit } from "./common.js";
 import { MAX_RELATIVE_PATH_LENGTH } from "./inputLimits.js";
 
@@ -163,10 +164,10 @@ function publicWorkspaceIds(workspaces: WorkspaceOption[], includeAllAllowed: bo
 async function workspaceOptions(config: AppConfig): Promise<WorkspaceOption[]> {
   let defaultRoot: string;
   try {
-    defaultRoot = resolveAllowedRoot(config.repoRoot, config.allowedRoots).rootRealPath;
+    defaultRoot = resolveDefaultWorkspaceRoot(config);
   } catch (error) {
     if (error instanceof AppError) {
-      throw new AppError(error.code, "Configured default workspace is not in the allowed root list.");
+      throw new AppError(error.code, error.message);
     }
     throw error;
   }

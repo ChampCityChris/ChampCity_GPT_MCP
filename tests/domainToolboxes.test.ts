@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { type AppConfig } from "../src/config.js";
 import { createToolboxRuntimeContext } from "../src/server/registerTools.js";
+import { gitStatus as legacyGitStatus } from "../src/tools/gitStatus.js";
 import {
+  artifactToolbox,
   browserToolbox,
   buildRuntimeScopeToolDiagnostics,
   diagnosticsToolbox,
@@ -17,6 +19,7 @@ import {
   repoToolbox
 } from "../src/tools/domainToolboxes.js";
 import { getWriteAccessStatus } from "../src/tools/getWriteAccessStatus.js";
+import { readProjectFile } from "../src/tools/readProjectFile.js";
 
 let tempRoot: string;
 let auditRoot: string;
@@ -60,10 +63,18 @@ function initRepo(): void {
   git(["checkout", "-b", "dev"]);
 }
 
-function testConfig(writeMode: AppConfig["writeMode"] = "off", root = tempRoot): AppConfig {
+function testConfig(
+  writeMode: AppConfig["writeMode"] = "off",
+  root = tempRoot,
+  allowedRoots = [root],
+  defaultWorkspaceRoot = root,
+  defaultWorkspaceRootSource: AppConfig["defaultWorkspaceRootSource"] = "repoRoot"
+): AppConfig {
   return {
     repoRoot: root,
-    allowedRoots: [root],
+    allowedRoots,
+    defaultWorkspaceRoot,
+    defaultWorkspaceRootSource,
     auditLogPath: path.join(auditRoot, "audit.log"),
     requireGitRoot: true,
     allowedCommands: [],
@@ -125,6 +136,69 @@ describe("stable domain toolbox tools", () => {
     assert.equal(gitResult.ok, false);
     assert.equal(gitResult.error?.code, "INVALID_INPUT");
     assert.ok(Array.isArray(gitResult.error?.details?.supportedActions));
+  });
+
+  it("routes default toolbox workspaces to the configured allowed root in packaged runtime configs", async () => {
+    initRepo();
+    writeFile(
+      "planning/phases/phase-v1.0/Builder_Reports/BUILDER_REPORT_WC-V1-FIX03_toolbox_default_workspace_routing.md",
+      "# Packaged Workspace Report\n\nConfigured default workspace marker.\n"
+    );
+    const packagedAppRoot = path.join(auditRoot, "resources", "app.asar");
+    fs.mkdirSync(packagedAppRoot, { recursive: true });
+    fs.writeFileSync(path.join(packagedAppRoot, "package.json"), JSON.stringify({ name: "champcity-gpt", version: "0.1.2" }), "utf8");
+    const config = testConfig("off", packagedAppRoot, [tempRoot], tempRoot, "local-file");
+    const toolboxContext = context(config, "files.read");
+
+    const repoRead = await repoToolbox(
+      { action: "read_file", params: { relativePath: "README.md" } },
+      config,
+      toolboxContext
+    );
+    const repoStatus = await repoToolbox({ action: "status" }, config, toolboxContext);
+    const gitStatusResult = await gitToolbox({ action: "status" }, config, toolboxContext);
+    const reportSummary = await artifactToolbox(
+      {
+        action: "builder_report_summary",
+        params: {
+          phaseFolder: "phase-v1.0",
+          workCardId: "WC-V1-FIX03"
+        }
+      },
+      config,
+      toolboxContext
+    );
+
+    assert.equal(repoRead.ok, true);
+    assert.equal((repoRead.result as { relativePath?: string }).relativePath, "README.md");
+    assert.match((repoRead.result as { content?: string }).content ?? "", /# Test/u);
+    assert.equal(repoStatus.ok, true);
+    assert.equal((repoStatus.result as { branch?: string }).branch, "dev");
+    assert.equal(gitStatusResult.ok, true);
+    assert.equal((gitStatusResult.result as { branch?: string }).branch, "dev");
+    assert.equal(reportSummary.ok, true);
+    assert.equal((reportSummary.result as { matched?: boolean }).matched, true);
+    assert.match((reportSummary.result as { contentPreview?: string }).contentPreview ?? "", /Configured default workspace marker/u);
+
+    const unknownWorkspace = await repoToolbox(
+      { action: "status", workspaceId: "unknown_workspace" },
+      config,
+      toolboxContext
+    );
+    const rootParamSmuggle = await repoToolbox(
+      { action: "read_file", params: { root: packagedAppRoot, relativePath: "README.md" } },
+      config,
+      toolboxContext
+    );
+    const legacyRead = await readProjectFile({ root: tempRoot, relativePath: "README.md" }, config);
+    const legacyGit = await legacyGitStatus({ root: tempRoot }, config);
+
+    assert.equal(unknownWorkspace.ok, false);
+    assert.equal(unknownWorkspace.error?.code, "INVALID_INPUT");
+    assert.equal(rootParamSmuggle.ok, false);
+    assert.equal(rootParamSmuggle.error?.code, "INVALID_INPUT");
+    assert.equal(legacyRead.relativePath, "README.md");
+    assert.equal(legacyGit.branch, "dev");
   });
 
   it("git_toolbox.prepare_work_branch delegates to the safe branch tool in a temp repo", async () => {

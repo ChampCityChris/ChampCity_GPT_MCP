@@ -53,21 +53,21 @@ Local deterministic checks do not replace live ChatGPT connector validation.
 
 | Test ID | Status | Tool count observed | Required tools visible | Missing tools | ChatGPT safety-layer behavior | Sanitized evidence excerpt | Failure classification | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| CAV-011 | NOT_RUN |  | `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary` |  |  |  |  | A namespace visible with zero tools is a failure. |
+| CAV-011 | NOT_RUN |  | `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, `knowledge_toolbox` |  |  |  |  | A namespace visible with zero tools is a failure. |
 
-Also record any other required tools from the acceptance matrix that are visible in the live ChatGPT `tools/list` result.
+Also record any unexpected legacy top-level tools visible in the live ChatGPT `tools/list` result. `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, and `get_builder_report_summary` are retained implementation/facade names but should be reached through toolbox actions rather than appearing as public top-level tools.
 
 ## 5. Live successful safe tool-call evidence
 
 | Test ID | Tool name | Operator prompt used | Expected behavior | Actual behavior | Status | Sanitized result excerpt | Failure classification | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| CAV-012 | `get_workspace_status_summary` |  | Read-only repo status succeeds. |  | NOT_RUN |  |  |  |
-| CAV-012 | `get_change_set_readiness_summary` |  | Read-only change-set readiness succeeds. |  | NOT_RUN |  |  |  |
-| CAV-013 | `read_project_file` or `search_project_files` with a narrow safe path |  | Safe read/search succeeds without exposing blocked files. |  | NOT_RUN |  |  |  |
-| CAV-014 | `write_markdown_artifact` when current mode and scope allow it |  | Safe docs-write artifact creation succeeds only when allowed. |  | NOT_RUN |  |  | Optional if the validation pass includes docs-write success. |
-| CAV-021 | `get_workspace_status_summary` / `get_change_set_readiness_summary` |  | Git status/readiness workflow avoids safety-layer false positives. |  | NOT_RUN |  |  |  |
-| CAV-023 | `get_release_artifact_summary` / `get_release_publication_summary` |  | Release baseline/status workflow is read-only and safety-layer compatible. |  | NOT_RUN |  |  |  |
-| CAV-033 | `get_builder_report_index` / `get_builder_report_summary` |  | Builder Report discovery avoids broad recursive glob false positives. |  | NOT_RUN |  |  |  |
+| CAV-012 | `repo_toolbox.status` |  | Read-only repo status succeeds. |  | NOT_RUN |  |  | Uses the `get_workspace_status_summary` facade behavior through the toolbox. |
+| CAV-012 | `git_toolbox.readiness_summary` |  | Read-only change-set readiness succeeds. |  | NOT_RUN |  |  | Uses the `get_change_set_readiness_summary` facade behavior through the toolbox. |
+| CAV-013 | `repo_toolbox.read_file` or `repo_toolbox.search_files` with a narrow safe path |  | Safe read/search succeeds without exposing blocked files. |  | NOT_RUN |  |  |  |
+| CAV-014 | `repo_toolbox.write_markdown_artifact` when current mode and scope allow it |  | Safe docs-write artifact creation succeeds only when allowed. |  | NOT_RUN |  |  | Optional if the validation pass includes docs-write success. |
+| CAV-021 | `repo_toolbox.status` / `git_toolbox.readiness_summary` |  | Git status/readiness workflow avoids safety-layer false positives. |  | NOT_RUN |  |  |  |
+| CAV-023 | `artifact_toolbox.release_artifact_summary` / `artifact_toolbox.release_publication_summary` |  | Release baseline/status workflow is read-only and safety-layer compatible. |  | NOT_RUN |  |  | Uses the `get_release_artifact_summary` and `get_release_publication_summary` facade behavior through the toolbox. |
+| CAV-033 | `artifact_toolbox.builder_report_index` / `artifact_toolbox.builder_report_summary` |  | Builder Report discovery avoids broad recursive glob false positives. |  | NOT_RUN |  |  | Uses the `get_builder_report_index` and `get_builder_report_summary` facade behavior through the toolbox. |
 
 ## 6. Live denied unsafe/gated-call evidence
 
@@ -85,11 +85,11 @@ Do not retest unsafe or broad legacy calls unless the operator explicitly choose
 
 | Legacy pattern | Safe replacement | Live replacement status | Legacy retest performed: yes/no | Notes |
 | --- | --- | --- | --- | --- |
-| `git_status` blocked | `get_workspace_status_summary` | NOT_RUN | no | CAV-030 |
-| `get_commit_readiness` blocked | `get_change_set_readiness_summary` | NOT_RUN | no | CAV-030 |
-| `list_project_files` with `release/*.exe` blocked | `get_release_artifact_summary` | NOT_RUN | no | CAV-030 |
-| `run_allowed_script` with release lookup blocked | `get_release_publication_summary` | NOT_RUN | no | CAV-030 |
-| `list_project_files` with `planning/phases` plus broad Builder Report glob blocked | `get_builder_report_index` / `get_builder_report_summary` | NOT_RUN | no | CAV-030 and CAV-033 |
+| `git_status` blocked | `repo_toolbox.status` using `get_workspace_status_summary` facade behavior | NOT_RUN | no | CAV-030 |
+| `get_commit_readiness` blocked | `git_toolbox.readiness_summary` using `get_change_set_readiness_summary` facade behavior | NOT_RUN | no | CAV-030 |
+| `list_project_files` with `release/*.exe` blocked | `artifact_toolbox.release_artifact_summary` using `get_release_artifact_summary` facade behavior | NOT_RUN | no | CAV-030 |
+| `run_allowed_script` with release lookup blocked | `artifact_toolbox.release_publication_summary` using `get_release_publication_summary` facade behavior | NOT_RUN | no | CAV-030 |
+| `list_project_files` with `planning/phases` plus broad Builder Report glob blocked | `artifact_toolbox.builder_report_index` / `artifact_toolbox.builder_report_summary` using `get_builder_report_index` / `get_builder_report_summary` facade behavior | NOT_RUN | no | CAV-030 and CAV-033 |
 
 ## 8. Failure classification
 

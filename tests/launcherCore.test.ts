@@ -115,6 +115,24 @@ describe("launcher client config generation", () => {
     assert.doesNotMatch(setupNotes, /oauth-tokens\.local\.json/u);
   });
 
+  it("does not include local allowed-root or audit-log paths in generated ChatGPT notes", () => {
+    writeLocalConfig(tempRoot, {
+      allowedRoots: [tempRoot],
+      requireGitRoot: true,
+      auditLog: getAuditLogPath(tempRoot),
+      allowedCommands: DEFAULT_ALLOWED_COMMANDS
+    });
+
+    const previews = createClientConfigPreviews(tempRoot);
+    const escapedTempRoot = tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+    assert.match(previews.chatgptNotes, /Allowed root count: 1/u);
+    assert.match(previews.chatgptNotes, /Audit log path: not included/u);
+    assert.match(previews.chatgptNotes, /OAuth client registry path: not included/u);
+    assert.doesNotMatch(previews.chatgptNotes, new RegExp(escapedTempRoot, "u"));
+    assert.doesNotMatch(previews.chatgptNotes, /logs[\\/]+audit\.log/u);
+  });
+
   it("does not include raw write approval tokens in generated notes", () => {
     writeLocalConfig(tempRoot, {
       allowedRoots: [tempRoot],

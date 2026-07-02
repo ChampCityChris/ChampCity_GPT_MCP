@@ -31,7 +31,7 @@ Local unauthenticated testing is only for localhost and must not be tunneled.
 
 ## OAuth Metadata And Flow
 
-ChatGPT custom MCP apps use OAuth. Discovery endpoints for a placeholder public base URL are:
+ChatGPT custom MCP apps use OAuth. OAuth with Dynamic Client Registration is the standard public connector path for v1.0; bearer/PAT/manual-header setup is not the normal public path. Discovery endpoints for a placeholder public base URL are:
 
 ```text
 https://mcp.example.com/.well-known/oauth-protected-resource
@@ -47,7 +47,7 @@ https://mcp.example.com/oauth/authorize
 https://mcp.example.com/oauth/token
 ```
 
-Dynamic client registration stores ChatGPT clients in runtime-local `oauth-clients.local.json`, which is ignored by git. The approval page requires the local OAuth admin password configured in the desktop launcher and never displays tokens or passwords.
+Dynamic client registration stores ChatGPT client metadata in a runtime-local ignored OAuth registry. The approval page requires the local OAuth admin password configured in the desktop launcher and never displays tokens or passwords.
 
 ## DNS Concept
 
@@ -94,7 +94,7 @@ https://mcp.example.com/mcp
 - `files.write` allows write-capable toolbox actions only when local `writeMode` also permits the requested operation.
 - Use `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` only for local unauthenticated testing.
 - Local unauthenticated mode is `LOCAL TEST ONLY - DO NOT TUNNEL.`
-- Treat the legacy bearer token as a development/private-connector safeguard, not the ChatGPT connector auth path.
+- Treat the legacy bearer token as a temporary operator-approved development/private-connector safeguard, not the ChatGPT connector auth path.
 - Do not open firewall ports for the local MCP server.
 - Do not bind to `0.0.0.0` unless `CHAMPCITY_GPT_ALLOW_NONLOCAL_HTTP=true` is set after a security review.
 - Keep audit logging enabled and review the runtime-local audit log.

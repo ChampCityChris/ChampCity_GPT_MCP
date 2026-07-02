@@ -71,6 +71,16 @@ export const REQUIRED_SAFE_REPLACEMENT_TOOLS = [
   "get_builder_report_summary"
 ] as const;
 
+export const REQUIRED_PUBLIC_TOOLBOX_TOOLS = [
+  "repo_toolbox",
+  "git_toolbox",
+  "artifact_toolbox",
+  "diagnostics_toolbox",
+  "integration_toolbox",
+  "browser_toolbox",
+  "knowledge_toolbox"
+] as const;
+
 export const REQUIRED_METADATA_FIELDS = [
   "Evidence file version:",
   "Validation date/time:",
@@ -260,6 +270,19 @@ function evaluateRequiredSafeReplacementTools(markdown: string): ChatGptEvidence
   });
 }
 
+function evaluateRequiredPublicToolboxTools(markdown: string): ChatGptEvidenceCheck {
+  const missingTools = REQUIRED_PUBLIC_TOOLBOX_TOOLS.filter((toolName) => !markdown.includes(toolName));
+  if (missingTools.length > 0) {
+    return fail("REQUIRED_PUBLIC_TOOLBOX_TOOLS", "Evidence is missing one or more required public toolbox tool names.", {
+      missingTools
+    });
+  }
+
+  return pass("REQUIRED_PUBLIC_TOOLBOX_TOOLS", "Evidence mentions all required public toolbox tools.", {
+    toolCount: REQUIRED_PUBLIC_TOOLBOX_TOOLS.length
+  });
+}
+
 function evaluateMetadataFields(markdown: string): ChatGptEvidenceCheck {
   const missingFields = REQUIRED_METADATA_FIELDS.filter((field) => !hasLineLabel(markdown, field));
   if (missingFields.length > 0) {
@@ -337,6 +360,7 @@ export function validateChatGptEvidenceText(markdown: string, options: ValidateC
     evaluateRequiredSections(markdown),
     evaluateRequiredCavReferences(markdown),
     evaluateRequiredSafeReplacementTools(markdown),
+    evaluateRequiredPublicToolboxTools(markdown),
     evaluateMetadataFields(markdown),
     evaluateLocalBaselineCommands(markdown),
     evaluateSafePlaceholdersAllowed(markdown),

@@ -436,6 +436,42 @@ describe("HTTP MCP transport safety", () => {
     }
   });
 
+  it("falls back to safe OAuth metadata when the public base URL is invalid", async () => {
+    const invalidPublicBaseUrl = ["C:", "Users", "fixture", "Private", "local-value"].join("\\");
+    process.env.CHAMPCITY_GPT_PUBLIC_BASE_URL = invalidPublicBaseUrl;
+    const config = testConfig({ writeToolsEnabled: false });
+    const handle = await runHttpTransport(() => createMcpServer(config, "0.1.0-test"), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const authorizationServer = await fetch(new URL("/.well-known/oauth-authorization-server", handle.url));
+      assert.equal(authorizationServer.status, 200);
+      const metadata = await authorizationServer.json();
+      assert.deepEqual(metadata, createAuthorizationServerMetadata("https://mcp.example.com"));
+      assert.doesNotMatch(JSON.stringify(metadata), /Users|Private|local-value/u);
+
+      const { response } = await postMcp(handle.url, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: LATEST_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "champcity-http-test", version: "0.0.0" }
+        }
+      });
+      assert.equal(response.status, 401);
+      assert.equal(response.headers.get("www-authenticate"), 'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"');
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("dynamically registers an OAuth client", async () => {
     const config = testConfig({ writeToolsEnabled: false });
     const handle = await runHttpTransport(() => createMcpServer(config, "0.1.0-test"), config, {
@@ -470,6 +506,73 @@ describe("HTTP MCP transport safety", () => {
       assert.equal(json.token_endpoint_auth_method, "none");
       assert.equal(fs.existsSync(getOAuthClientsPath(tempRoot)), true);
       assert.equal(readOAuthClientStore(tempRoot).clients[0]?.client_id, json.client_id);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("rejects unsafe or unsupported Dynamic Client Registration metadata safely", async () => {
+    const config = testConfig({ writeToolsEnabled: false });
+    const handle = await runHttpTransport(() => createMcpServer(config, "0.1.0-test"), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    async function postRegistration(body: Record<string, unknown>): Promise<{ status: number; json: Record<string, unknown>; text: string }> {
+      const response = await fetch(new URL("/oauth/register", handle.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const text = await response.text();
+      return {
+        status: response.status,
+        json: JSON.parse(text) as Record<string, unknown>,
+        text
+      };
+    }
+
+    try {
+      const unsafeRedirectUri = ["file://", "C:", "Users", "fixture", "local-callback"].join("/");
+      const localFileRedirect = await postRegistration({
+        redirect_uris: [unsafeRedirectUri],
+        token_endpoint_auth_method: "none"
+      });
+      assert.equal(localFileRedirect.status, 400);
+      assert.equal(localFileRedirect.json.error, "invalid_client_metadata");
+      assert.doesNotMatch(localFileRedirect.text, /Users|local-callback/u);
+
+      const unsupportedGrant = await postRegistration({
+        redirect_uris: ["https://chatgpt.com/connector/oauth/test"],
+        grant_types: ["client_credentials"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none"
+      });
+      assert.equal(unsupportedGrant.status, 400);
+      assert.equal(unsupportedGrant.json.error, "invalid_client_metadata");
+      assert.match(String(unsupportedGrant.json.error_description), /unsupported value/i);
+
+      const confidentialClient = await postRegistration({
+        redirect_uris: ["https://chatgpt.com/connector/oauth/test"],
+        token_endpoint_auth_method: "client_secret_post"
+      });
+      assert.equal(confidentialClient.status, 400);
+      assert.equal(confidentialClient.json.error, "invalid_client_metadata");
+      assert.match(String(confidentialClient.json.error_description), /must be none/i);
+
+      fs.mkdirSync(path.dirname(getOAuthClientsPath(tempRoot)), { recursive: true });
+      fs.writeFileSync(getOAuthClientsPath(tempRoot), "{broken", "utf8");
+      const corruptLocalStore = await postRegistration({
+        redirect_uris: ["https://chatgpt.com/connector/oauth/test"],
+        token_endpoint_auth_method: "none"
+      });
+      assert.equal(corruptLocalStore.status, 400);
+      assert.equal(corruptLocalStore.json.error, "invalid_client_metadata");
+      assert.doesNotMatch(corruptLocalStore.text, new RegExp(tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+      assert.doesNotMatch(corruptLocalStore.text, /access_token|refresh_token|client_secret|authorization_code/iu);
     } finally {
       await handle.close();
     }

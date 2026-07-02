@@ -1,6 +1,6 @@
 ﻿# Tool Reference
 
-HTTP clients reach these tools through `/mcp`. In ChatGPT HTTP mode, `/mcp` requires an OAuth bearer access token; unauthenticated localhost testing requires explicit `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be tunneled. Keep write mode `off` until the read-only HTTP flow is validated.
+HTTP clients reach these tools through `/mcp`. In ChatGPT HTTP mode, OAuth with Dynamic Client Registration is the standard public connector path and `/mcp` requires an OAuth bearer access token; unauthenticated localhost testing requires explicit `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be tunneled. Keep write mode `off` until the read-only HTTP flow is validated.
 
 In the packaged desktop app, the HTTP server runs in-process from Electron. The developer CLI entrypoint remains available after building from source, but packaged end users do not need Node.js/npm to reach these tools.
 
@@ -207,7 +207,7 @@ npm run chatgpt:evidence:validate -- --file planning/phases/phase-v1.0/Live_Conn
 
 Use the local MCP self-test output as deterministic baseline evidence only. Live ChatGPT connector evidence must come from manual operator observations or explicit ChatGPT tool results, and must keep public endpoints, local paths, OAuth material, local config contents, and secrets redacted.
 
-The elevated approval token is configured in `config/write-access.local.json` as a salted hash, or temporarily through `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` for dev/manual testing. Static bearer tokens are legacy/manual testing only; ChatGPT.com uses OAuth.
+The elevated approval token is configured in `config/write-access.local.json` as a salted hash, or temporarily through `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` for dev/manual testing. Static bearer tokens are temporary legacy/manual testing fallback only; ChatGPT.com public connector setup uses OAuth/DCR.
 
 ## Internal Legacy Implementations
 

@@ -15,7 +15,7 @@ The packaged launcher runs the HTTP MCP server in-process from Electron. End use
 - Opens the generated config folder, audit log, logs folder, and documentation.
 - Starts and stops the local HTTP MCP server in-process from Electron.
 - Configures ChatGPT OAuth setup: admin password, client reset, token revocation, metadata links, MCP URL copy, and OAuth setup notes.
-- Configures the HTTP auth token through a desktop modal instead of the browser prompt API.
+- Configures a legacy/manual HTTP auth token through a desktop modal for local testing or temporary operator-approved fallback only.
 - Shows the current experimental/deferred Figma handoff controls.
 - Shows runtime mode and runtime-local config/log/generated directories.
 - Runs a first-run setup wizard when required runtime config is missing.
@@ -240,18 +240,7 @@ Actions:
 - `Copy MCP Server URL`
 - `Generate ChatGPT OAuth Setup Notes`
 
-The admin password is stored only as a hash in:
-
-```text
-oauth-admin.local.json
-```
-
-Registered clients, hashed access tokens, and hashed refresh-session metadata are stored in ignored local files:
-
-```text
-oauth-clients.local.json
-oauth-tokens.local.json
-```
+The admin password is stored only as a runtime-local hash. Registered clients, hashed access tokens, and hashed refresh-session metadata are stored in runtime-local ignored OAuth state files.
 
 The launcher never displays passwords, access tokens, refresh tokens, client secrets, or bearer tokens in status, generated notes, logs, or docs. Access tokens default to 2 hours, 7200 seconds. Refresh tokens default to 30 days, 2592000 seconds, and keep ChatGPT connected across access-token expiry. Do not make tokens permanent, remove OAuth, expose unauthenticated `/mcp`, or enable write mode by default.
 
@@ -332,7 +321,7 @@ The file shape is:
 
 `http-auth.local.json` is ignored by git in source development and stored under the runtime config directory in installed/portable mode. Do not upload it, share it, paste it into generated notes, or include it in release files. If `CHAMPCITY_GPT_HTTP_AUTH_TOKEN` is set, it overrides the local file and the app reports that the token is configured via environment variable. `Clear Token` only removes the local file; environment variables must be changed outside the app.
 
-Static bearer-token auth was useful for manual testing but is not enough for ChatGPT's OAuth connector flow.
+Static bearer-token auth was useful for manual testing but is not enough for ChatGPT's OAuth connector flow and is not the normal public v1.0 connector path.
 
 ## Generate MCP Client Configs
 
@@ -375,7 +364,7 @@ That means you usually do not need a persistent background process for Codex-sty
 node .\dist\src\index.js --transport http --host 127.0.0.1 --port 3333
 ```
 
-For ChatGPT OAuth mode, configure the OAuth admin password first. The server can then start without a legacy bearer token because `/mcp` is protected by OAuth access tokens. A legacy auth token from `CHAMPCITY_GPT_HTTP_AUTH_TOKEN` or `config\http-auth.local.json` can still start manual bearer-auth testing. If neither OAuth admin password nor legacy token is configured, startup is refused unless you explicitly enable local unauthenticated test mode.
+For ChatGPT OAuth mode, configure the OAuth admin password first. The server can then start without a legacy bearer token because `/mcp` is protected by OAuth access tokens. A legacy auth token can still start manual bearer-auth testing as a temporary operator-approved local fallback, but it is not the public ChatGPT connector setup path. If neither OAuth admin password nor legacy token is configured, startup is refused unless you explicitly enable local unauthenticated test mode.
 
 Unauthenticated local mode remains clearly labeled `LOCAL TEST ONLY - DO NOT TUNNEL.` Do not tunnel it.
 

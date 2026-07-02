@@ -1,6 +1,6 @@
 # ChampCity GPT MCP Launcher
 
-ChampCity GPT MCP Launcher is a pre-release ChatGPT-compatible MCP server and Electron launcher for controlled local project-file access. It can expose read-only and approval-gated write tools over local STDIO or local HTTP, with optional OAuth and HTTPS tunneling for ChatGPT.com-compatible MCP connectors.
+ChampCity GPT MCP Launcher is a pre-release ChatGPT-compatible MCP server and Electron launcher for controlled local project-file access. It can expose read-only and approval-gated write tools over local STDIO or local HTTP. For ChatGPT.com-compatible public HTTPS connectors, OAuth with Dynamic Client Registration is the standard path.
 
 Current maturity: `v0.1.2`, pre-release/private-tooling quality. Review the code and security model before using it with sensitive repositories.
 
@@ -11,7 +11,7 @@ License: not yet selected. See [docs/LICENSE_DECISION_NEEDED.md](docs/LICENSE_DE
 - Lists, reads, and searches files inside configured allowed roots.
 - Reports git status and git diffs for allowed git worktrees.
 - Provides safe git workflow tools for readiness checks, safety scans, filtered staging, validated local commits, and optional non-force pushes.
-- Contains experimental/deferred Figma-to-Codex design handoff tools using the official Figma REST API for Design URLs and official Figma MCP resources for Make URLs.
+- Keeps Figma and Figma Make as deferred governed broker placeholders under `integration_toolbox`; direct Figma tools are not public v1.0 tools.
 - Supports write modes: `off`, `docs`, `patch`, and `elevated`.
 - Provides an Electron launcher for local setup, status checks, OAuth administration, and client config generation.
 - Supports local STDIO MCP for trusted local clients.
@@ -25,7 +25,7 @@ License: not yet selected. See [docs/LICENSE_DECISION_NEEDED.md](docs/LICENSE_DE
 - It does not safely expose arbitrary folders. You must configure narrow allowed roots.
 - It does not require Cloudflare or any specific domain. `https://mcp.example.com/mcp` is only a placeholder.
 - It does not enable writes by default.
-- It does not commit or expose Figma tokens, auth headers, cookies, or session credentials. Generated Design handoffs may still contain private screenshots or metadata; generated Make handoffs may contain private source/resources.
+- It does not commit or expose Figma tokens, auth headers, cookies, or session credentials.
 - It does not replace human review. Review generated patches and git diffs before committing.
 
 ## Security Model
@@ -38,7 +38,7 @@ C:\Users\<you>\Projects\<project>
 
 Avoid broad roots such as `C:\`, `C:\Users\<you>`, home directories, cloud sync roots, browser profile folders, SSH folders, and credential stores.
 
-HTTP mode should bind to `127.0.0.1` by default. ChatGPT.com compatibility requires an HTTPS-reachable endpoint with OAuth and Dynamic Client Registration. For public use, set:
+HTTP mode should bind to `127.0.0.1` by default. ChatGPT.com compatibility requires an HTTPS-reachable endpoint with OAuth and Dynamic Client Registration. Static bearer tokens are not the normal public ChatGPT connector path. For public use, set:
 
 ```powershell
 CHAMPCITY_GPT_PUBLIC_BASE_URL=https://mcp.example.com
@@ -46,8 +46,8 @@ CHAMPCITY_GPT_PUBLIC_BASE_URL=https://mcp.example.com
 
 OAuth scopes:
 
-- `files.read`: list/read/search files, git status/diff, write-access status, Figma status/URL parsing/file summaries, commit readiness, safety scans, and tool discovery.
-- `files.write`: propose patches, write Markdown artifacts, apply approved patches, export Figma frame images, create Figma handoff packages, run Figma Make handoff orchestration, create Codex UI handoff prompts, run allowlisted scripts, safely stage files, create validated commits, and optionally push, still gated by local write mode.
+- `files.read`: `tools/list` and the seven public toolbox tools: `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox`.
+- `files.write`: required inside write-capable toolbox actions such as Markdown/JSON artifact writes, patch proposal/application, integration handoff writing, and safe git mutation actions, still gated by local write mode.
 
 Never expose unauthenticated HTTP mode through a tunnel.
 

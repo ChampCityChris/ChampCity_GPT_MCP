@@ -12,7 +12,7 @@ The harness is defensive, but it is not a sandbox for hostile code execution. Do
 
 ## HTTP MCP OAuth Policy
 
-In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. ChatGPT.com custom MCP apps use OAuth, so the server exposes a minimal private OAuth 2.1-compatible authorization layer instead of relying on static bearer-token setup.
+In HTTP mode, `/mcp` requires `Authorization: Bearer <access_token>`. ChatGPT.com custom MCP apps use OAuth, so the server exposes a minimal private OAuth 2.1-compatible authorization layer instead of relying on static bearer-token setup. OAuth with Dynamic Client Registration is the normal public v1.0 connector path.
 
 Local unauthenticated and authenticated HTTP MCP testing has passed for `http://127.0.0.1:3333/mcp`. The Cloudflare Tunnel path for `https://mcp.example.com/mcp` must keep OAuth enforcement enabled.
 
@@ -32,11 +32,11 @@ OAuth endpoints:
 /oauth/token
 ```
 
-Dynamic client registration accepts ChatGPT's public PKCE client metadata and stores redirect URIs exactly in `config\oauth-clients.local.json`, which is ignored by git. The authorization page validates client ID, decoded redirect URI, `response_type=code`, requested scopes, and PKCE with `code_challenge_method=S256`. Plain PKCE is not allowed. Approval requires the local OAuth admin password, stored only as a hash in `config\oauth-admin.local.json`. Authorization codes are short-lived, one-time use, and bound to the client ID, redirect URI, S256 code challenge, and scopes. The token endpoint recomputes `base64url(sha256(code_verifier))` before issuing a bearer access token and refresh token. Access and refresh tokens are stored hashed in `config\oauth-tokens.local.json`; raw refresh tokens are not stored.
+Dynamic client registration accepts ChatGPT's public PKCE client metadata and stores redirect URIs exactly in a runtime-local ignored OAuth client registry. The authorization page validates client ID, decoded redirect URI, `response_type=code`, requested scopes, and PKCE with `code_challenge_method=S256`. Plain PKCE is not allowed. Approval requires the local OAuth admin password, stored only as a runtime-local hash. Authorization codes are short-lived, one-time use, and bound to the client ID, redirect URI, S256 code challenge, and scopes. The token endpoint recomputes `base64url(sha256(code_verifier))` before issuing a bearer access token and refresh token. Access and refresh tokens are stored hashed in runtime-local ignored OAuth token state; raw refresh tokens are not stored.
 
 Access tokens are intentionally short-lived. The default access token TTL is 2 hours, 7200 seconds, configured with `CHAMPCITY_GPT_ACCESS_TOKEN_TTL_SECONDS`. Refresh tokens keep ChatGPT connected for up to 30 days, 2592000 seconds by default, configured with `CHAMPCITY_GPT_REFRESH_TOKEN_TTL_SECONDS`. Refresh-token use rotates the refresh token, revokes the previous record, and rejects reuse of the old refresh token. Do not make access tokens permanent.
 
-If ChatGPT reports `PKCE S256 code_challenge is required`, inspect the launcher OAuth troubleshooting fields or `config\oauth-authorize-last-error.local.json`. The diagnostic records only field presence, safe redirect origin/path, method value, and a client ID prefix; it must not contain raw code challenges, verifiers, tokens, authorization codes, client secrets, or admin passwords.
+If ChatGPT reports `PKCE S256 code_challenge is required`, inspect the launcher OAuth troubleshooting fields. The diagnostic records only field presence, safe redirect origin/path, method value, and a client ID prefix; it must not contain raw code challenges, verifiers, tokens, authorization codes, client secrets, or admin passwords.
 
 Scope mapping:
 
@@ -54,7 +54,7 @@ Write mode defaults to `off`. The preferred override is `CHAMPCITY_GPT_WRITE_MOD
 
 The local elevated approval token is stored only as a salted `scrypt` hash in `config/write-access.local.json`; `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` may be used temporarily for dev/manual testing and takes precedence over the local hash. Do not reuse OAuth access tokens as elevated approval tokens.
 
-Static HTTP bearer tokens can remain for legacy/manual testing. Loading order is `CHAMPCITY_GPT_HTTP_AUTH_TOKEN`, then `config\http-auth.local.json`, then no legacy token. Static bearer tokens were useful for manual HTTP tests but are not sufficient for ChatGPT's OAuth connector flow.
+Static HTTP bearer tokens can remain for legacy/manual testing as a temporary operator-approved fallback. They are not the normal public ChatGPT connector path and are not sufficient for ChatGPT's OAuth connector flow.
 
 ## ChatGPT-Safe Read-Only Facade Tools
 

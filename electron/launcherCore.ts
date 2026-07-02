@@ -8,7 +8,6 @@ import {
   clearExpiredOAuthTokens,
   formatOAuthDuration,
   getOAuthAccessTokenTtlSeconds,
-  getOAuthClientsPath,
   getOAuthEndpointPaths,
   getOAuthPublicBaseUrl,
   getOAuthPublicMcpUrl,
@@ -993,7 +992,7 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 - Dynamic client registration endpoint: ${publicOAuthIssuer}/oauth/register
 - Authorization endpoint: ${publicOAuthIssuer}/oauth/authorize
 - Token endpoint: ${publicOAuthIssuer}/oauth/token
-- OAuth client registry path: ${getOAuthClientsPath(repoRoot)}
+- OAuth store paths: not included in generated ChatGPT setup notes.
 - Access token TTL: ${formatOAuthDuration(getOAuthAccessTokenTtlSeconds(env))} (${getOAuthAccessTokenTtlSeconds(env)} seconds)
 - Refresh token TTL: ${formatOAuthDuration(getOAuthRefreshTokenTtlSeconds(env))} (${getOAuthRefreshTokenTtlSeconds(env)} seconds)
 - Refresh tokens keep ChatGPT connected between short-lived access-token renewals and are stored only as local hashes.
@@ -1001,7 +1000,7 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 - During ChatGPT setup, approve only files.read first.
 - Do not use unauthenticated mode.
 - Do not paste tokens into ChatGPT manually unless the UI requests OAuth setup through the browser flow.
-- Legacy/manual bearer auth configured: ${authStatus.configured ? "yes" : "no"} (${authStatus.source})
+- Legacy/manual bearer auth configured: ${authStatus.configured ? "yes" : "no"} (${authStatus.source}); temporary local/manual fallback only, not the normal public ChatGPT connector path.
 - Bearer token value: not displayed or written by the launcher.
 
 ## Security State
@@ -1010,7 +1009,7 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 - Registered OAuth clients: ${oauthStatus.registeredClientsCount} total; ${oauthStatus.registeredChatGptClientsCount} ChatGPT-like; ${oauthStatus.registeredDoctorProbeClientsCount} doctor probe; ${oauthStatus.registeredOtherClientsCount} other
 - Dynamic Client Registration advertised: ${oauthStatus.dynamicClientRegistrationEnabled ? "yes" : "no"}
 - Registration endpoint path: ${oauthStatus.registrationEndpointPath}
-- OAuth client registry path: ${oauthStatus.clientRegistryPath}
+- OAuth client registry path: not included in generated notes.
 - Active OAuth tokens: ${oauthStatus.activeTokensCount}
 - Active OAuth write tokens: ${oauthStatus.activeWriteTokensCount}
 - Active OAuth clients: ${oauthStatus.activeOAuthClientsCount}
@@ -1041,7 +1040,7 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 - Elevated approval is still required for scripts and elevated fallback operations.
 - Write mode off for first ChatGPT test: ${writeMode === "off" ? "yes" : "no - set off before first test"}
 - Write mode defaults to off: yes
-- Audit log: ${localConfig.auditLog}
+- Audit log path: not included in generated notes.
 - Require git root: ${localConfig.requireGitRoot ? "yes" : "no"}
 - Legacy direct Figma tools removed: yes
 - Figma broker status: ${getLauncherFigmaStatus(repoRoot, env).figmaMcp.connectionStatus}
@@ -1070,7 +1069,8 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 
 ## Allowed Roots
 
-${localConfig.allowedRoots.map((root) => `- ${root}`).join("\n")}
+- Allowed root count: ${localConfig.allowedRoots.length}
+- Local allowed-root paths are not included in generated ChatGPT setup notes.
 
 ## ChatGPT Setup Checklist
 

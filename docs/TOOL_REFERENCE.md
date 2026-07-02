@@ -103,8 +103,20 @@ Initial actions:
 - `commit_staged`
 - `push_current_branch`
 - `readiness_summary`
+- `integrate_to_dev`
 
-The toolbox does not accept arbitrary git commands, reset, rebase, merge, stash, branch delete, force push, checkout path, or raw branch-name controls. Mutating actions require `files.write` and write mode `elevated`. `prepare_work_branch` delegates to the safe `prepare_git_work_branch` behavior.
+The toolbox does not accept arbitrary git commands, reset, rebase, stash, branch delete, force push, checkout path, or raw branch-name controls. Mutating actions require `files.write` and write mode `elevated`. `prepare_work_branch` delegates to the safe `prepare_git_work_branch` behavior. `integrate_to_dev` is a guarded internal action under `git_toolbox`, not a top-level public MCP tool.
+
+Normal reviewed Work Card lifecycle:
+
+1. Feature branch implementation.
+2. Architect review.
+3. Commit staged changes.
+4. Push feature branch.
+5. Run `git_toolbox.integrate_to_dev` dry run.
+6. Run `git_toolbox.integrate_to_dev` execute with `push: true` after review approval.
+7. Package/promote from `dev` when needed.
+8. Live validation.
 
 ### `artifact_toolbox`
 
@@ -601,6 +613,38 @@ Input:
 Output summary: branch, remote, pushed boolean, sanitized stdout/stderr, and redacted remote URL.
 
 Safety behavior: only `origin` is accepted, force flags are never used, `main` push is refused unless `allowMainPush` is explicitly `true`, and remote URLs are redacted before returning output.
+
+## `git_toolbox.integrate_to_dev`
+
+Integrates a reviewed feature branch into `dev` through the public `git_toolbox` dispatcher. It is not registered as a top-level MCP tool.
+
+Input:
+
+```json
+{
+  "action": "integrate_to_dev",
+  "workspaceId": "champcity_gpt",
+  "params": {
+    "sourceBranch": "feature/WC-V1-0401-harden-oauth-dcr-public-connector",
+    "targetBranch": "dev",
+    "push": false,
+    "requireCleanWorkingTree": true,
+    "requireSourceBranchPushed": true,
+    "requireValidationReport": true,
+    "validationReportPath": "planning/phases/phase-v1.0/Builder_Reports/BUILDER_REPORT_WC-V1-0401_harden_oauth_dcr_public_connector.md",
+    "mergeMode": "no-ff",
+    "dryRun": true
+  }
+}
+```
+
+Defaults: `sourceBranch` is the current branch, `targetBranch` is `dev`, `push` is `false`, `requireCleanWorkingTree` is `true`, `requireSourceBranchPushed` is `true`, `requireValidationReport` is `true`, `mergeMode` is `no-ff`, and `dryRun` is `true`.
+
+Dry run does not mutate git state. It reports the resolved workspace, repository identity, source/target branch existence, upstream/pushed status, source and target commits, commits that would be integrated, validation report status, blockers, warnings, and planned operations.
+
+Execute mode only proceeds when guardrails pass. It resolves the workspace by `workspaceId`, requires a clean working tree, rejects `main` and `dev` as source branches, requires local source branch existence, requires local `dev` or an existing `origin/dev` tracking branch, requires the source branch to be pushed, requires a Builder Report unless explicitly disabled, uses `git merge --no-ff` by default, aborts on conflicts, runs `git diff --check`, `npm run check:public`, and `npm run mcp:self-test -- --json` after merge, and pushes only with `git push origin dev` when `push: true` and checks pass.
+
+Safety behavior: the action does not accept a root path, shell command, approval token, arbitrary git command, force option, rebase option, reset option, stash option, branch deletion option, tag option, package option, release option, or `main` target. It does not package or publish releases. If `push: false`, a successful local `dev` merge is left unpushed and reported.
 
 ## `run_allowed_script`
 

@@ -13,6 +13,7 @@ import { getBuilderReportIndex, getBuilderReportSummary } from "./builderReportF
 import { applyApprovedPatch } from "./applyApprovedPatch.js";
 import { commitValidatedChanges } from "./gitWorkflow/commitValidatedChanges.js";
 import { getCommitReadiness } from "./gitWorkflow/getCommitReadiness.js";
+import { integrateToDev } from "./gitWorkflow/integrateToDev.js";
 import { preCommitSafetyScan } from "./gitWorkflow/preCommitSafetyScan.js";
 import { prepareGitWorkBranch } from "./gitWorkflow/prepareGitWorkBranch.js";
 import { pushCurrentBranch } from "./gitWorkflow/pushCurrentBranch.js";
@@ -286,7 +287,8 @@ const SUPPORTED_GIT_ACTIONS = [
   "stage_paths",
   "commit_staged",
   "push_current_branch",
-  "readiness_summary"
+  "readiness_summary",
+  "integrate_to_dev"
 ] as const;
 const SUPPORTED_ARTIFACT_ACTIONS = [
   "builder_report_index",
@@ -626,6 +628,10 @@ export async function gitToolbox(rawInput: unknown, config: AppConfig, context: 
       case "readiness_summary": {
         const params = GitReadinessParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await getCommitReadiness({ root, targetBranch: params.targetBranch }, config));
+      }
+      case "integrate_to_dev": {
+        assertFilesWrite(context, "integrate_to_dev", "git_toolbox", input.action);
+        return ok("git_toolbox", input.action, await integrateToDev({ workspaceId: input.workspaceId, ...input.params }, config));
       }
       default:
         return supportedActionError("git_toolbox", input.action, SUPPORTED_GIT_ACTIONS);

@@ -17,7 +17,7 @@ This queue is derived from the answered operator intake file:
 - Active implementation Work Cards should use `dev` or a generated `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` branch. `main` is reserved for stable release or baseline checkpoints.
 - `prepare_git_work_branch` is the safe MCP branch-preparation path. It refuses dirty working trees and `main` as the active work target, and it does not push, merge, rebase, reset, stash, delete, force, or run arbitrary commands.
 - Stable domain toolbox expansion should prefer internal allowlisted actions under `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox` instead of adding new top-level MCP tools when possible. After `WC-V1-FIX05`, these seven toolbox tools are the only public ChatGPT-visible tools. Figma belongs under `integration_toolbox` as governed broker behavior; do not add `figma_toolbox`.
-- Normal source-control flow after branch preparation is validate, stage reviewed files, run pre-commit safety scan, commit, push the current `dev` or feature branch, and merge to `main` only at a stable checkpoint.
+- Normal reviewed Work Card lifecycle is feature branch implementation, Architect review, commit staged changes, push the feature branch, run `git_toolbox.integrate_to_dev` dry run, run `git_toolbox.integrate_to_dev` execute with `push: true`, package/promote from `dev` when needed, live validation, and merge to `main` only at a stable checkpoint.
 
 ## Phase 0 — Scope Lock And Baseline
 
@@ -154,6 +154,19 @@ This queue is derived from the answered operator intake file:
 - Acceptance criteria: Multiple allowed workspaces produce stable safe workspace IDs; `diagnostics_toolbox.list_workspaces` returns safe metadata without unnecessary absolute roots; explicit workspace IDs route repo/git/artifact actions to the selected fixture repo; ambiguous `workspaceId: default` fails safely when multiple workspaces exist and no explicit default is configured; public toolbox schemas remain `action`, `workspaceId`, and `params`.
 - Validation: Typecheck, unit tests, lint, build, public safety scan, MCP self-test including multi-workspace fixtures, ChatGPT evidence template validation, diff check, and live ChatGPT connector validation by the operator after package promotion.
 - Dependencies or notes: Depends on `WC-V1-FIX02`. Do not implement mutable active workspace state, fallback routing, public root params, OAuth changes, Cloudflare changes, packaging, release publication, or `WC-V1-0401`.
+
+### WC-V1-FIX06 — Add guarded dev integration action to git_toolbox
+
+- ID: `WC-V1-FIX06`
+- Title: Add guarded dev integration action to git_toolbox
+- Priority: P0
+- Owner mode: Codex/Builder
+- Type: Source-control workflow / MCP reliability
+- Objective: Allow a reviewed feature branch to be integrated into `dev` through an internal allowlisted `git_toolbox` action instead of adding another public top-level MCP tool.
+- Scope: Add `git_toolbox.integrate_to_dev` with dry-run and execute modes, strict workspace resolution by `workspaceId`, clean-tree/source/target/upstream/Builder Report guardrails, fixed post-merge validation checks, optional safe push to `origin/dev`, tests, docs, and Builder Reports.
+- Acceptance criteria: Public ChatGPT-facing tool surface remains exactly the seven toolbox tools; no `dev_toolbox`, `branch_toolbox`, direct top-level `integrate_to_dev`, legacy direct tool, `figma_toolbox`, or `run_allowed_script` public exposure is added; dry run mutates nothing; execute refuses blockers and only pushes `dev` after validation passes.
+- Validation: Typecheck, unit tests with temporary fixture repositories, lint, build, public safety scan, MCP self-test, ChatGPT evidence template validation, diff check, package/promote only when the card explicitly requests it, and live old-chat toolbox-action validation by the operator after runtime promotion.
+- Dependencies or notes: Depends on `WC-V1-FIX05` stable public toolbox surface. This card does not authorize merging to `dev`, merging to `main`, tagging, release publication, OAuth/DCR changes, Cloudflare changes, or fallback architectures.
 
 ### WC-V1-0201 — Replace arbitrary command execution with purpose-built tools
 
@@ -481,4 +494,4 @@ This queue is derived from the answered operator intake file:
 
 ## Work Card Count
 
-This queue contains 34 P0 Work Cards.
+This queue contains 35 P0 Work Cards.

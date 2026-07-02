@@ -907,7 +907,8 @@ export function assertWriteToolEnabled(toolName: string, config: AppConfig): voi
     (toolName === "prepare_git_work_branch" ||
       toolName === "safe_stage_changes" ||
       toolName === "commit_validated_changes" ||
-      toolName === "push_current_branch") &&
+      toolName === "push_current_branch" ||
+      toolName === "integrate_to_dev") &&
     !config.elevatedOperationsAllowed
   ) {
     throw new AppError("APPROVAL_REQUIRED", `${toolName} requires writeMode elevated.`);

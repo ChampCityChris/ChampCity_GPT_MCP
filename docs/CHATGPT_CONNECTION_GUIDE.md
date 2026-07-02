@@ -143,14 +143,17 @@ Active Work Cards should use `dev` or a generated `feature/WC-V1-xxxx-*` / `feat
 
 Use `prepare_git_work_branch` as the safe MCP path to prepare `dev` or a Work Card feature branch. The tool requires OAuth `files.write` and local write mode `elevated`, refuses dirty working trees, refuses detached HEAD, refuses `main` as the active work target, and does not push, merge, rebase, reset, stash, delete branches, tag, or run arbitrary commands.
 
-After branch preparation, the normal sequence is:
+After branch preparation, the normal reviewed Work Card lifecycle is:
 
-1. Validate on the prepared branch.
-2. Stage reviewed files with `safe_stage_changes`.
-3. Run `pre_commit_safety_scan`.
-4. Commit with `commit_validated_changes`.
-5. Push the current `dev` or feature branch with `push_current_branch`.
-6. Merge to `main` only at a stable release or baseline checkpoint.
+1. Feature branch implementation.
+2. Architect review.
+3. Commit staged changes with `commit_validated_changes`.
+4. Push the feature branch with `push_current_branch`.
+5. Run `git_toolbox.integrate_to_dev` in dry-run mode.
+6. Run `git_toolbox.integrate_to_dev` with `dryRun: false` and `push: true` after review approval.
+7. Package/promote from `dev` when needed.
+8. Live validation.
+9. Merge to `main` only at a stable release or baseline checkpoint.
 
 ## Stable Domain Toolbox Tools
 
@@ -183,7 +186,7 @@ Use explicit workspace IDs when more than one project is configured. Ask ChatGPT
 Current public action groups:
 
 - `repo_toolbox`: `status`, `list_files`, `read_file`, `search_files`, `write_markdown_artifact`, `write_json_artifact`, `propose_patch`, `apply_approved_patch`
-- `git_toolbox`: `status`, `diff`, `prepare_work_branch`, `pre_commit_scan`, `stage_paths`, `commit_staged`, `push_current_branch`, `readiness_summary`
+- `git_toolbox`: `status`, `diff`, `prepare_work_branch`, `pre_commit_scan`, `stage_paths`, `commit_staged`, `push_current_branch`, `readiness_summary`, `integrate_to_dev`
 - `artifact_toolbox`: `builder_report_index`, `builder_report_summary`, `release_artifact_summary`, `release_publication_summary`, `local_package_summary`
 - `diagnostics_toolbox`: `runtime_status`, `write_access_status`, `tool_exposure_status`, `oauth_scope_status`, `chatgpt_discovery_status`, `list_workspaces`, `public_safety_status`
 - `integration_toolbox`: `list_supported_services`, `get_service_status`, `list_service_capabilities`, `validate_service_configuration`, `prepare_external_handoff`

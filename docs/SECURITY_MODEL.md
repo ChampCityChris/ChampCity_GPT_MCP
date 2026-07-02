@@ -48,7 +48,7 @@ Write access uses local write modes instead of a per-write token for every write
 - `off`: no write tools are allowed.
 - `docs`: Markdown and JSON artifact writes are allowed without `approvalToken`.
 - `patch`: docs mode plus controlled application of patches that match a stored `propose_patch` proposal hash.
-- `elevated`: reserved for scripts, legacy approval-gated fallback operations, and safe git branch/stage/commit/push tools.
+- `elevated`: reserved for scripts, legacy approval-gated fallback operations, and safe git branch/stage/commit/push/integrate tools.
 
 Write mode defaults to `off`. The preferred override is `CHAMPCITY_GPT_WRITE_MODE=off|docs|patch|elevated`; otherwise the server reads `config/write-access.local.json`. Legacy `CHAMPCITY_GPT_ENABLE_WRITE_TOOLS=true` maps to `docs`, and `false` maps to `off`. Existing `httpWriteToolsEnabled: true` local config migrates to `writeMode: "docs"` unless `writeMode` is already present.
 
@@ -237,11 +237,13 @@ When `CHAMPCITY_GPT_REQUIRE_GIT_ROOT=true`, write tools verify that targets belo
 
 `pre_commit_safety_scan` and `get_commit_readiness` are read-only tools available with OAuth `files.read`. They report blocker findings by rule and path, but do not return raw matched secret values.
 
-`prepare_git_work_branch`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch` require OAuth `files.write` and write mode `elevated`. They do not accept shell commands or arbitrary git commands. `prepare_git_work_branch` accepts only `branchKind: dev` or `branchKind: feature` plus a validated Work Card ID and lowercase kebab-case slug. It generates only `dev`, `feature/WC-V1-xxxx-*`, or `feature/WC-V1-FIXxx-*`, refuses dirty working trees, refuses detached HEAD, refuses `main` as the active work target, and cannot push, merge, rebase, reset, stash, delete branches, tag, or run arbitrary commands. `safe_stage_changes` stages exact validated paths only after excluding local config, `.env` files except `.env.example`, logs, generated output, release artifacts, `dist`, `node_modules`, `package-lock.zip`, PID/status/log files, coverage output, ignored files, and files with blocker secret/private-path findings. It never runs `git add .` or `git add -f`.
+`prepare_git_work_branch`, `safe_stage_changes`, `commit_validated_changes`, `push_current_branch`, and `git_toolbox.integrate_to_dev` require OAuth `files.write` and write mode `elevated`. They do not accept shell commands or arbitrary git commands. `prepare_git_work_branch` accepts only `branchKind: dev` or `branchKind: feature` plus a validated Work Card ID and lowercase kebab-case slug. It generates only `dev`, `feature/WC-V1-xxxx-*`, or `feature/WC-V1-FIXxx-*`, refuses dirty working trees, refuses detached HEAD, refuses `main` as the active work target, and cannot push, merge, rebase, reset, stash, delete branches, tag, or run arbitrary commands. `safe_stage_changes` stages exact validated paths only after excluding local config, `.env` files except `.env.example`, logs, generated output, release artifacts, `dist`, `node_modules`, `package-lock.zip`, PID/status/log files, coverage output, ignored files, and files with blocker secret/private-path findings. It never runs `git add .` or `git add -f`.
 
 `commit_validated_changes` commits already staged files only. It runs `pre_commit_safety_scan` in staged mode immediately before `git commit -m <message>`, refuses empty staged sets and blocker findings, and refuses `main` by default unless `allowMainCommit` is explicitly `true`.
 
 `push_current_branch` pushes only to `origin`, refuses `main` by default unless `allowMainPush` is explicitly `true`, and never uses force push flags. It returns sanitized stdout/stderr and redacts credentials from remote URLs.
+
+`git_toolbox.integrate_to_dev` is an internal allowlisted action under the existing public `git_toolbox`; it is not a new top-level MCP tool. It resolves the workspace by server-defined `workspaceId`, rejects caller-supplied roots, requires `targetBranch: "dev"`, rejects `main` and `dev` as source branches, requires a clean working tree, requires the source branch to be local and pushed, requires a Builder Report unless explicitly disabled, uses `no-ff` merge mode by default, aborts on merge conflict, runs fixed post-merge checks, and pushes only `dev` to `origin/dev` after those checks pass. It never force-pushes, rebases, resets, stashes, deletes branches, tags, packages, publishes releases, or touches `main`.
 
 The elevated approval token is a local confirmation guard layered on top of OAuth, not a replacement for OAuth authentication. Treat every write as reviewable work: inspect `git diff` before committing or sharing changes.
 
@@ -257,8 +259,11 @@ Recommended workflow:
 8. Ask ChatGPT to run `pre_commit_safety_scan`.
 9. Ask ChatGPT to run `commit_validated_changes` with a reviewed commit message.
 10. Ask ChatGPT to run `push_current_branch` only after reviewing the commit result.
-11. Merge to `main` only at a stable release or baseline checkpoint.
-12. Return write mode to `off` after the session.
+11. After Architect review, run `git_toolbox.integrate_to_dev` in dry-run mode.
+12. After dry-run approval, run `git_toolbox.integrate_to_dev` with `dryRun: false` and `push: true`.
+13. Package/promote from `dev` only when a later scoped prompt asks for it.
+14. Merge to `main` only at a stable release or baseline checkpoint.
+15. Return write mode to `off` after the session.
 
 Releases are separate from commits. Release binaries are uploaded as GitHub Release assets, not committed.
 

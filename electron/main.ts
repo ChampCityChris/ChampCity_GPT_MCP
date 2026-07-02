@@ -67,11 +67,6 @@ import { buildMcpServer, installDependencies, type OperationResult } from "./run
 import { detectRuntimes } from "./runtimeDetection.js";
 import { ensureRuntimeDirectories, migrateLegacyRuntimeConfig, resolveElectronRuntimePaths } from "./runtimePaths.js";
 import { loadConfig } from "../src/config.js";
-import { createCodexUiHandoffPrompt } from "../src/figma/codexUiPrompt.js";
-import { fetchFigmaFile } from "../src/figma/figmaClient.js";
-import { requireFigmaAccessToken } from "../src/figma/figmaConfig.js";
-import { extractFigmaDesignSummary } from "../src/figma/figmaExtract.js";
-import { createFigmaHandoffPackage } from "../src/figma/figmaHandoff.js";
 import { validateRuntimePaths, type RuntimePathInfo } from "../src/runtimePaths.js";
 import { getMcpServerStatus, startMcpServer, stopMcpServer } from "../src/server/serverLifecycle.js";
 import { readLastMcpDiscoveryTrace, type McpDiscoveryTrace } from "../src/server/discoveryTrace.js";
@@ -480,68 +475,48 @@ function readLastDiscoveryTraceSafe(): LastMcpDiscoveryTrace | null {
 }
 
 function parseFigmaFileKey(value: string): string {
-  const trimmed = value.trim();
-  if (/^https?:\/\//iu.test(trimmed)) {
-    return parseLauncherFigmaUrl(trimmed).fileKey;
-  }
-
-  if (!/^[A-Za-z0-9_-]{6,}$/u.test(trimmed)) {
-    throw new Error("Enter a Figma file key or a full Figma URL.");
-  }
-
-  return trimmed;
+  void value;
+  throw new Error("Legacy direct Figma parsing was removed. Future Figma support belongs under integration_toolbox governed broker behavior.");
 }
 
 async function testFigmaConnection(payload: FigmaTestPayload) {
-  const fileKey = parseFigmaFileKey(payload.figmaUrlOrFileKey);
-  const token = requireFigmaAccessToken(repoRoot);
-  const rawFile = await fetchFigmaFile(fileKey, { token });
-  const summary = extractFigmaDesignSummary(rawFile, 25);
+  void payload;
   return {
-    ok: true,
-    output: `Fetched Figma file "${summary.fileName}" with ${summary.pages.length} page(s) and ${summary.topLevelFrames.length} top-level frame(s) in the summary.`,
+    ok: false,
+    output: "Legacy direct Figma connection testing was removed. Future Figma support belongs under integration_toolbox governed broker behavior.",
     summary: {
-      fileName: summary.fileName,
-      pages: summary.pages,
-      topLevelFrames: summary.topLevelFrames,
-      componentsCount: summary.components.length,
-      stylesCount: summary.styles.length
+      status: "broker_not_implemented",
+      governedBrokerOnly: true,
+      arbitraryUpstreamMcpPassthrough: false,
+      legacyDirectFigmaToolsRemoved: true
     }
   };
 }
 
 async function createLauncherFigmaHandoffPackage(payload: LauncherFigmaHandoffPayload) {
-  const token = requireFigmaAccessToken(repoRoot);
-  const root = payload.root?.trim() || repoRoot;
-  const output = await createFigmaHandoffPackage(
-    {
-      root,
-      figmaUrl: payload.figmaUrl,
-      targetArea: payload.targetArea,
-      frameNames: payload.frameNames,
-      nodeIds: payload.nodeIds,
-      relativeOutputDir: payload.relativeOutputDir,
-      overwrite: payload.overwrite
-    },
-    currentAppConfig(),
-    { token }
-  );
-  return { ok: true, output: `Created Figma handoff package at ${output.handoffDir}.`, result: output };
+  void payload;
+  return {
+    ok: false,
+    output: "Legacy direct Figma handoff package creation was removed. Future Figma support belongs under integration_toolbox governed broker behavior.",
+    result: {
+      status: "broker_not_implemented",
+      governedBrokerOnly: true,
+      arbitraryUpstreamMcpPassthrough: false,
+      legacyDirectFigmaToolsRemoved: true
+    }
+  };
 }
 
 async function createLauncherCodexUiHandoffPrompt(payload: LauncherCodexPromptPayload) {
-  const root = payload.root?.trim() || repoRoot;
-  const output = await createCodexUiHandoffPrompt(
-    {
-      root,
-      handoffPath: payload.handoffPath,
-      targetFile: payload.targetFile,
-      targetArea: payload.targetArea,
-      overwrite: payload.overwrite
-    },
-    currentAppConfig()
-  );
-  return { ok: true, output: `Created Codex UI handoff prompt at ${output.targetFile}.`, result: output };
+  void payload;
+  return {
+    ok: false,
+    output: "Legacy Codex UI handoff prompt creation was removed with the obsolete Figma handoff workflow.",
+    result: {
+      status: "removed",
+      legacyDirectFigmaToolsRemoved: true
+    }
+  };
 }
 
 function isSetupComplete(): boolean {

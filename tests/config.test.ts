@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { DEFAULT_ALLOWED_COMMANDS, ensureConfiguredRootsExist, loadConfig } from "../src/config.js";
 import { getHttpAuthTokenConfig } from "../src/httpAuthConfig.js";
 import { saveWriteApprovalToken, verifyWriteApprovalTokenHash, readWriteAccessLocalConfig } from "../src/writeAccess.js";
+import { getWorkspaceRegistry } from "../src/workspaces.js";
 
 let tempRoot: string;
 let localRoot: string;
@@ -100,6 +101,8 @@ describe("config loading", () => {
     const config = loadConfig({}, tempRoot);
 
     assert.deepEqual(config.allowedRoots, [path.resolve(localRoot)]);
+    assert.equal(config.defaultWorkspaceRoot, path.resolve(localRoot));
+    assert.equal(config.defaultWorkspaceRootSource, "local-file");
     assert.equal(config.auditLogPath, auditLog);
     assert.equal(config.requireGitRoot, false);
     assert.deepEqual(config.allowedCommands, ["git status"]);
@@ -107,6 +110,84 @@ describe("config loading", () => {
     assert.equal(config.writeToolsEnabled, false);
     assert.equal(config.writeToolsEnabledSource, "default");
     assert.doesNotThrow(() => ensureConfiguredRootsExist(config));
+  });
+
+  it("loads named workspace registry config with an explicit default", () => {
+    const aiRoot = path.join(tempRoot, "ChampCity_AI");
+    fs.mkdirSync(aiRoot, { recursive: true });
+    writeLocalConfig({
+      workspaces: [
+        {
+          workspaceId: "champcity_gpt",
+          label: "ChampCity GPT MCP",
+          root: localRoot,
+          remote: "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git"
+        },
+        {
+          workspaceId: "champcity_ai",
+          label: "ChampCity AI",
+          root: aiRoot
+        }
+      ],
+      defaultWorkspaceId: "champcity_gpt",
+      requireGitRoot: false
+    });
+
+    const config = loadConfig({}, tempRoot);
+    const registry = getWorkspaceRegistry(config);
+
+    assert.deepEqual(config.allowedRoots, [path.resolve(localRoot), path.resolve(aiRoot)]);
+    assert.equal(config.defaultWorkspaceId, "champcity_gpt");
+    assert.equal(config.defaultWorkspaceIdSource, "local-file");
+    assert.equal(config.defaultWorkspaceRoot, path.resolve(localRoot));
+    assert.equal(config.workspaces?.[0]?.workspaceId, "champcity_gpt");
+    assert.equal(config.workspaces?.[0]?.remote, "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git");
+    assert.deepEqual(registry.availableWorkspaceIds, ["champcity_ai", "champcity_gpt"]);
+    assert.equal(registry.defaultWorkspaceId, "champcity_gpt");
+  });
+
+  it("derives stable workspace IDs from legacy allowedRoots-only config", () => {
+    const aiRoot = path.join(tempRoot, "ChampCity_AI");
+    fs.mkdirSync(aiRoot, { recursive: true });
+    writeLocalConfig({
+      allowedRoots: [localRoot, aiRoot],
+      defaultWorkspaceId: "champcity_ai"
+    });
+
+    const registry = getWorkspaceRegistry(loadConfig({}, tempRoot));
+
+    assert.deepEqual(registry.availableWorkspaceIds, ["champcity_ai", "local_root"]);
+    assert.equal(registry.defaultWorkspaceId, "champcity_ai");
+    assert.equal(registry.defaultWorkspaceIdSource, "local-file");
+  });
+
+  it("rejects invalid configured workspace IDs", () => {
+    const pathLikeWorkspaceId = ["C:", "Us" + "ers", "Alice", "Project"].join("\\");
+
+    writeLocalConfig({
+      workspaces: [
+        {
+          workspaceId: pathLikeWorkspaceId,
+          root: localRoot
+        }
+      ]
+    });
+
+    assert.throws(() => loadConfig({}, tempRoot), /workspaceId must be a safe lowercase server-defined alias/i);
+  });
+
+  it("requires configured workspace roots to stay inside allowed roots", () => {
+    writeLocalConfig({
+      allowedRoots: [localRoot],
+      workspaces: [
+        {
+          workspaceId: "outside_project",
+          root: envRoot
+        }
+      ]
+    });
+
+    assert.throws(() => loadConfig({}, tempRoot), /workspace root must be inside an allowed root/i);
   });
 
   it("loads runtime config directory when CHAMPCITY_GPT_CONFIG_DIR is set", () => {
@@ -129,6 +210,8 @@ describe("config loading", () => {
     const config = loadConfig({ CHAMPCITY_GPT_CONFIG_DIR: runtimeConfigDir }, tempRoot);
 
     assert.deepEqual(config.allowedRoots, [path.resolve(runtimeRoot)]);
+    assert.equal(config.defaultWorkspaceRoot, path.resolve(runtimeRoot));
+    assert.equal(config.defaultWorkspaceRootSource, "local-file");
     assert.equal(config.auditLogPath, path.join(tempRoot, "logs", "runtime-audit.log"));
     assert.equal(config.requireGitRoot, false);
     assert.deepEqual(config.allowedCommands, ["git diff"]);
@@ -146,6 +229,8 @@ describe("config loading", () => {
     const config = loadConfig({ CHAMPCITY_GPT_CONFIG_DIR: runtimeConfigDir }, tempRoot);
 
     assert.deepEqual(config.allowedRoots, [path.resolve(tempRoot)]);
+    assert.equal(config.defaultWorkspaceRoot, path.resolve(tempRoot));
+    assert.equal(config.defaultWorkspaceRootSource, "repoRoot");
     assert.equal(config.requireGitRoot, true);
     assert.deepEqual(config.allowedCommands, DEFAULT_ALLOWED_COMMANDS);
   });
@@ -170,6 +255,8 @@ describe("config loading", () => {
     );
 
     assert.deepEqual(config.allowedRoots, [path.resolve(envRoot)]);
+    assert.equal(config.defaultWorkspaceRoot, path.resolve(envRoot));
+    assert.equal(config.defaultWorkspaceRootSource, "env");
     assert.equal(config.requireGitRoot, false);
     assert.deepEqual(config.allowedCommands, ["npm test"]);
   });
@@ -193,6 +280,8 @@ describe("config loading", () => {
     );
 
     assert.deepEqual(config.allowedRoots, [path.resolve(envRoot)]);
+    assert.equal(config.defaultWorkspaceRoot, path.resolve(envRoot));
+    assert.equal(config.defaultWorkspaceRootSource, "env");
     assert.equal(config.auditLogPath, path.join(tempRoot, "logs", "env-audit.log"));
     assert.equal(config.requireGitRoot, false);
     assert.deepEqual(config.allowedCommands, ["npm test", "git diff"]);
@@ -286,5 +375,35 @@ describe("config loading", () => {
     fs.writeFileSync(path.join(tempRoot, "config", "allowed-roots.local.json"), "{ nope", "utf8");
 
     assert.throws(() => loadConfig({}, tempRoot), /Invalid JSON.*allowed-roots\.local\.json/i);
+  });
+
+  it("uses the configured allowed root as the default workspace for packaged app roots", () => {
+    const runtimeConfigDir = path.join(tempRoot, "runtime-config");
+    const packagedAppRoot = path.join(tempRoot, "resources", "app.asar");
+    const workspaceRoot = path.join(tempRoot, "workspace");
+    fs.mkdirSync(packagedAppRoot, { recursive: true });
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    writeRuntimeConfig(runtimeConfigDir, {
+      allowedRoots: [workspaceRoot],
+      requireGitRoot: false
+    });
+
+    const config = loadConfig({ CHAMPCITY_GPT_CONFIG_DIR: runtimeConfigDir }, packagedAppRoot);
+
+    assert.equal(config.repoRoot, path.resolve(packagedAppRoot));
+    assert.deepEqual(config.allowedRoots, [path.resolve(workspaceRoot)]);
+    assert.equal(config.defaultWorkspaceRoot, path.resolve(workspaceRoot));
+    assert.equal(config.defaultWorkspaceRootSource, "local-file");
+  });
+
+  it("fails clearly instead of defaulting packaged app roots to app.asar without workspace config", () => {
+    const runtimeConfigDir = path.join(tempRoot, "empty-runtime-config");
+    const packagedAppRoot = path.join(tempRoot, "resources", "app.asar");
+    fs.mkdirSync(packagedAppRoot, { recursive: true });
+
+    assert.throws(
+      () => loadConfig({ CHAMPCITY_GPT_CONFIG_DIR: runtimeConfigDir }, packagedAppRoot),
+      /Packaged runtime workspace configuration is missing/i
+    );
   });
 });

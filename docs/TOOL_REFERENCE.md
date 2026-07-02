@@ -1,6 +1,6 @@
 ﻿# Tool Reference
 
-HTTP clients reach these tools through `/mcp`. In ChatGPT HTTP mode, `/mcp` requires an OAuth bearer access token; unauthenticated localhost testing requires explicit `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be tunneled. Keep write mode `off` until the read-only HTTP flow is validated.
+HTTP clients reach these tools through `/mcp`. In ChatGPT HTTP mode, OAuth with Dynamic Client Registration is the standard public connector path and `/mcp` requires an OAuth bearer access token; unauthenticated localhost testing requires explicit `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` and must not be tunneled. Keep write mode `off` until the read-only HTTP flow is validated.
 
 In the packaged desktop app, the HTTP server runs in-process from Electron. The developer CLI entrypoint remains available after building from source, but packaged end users do not need Node.js/npm to reach these tools.
 
@@ -16,21 +16,183 @@ OAuth metadata:
 
 Scope mapping:
 
-- `files.read`: `tools/list`, `list_project_files`, `read_project_file`, `search_project_files`, `git_status`, `git_diff`, `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, `get_release_publication_summary`, `get_builder_report_index`, `get_builder_report_summary`, `get_write_access_status`, `get_figma_status`, `parse_figma_url`, `fetch_figma_file_summary`, `pre_commit_safety_scan`, and `get_commit_readiness`.
-- `files.write`: `propose_patch`, `write_markdown_artifact`, `apply_approved_patch`, `fetch_figma_frame_image`, `create_figma_handoff_package`, `create_codex_ui_handoff_prompt`, `run_figma_make_handoff`, `run_figma_make_file_handoff`, `run_allowed_script`, `safe_stage_changes`, `commit_validated_changes`, and `push_current_branch`.
+- `files.read`: `tools/list` and the seven public toolbox tools: `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox`.
+- `files.write`: required inside write-capable toolbox actions such as `repo_toolbox.write_markdown_artifact`, `repo_toolbox.write_json_artifact`, `repo_toolbox.propose_patch`, `repo_toolbox.apply_approved_patch`, `integration_toolbox.prepare_external_handoff`, and git mutating actions under `git_toolbox`.
 
 Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=off|docs|patch|elevated` is preferred, with `config/write-access.local.json` as the local-file source. Legacy `CHAMPCITY_GPT_ENABLE_WRITE_TOOLS=true` maps to `docs`.
 
 - `off`: no writes.
 - `docs`: Markdown artifact writes.
 - `patch`: docs plus application of matching pending patch proposals.
-- `elevated`: internal/elevated exception tasks, legacy approval-gated fallback operations, and safe git stage/commit/push tools.
+- `elevated`: internal/elevated exception tasks, legacy approval-gated fallback operations, and safe git branch/stage/commit/push tools.
 
-ChatGPT-facing status and release checks should prefer the read-only safe facade tools: `get_workspace_status_summary`, `get_change_set_readiness_summary`, `get_release_artifact_summary`, and `get_release_publication_summary`. These tools avoid caller-supplied local roots, executable file globs, and command-string inputs. Legacy `git_status`, `get_commit_readiness`, `list_project_files`, and `run_allowed_script` remain documented for compatibility, but `run_allowed_script` is not the normal v1.0 ChatGPT-facing status or release workflow.
+ChatGPT-facing status and release checks should use the stable toolbox actions. The legacy top-level tools remain internal implementation functions where toolbox routers need them, but they are not exposed through public ChatGPT `tools/list` and direct public calls are denied.
 
 These facade tools are part of the WC-V1-0102 remediation path for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, and `CAV-030`. Live ChatGPT validation is still required before claiming full remediation.
 
-Builder Report discovery should use `get_builder_report_index`. Specific report review should use `get_builder_report_summary`, or `read_project_file` only with a narrow expected report path already returned by the index. Normal ChatGPT workflows should avoid broad `list_project_files` calls that combine `planning/phases`, `**/BUILDER_REPORT*.md`, high `maxResults`, and absolute local roots. The Builder Report facade supports `CAV-033`; live ChatGPT validation is still required before claiming platform safety-layer remediation.
+Builder Report discovery should use `artifact_toolbox.builder_report_index`. Specific report review should use `artifact_toolbox.builder_report_summary`, or `repo_toolbox.read_file` only with a narrow expected report path already returned by the index. Normal ChatGPT workflows should avoid broad file-listing calls. The Builder Report facade supports `CAV-033`; live ChatGPT validation is still required before claiming platform safety-layer remediation.
+
+## Stable Domain Toolbox Tools
+
+WC-V1-FIX05 reduces the public ChatGPT-facing surface to the stable toolbox tools. Future capability expansion should prefer internal allowlisted actions over new top-level MCP tool names. ChatGPT may bind tool schemas for the connector or chat lifecycle, so adding new top-level tools can require connector rediscovery, app reauthorization, or a new chat.
+
+The stable domain toolbox tools are:
+
+- `repo_toolbox`
+- `git_toolbox`
+- `artifact_toolbox`
+- `diagnostics_toolbox`
+- `integration_toolbox`
+- `browser_toolbox`
+- `knowledge_toolbox`
+
+Each toolbox accepts:
+
+```json
+{
+  "action": "status",
+  "workspaceId": "champcity_gpt",
+  "params": {}
+}
+```
+
+The public schema stays stable, but action-specific server-side validation is strict. Unknown actions, unknown services, missing required params, and unsafe params return structured `ok: false` results with supported values where applicable. The toolbox schema does not expose raw roots, absolute paths, shell commands, arbitrary git commands, approval tokens, force/reset/merge/rebase/stash/delete controls, raw tokens, or service secrets.
+
+Workspace routing is stateless per call. Use `diagnostics_toolbox` with `action: "list_workspaces"` to discover safe server-defined workspace IDs such as `champcity_gpt`, then pass the chosen ID on project-specific toolbox calls. `workspaceId: "default"` is accepted only when deterministic: a single workspace is configured, or `defaultWorkspaceId` is explicitly configured. With multiple workspaces and no explicit default, project-specific calls fail with `WORKSPACE_REQUIRED` and safe available workspace IDs.
+
+Toolbox calls return:
+
+```ts
+{
+  toolbox: string;
+  action: string;
+  ok: boolean;
+  result?: unknown;
+  error?: { code: string; message: string; details?: unknown };
+  warnings?: string[];
+  recommendedNextSteps?: string[];
+}
+```
+
+Toolbox visibility uses `files.read`. Write-capable toolbox actions still fail unless the caller has OAuth `files.write` and the local write mode permits the mapped operation. The correct ChatGPT app scopes are `files.read files.write`; `file.read` is a typo and does not grant the required read scope.
+
+### `repo_toolbox`
+
+Initial actions:
+
+- `status`
+- `list_files`
+- `read_file`
+- `search_files`
+- `write_markdown_artifact`
+- `write_json_artifact`
+- `propose_patch`
+- `apply_approved_patch`
+
+Read actions route through the selected workspace and existing file safety policy. `write_markdown_artifact` and `write_json_artifact` require `files.write` plus write mode `docs`, `patch`, or `elevated`. JSON writes only accept repository-relative `.json` paths, parse and normalize JSON, block local/generated/risky paths, and audit writes. Patch actions wrap the existing proposal/apply implementations without accepting public caller-supplied roots.
+
+### `git_toolbox`
+
+Initial actions:
+
+- `status`
+- `diff`
+- `prepare_work_branch`
+- `pre_commit_scan`
+- `stage_paths`
+- `commit_staged`
+- `push_current_branch`
+- `readiness_summary`
+- `integrate_to_dev`
+
+The toolbox does not accept arbitrary git commands, reset, rebase, stash, branch delete, force push, checkout path, or raw branch-name controls. Mutating actions require `files.write` and write mode `elevated`. `prepare_work_branch` delegates to the safe `prepare_git_work_branch` behavior. `integrate_to_dev` is a guarded internal action under `git_toolbox`, not a top-level public MCP tool.
+
+Normal reviewed Work Card lifecycle:
+
+1. Feature branch implementation.
+2. Architect review.
+3. Commit staged changes.
+4. Push feature branch.
+5. Run `git_toolbox.integrate_to_dev` dry run.
+6. Run `git_toolbox.integrate_to_dev` execute with `push: true` after review approval.
+7. Package/promote from `dev` when needed.
+8. Live validation.
+
+### `artifact_toolbox`
+
+Initial actions:
+
+- `builder_report_index`
+- `builder_report_summary`
+- `release_artifact_summary`
+- `release_publication_summary`
+- `local_package_summary`
+
+Read actions return bounded project-artifact summaries. The obsolete Figma-specific Codex handoff prompt action was removed.
+
+### `diagnostics_toolbox`
+
+Initial actions:
+
+- `runtime_status`
+- `write_access_status`
+- `tool_exposure_status`
+- `oauth_scope_status`
+- `chatgpt_discovery_status`
+- `list_workspaces`
+- `public_safety_status`
+
+Diagnostics are redacted and include runtime package version, commit, branch, runtime start time where available, registered tool count, registered tool-name hash, registered toolbox names, workspace-routing summary, observed OAuth scope booleans, local write mode, local write-mode booleans, and latest discovery counts when a discovery trace is available. `list_workspaces` returns safe catalog metadata only: workspace IDs, labels, repository name when available, branch when safely readable, default marker, and expected-remote match status. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, raw credential stores, or unnecessary absolute roots are returned.
+
+`get_write_access_status` also includes a nested diagnostics block when called through MCP so older visible tool surfaces can report runtime, scope, and tool-count state.
+
+### `integration_toolbox`
+
+Initial actions:
+
+- `list_supported_services`
+- `get_service_status`
+- `list_service_capabilities`
+- `validate_service_configuration`
+- `prepare_external_handoff`
+
+Initial service IDs:
+
+```text
+figma
+figma_make
+github
+cloudflare
+playwright
+docker_mcp
+sentry
+linear
+jira
+slack
+notion
+custom
+```
+
+`integration_toolbox` is a governed allowlisted broker, not arbitrary MCP passthrough. It does not accept raw tokens, arbitrary upstream server URLs, arbitrary HTTP methods, arbitrary upstream MCP tool names, or arbitrary service API methods. Figma belongs under `integration_toolbox` as service IDs `figma` and `figma_make`; no `figma_toolbox` is added. Figma status/capability/configuration actions return broker-not-implemented placeholders and do not call old direct Figma API, token, or MCP code.
+
+### `browser_toolbox`
+
+Initial actions:
+
+- `get_browser_capabilities`
+- `validate_public_endpoint`
+
+This toolbox is constrained validation, not browser scraping. WC-V1-FIX02 does not add live browser automation, Playwright MCP invocation, credential entry, cookies, screenshots by default, raw network headers, or ChatGPT UI scraping.
+
+### `knowledge_toolbox`
+
+Initial actions:
+
+- `list_supported_sources`
+- `get_project_memory_status`
+- `get_reference_capabilities`
+
+This toolbox is an optional reference/context facade. It does not add arbitrary web fetch, private document connector scraping, hidden persistent memory mutation, or memory writes.
 
 ## Local MCP Protocol Self-Test
 
@@ -41,7 +203,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-This self-test checks the local tool registry, MCP `tools/list` schema validity, required read and gated tool registration, narrow safe-facade schemas, tool description safety phrases, safe read-only facade calls, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, and elevated-script gating. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
+This self-test checks the local tool registry, MCP `tools/list` schema validity, the exact seven-tool public toolbox surface, required internal gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, tool description safety phrases, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, hidden `run_allowed_script` public exposure, and gated branch workflow tool coverage. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
 
 This self-test complements but does not replace live ChatGPT connector validation.
 
@@ -57,7 +219,11 @@ npm run chatgpt:evidence:validate -- --file planning/phases/phase-v1.0/Live_Conn
 
 Use the local MCP self-test output as deterministic baseline evidence only. Live ChatGPT connector evidence must come from manual operator observations or explicit ChatGPT tool results, and must keep public endpoints, local paths, OAuth material, local config contents, and secrets redacted.
 
-The elevated approval token is configured in `config/write-access.local.json` as a salted hash, or temporarily through `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` for dev/manual testing. Static bearer tokens are legacy/manual testing only; ChatGPT.com uses OAuth.
+The elevated approval token is configured in `config/write-access.local.json` as a salted hash, or temporarily through `CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN` for dev/manual testing. Static bearer tokens are temporary legacy/manual testing fallback only; ChatGPT.com public connector setup uses OAuth/DCR.
+
+## Internal Legacy Implementations
+
+The following entries describe internal implementation functions retained for toolbox routers and local maintenance context. They are not exposed as top-level public ChatGPT tools after WC-V1-FIX05.
 
 ## `list_project_files`
 
@@ -183,197 +349,13 @@ Input:
 {}
 ```
 
-Output summary: `writeMode`, `writeModeSource`, docs/patch/elevated booleans, whether the elevated token is configured, pending patch proposal count, and `oauthFilesWriteGranted` as `unknown` when the tool layer cannot see OAuth context.
+Output summary: `writeMode`, `writeModeSource`, docs/patch/elevated booleans, whether the elevated token is configured, pending patch proposal count, `oauthFilesWriteGranted`, and a nested redacted diagnostics block when MCP call context is available.
 
-## `get_figma_status`
+## Figma Broker Placeholder
 
-v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
+The obsolete direct Figma and Figma Make tools were removed from public MCP exposure and from the direct implementation tree. There is no `figma_toolbox`.
 
-Returns whether a Figma token is configured and where it came from. It never returns the token value.
-
-Input:
-
-```json
-{}
-```
-
-Output summary: `configured` and `source`, where source is `env`, `local-file`, `dev-local-file`, or `none`.
-
-## `parse_figma_url`
-
-Parses common Figma URLs without making a network call.
-
-Input:
-
-```json
-{
-  "url": "https://www.figma.com/design/<fileKey>/<name>?node-id=1-23"
-}
-```
-
-Output summary: `fileKey`, normalized `nodeId` such as `1:23`, and `urlType` as `design`, `file`, or `proto`.
-
-## `fetch_figma_file_summary`
-
-Fetches a Figma file using the locally configured token and returns compact metadata only. Requires OAuth `files.read` for HTTP callers.
-
-Input:
-
-```json
-{
-  "fileKey": "<FIGMA_FILE_KEY>",
-  "maxFrames": 100
-}
-```
-
-Output summary: file name, pages, top-level frames, component counts, component-set counts, and style summary. It does not return raw Figma JSON.
-
-## `fetch_figma_frame_image`
-
-Exports one Figma frame image into an allowed root. Requires a local Figma token, OAuth `files.write` for HTTP callers, and local write mode `docs`, `patch`, or `elevated`.
-
-Input:
-
-```json
-{
-  "root": "C:\\Users\\<you>\\Projects\\<project>",
-  "fileKey": "<FIGMA_FILE_KEY>",
-  "nodeId": "1:23",
-  "format": "png",
-  "scale": 2,
-  "relativeOutputPath": "design/figma-handoff/screenshots/frame.png",
-  "overwrite": false
-}
-```
-
-Output summary: relative path, size, and SHA-256. Path traversal, absolute paths, blocked files, and overwrites without `overwrite: true` are rejected before writing.
-
-## `create_figma_handoff_package`
-
-Creates a structured Figma design handoff package under an allowed root. Requires a local Figma token, OAuth `files.write` for HTTP callers, and local write mode `docs`, `patch`, or `elevated`.
-
-Input:
-
-```json
-{
-  "root": "C:\\Users\\<you>\\Projects\\<project>",
-  "figmaUrl": "https://www.figma.com/design/<fileKey>/<name>?node-id=1-23",
-  "targetArea": "launcher dashboard",
-  "relativeOutputDir": "design/figma-handoff",
-  "overwrite": false
-}
-```
-
-Generated structure:
-
-```text
-design/figma-handoff/
-  README_DESIGN_HANDOFF.md
-  figma-link.txt
-  specs/screen-map.md
-  specs/component-inventory.md
-  specs/interaction-notes.md
-  specs/implementation-notes.md
-  specs/acceptance-criteria.md
-  tokens/design-tokens.json
-  screenshots/
-  assets/
-```
-
-Output summary: handoff directory, files created, screenshots created, and warnings. The original Figma URL is included. The Figma token is never written.
-
-## `create_codex_ui_handoff_prompt`
-
-Creates a Codex-ready UI implementation prompt that points Codex at the Figma handoff package. Requires OAuth `files.write` for HTTP callers and local write mode `docs`, `patch`, or `elevated`.
-
-Input:
-
-```json
-{
-  "root": "C:\\Users\\<you>\\Projects\\<project>",
-  "handoffPath": "design/figma-handoff",
-  "targetFile": "docs/handoffs/CODEX_UI_REDESIGN_HANDOFF.md",
-  "targetArea": "launcher dashboard",
-  "overwrite": false
-}
-```
-
-Output summary: target file, size, and SHA-256. The prompt tells Codex to use the handoff as design authority, preserve MCP/OAuth/Cloudflare/write-mode/public-safety behavior, keep Electron isolation settings, avoid Playwright, run validation, and report changed files.
-
-## `run_figma_make_handoff`
-
-Runs the one-shot ChatGPT-callable Figma Make handoff workflow. Requires OAuth `files.write` for HTTP callers, local write mode `docs`, `patch`, or `elevated`, and a configured upstream official Figma MCP server. ChatGPT passes the Make URL only; it never passes or receives Figma tokens, auth headers, cookies, or session credentials.
-
-Input:
-
-```json
-{
-  "makeUrl": "https://www.figma.com/make/<makeProjectId>/<slug>?p=f&t=...",
-  "targetUiArea": "ChampCity GPT UI",
-  "implementationScope": "Implement the UI shown in the Make handoff.",
-  "outputDirectory": "design/figma-handoff/make",
-  "codexPromptFile": "docs/handoffs/CODEX_FIGMA_MAKE_UI_HANDOFF.md",
-  "notes": "Optional user notes"
-}
-```
-
-Output summary: `status`, `urlType`, `makeProjectId`, preserved `makeUrl`, handoff directory, Codex prompt file, created files, empty `screenshots`, metadata files, `resourceFiles`, warnings, and errors.
-
-Generated structure:
-
-```text
-  design/figma-handoff/make/
-    source-url.json
-    make-project.json
-    figma-mcp-connection.json
-    figma-mcp-resource-inventory.json
-    extracted-resource-inventory.md
-    extraction-summary.md
-    CODEX_FIGMA_MAKE_UI_HANDOFF.md
-    source/
-      retrieved Make files/resources
-  docs/handoffs/CODEX_FIGMA_MAKE_UI_HANDOFF.md
-  ```
-
-Success requires actual Make resources/files retrieved through official Figma MCP resource content and written under `source/`. Partial requires at least one official MCP resource file plus one or more failed resource reads. If no Make resources/files are retrieved, the status is `failed`; metadata-only and screenshot-only output are not success paths. Screenshots are intentionally not generated for Figma Make MCP resource handoffs, and `screenshots` remains an empty array for backward-compatible output shape.
-
-## `run_figma_make_file_handoff`
-
-Runs the local fallback Figma Make handoff workflow for exported `.make` packages. Requires OAuth `files.write` for HTTP callers and local write mode `docs`, `patch`, or `elevated`. ChatGPT passes a local `.make` file path under configured allowed roots; the tool parses the package directly and does not use screenshots, browser scraping, network scraping, clipboard automation, or Figma Design conversion.
-
-Input:
-
-```json
-{
-  "makeFilePath": "C:\\Users\\<you>\\Projects\\ChampCity_GPT\\exports\\example.make",
-  "targetUiArea": "ChampCity GPT UI",
-  "implementationScope": "Implement the UI from the exported Make package.",
-  "outputDirectory": "design/figma-handoff/make-file",
-  "codexPromptFile": "docs/handoffs/CODEX_FIGMA_MAKE_FILE_HANDOFF.md",
-  "notes": "Optional user notes"
-}
-```
-
-Output summary: `status`, `sourceType: figma_make_file`, safe `.make` path, handoff directory, Codex prompt file, created files, metadata/report files, raw resource files, copied asset files, reconstructed source files, warnings, and errors.
-
-Supported package entries include `meta.json`, `ai_chat.json`, `make_binary_files.json`, `canvas.fig`, `thumbnail.png`, `images/`, `make_binary_files/`, and `blob_store/` when present. The tool writes raw important package files under `raw/`, assets under `assets/`, reconstructed source under `source/`, inventories under `source-package/`, reports under `reports/`, and a Codex prompt both at the requested prompt path and inside the package directory.
-
-Source reconstruction inspects `ai_chat.json` for Make messages, versions, tool calls, file paths, full-file writes, edit operations, code fences, snapshot keys, and blob references. It writes only deterministic recovered source, reports edit-only files as partial, records provenance and confidence, preserves raw `ai_chat.json`, redacts likely secrets, and fails metadata-only packages that do not provide useful implementation evidence.
-
-## `test_figma_mcp_connection`
-
-Tests the configured upstream Figma MCP server connection and lists available resources/templates/tools/prompts when reachable.
-
-Input:
-
-```json
-{
-  "endpoint": "http://127.0.0.1:3845/mcp",
-  "mode": "desktop"
-}
-```
-
-Both fields are optional overrides. Without overrides, the app uses `figma-mcp.local.json`, `CHAMPCITY_GPT_FIGMA_MCP_ENDPOINT`, or the desktop default `http://127.0.0.1:3845/mcp`.
+Future Figma support belongs under `integration_toolbox` as governed broker behavior. For now, `integration_toolbox.get_service_status`, `integration_toolbox.list_service_capabilities`, and `integration_toolbox.validate_service_configuration` for `figma` or `figma_make` return static broker-not-implemented placeholders with `governedBrokerOnly: true`, `arbitraryUpstreamMcpPassthrough: false`, and `legacyDirectFigmaToolsRemoved: true`.
 
 ## `get_workspace_status_summary`
 
@@ -454,7 +436,7 @@ Input:
 }
 ```
 
-`workspaceId` may be `default`, `all_allowed`, or a safe alias derived from a configured allowed root folder name or git remote repo name. It is never interpreted as a filesystem path. `maxResults` defaults to `25` and is capped at `50`.
+`workspaceId` may be an explicit configured workspace ID, a safe ID derived from a legacy configured allowed root folder name, `default` when deterministic, or `all_allowed` for index scans. It is never interpreted as a filesystem path. `maxResults` defaults to `25` and is capped at `50`.
 
 Output summary: workspace ID/label, optional repository name, query metadata, report metadata, result count, truncation flag, warnings, and safety notes. Report paths are repository-relative. The index returns metadata only, not report contents.
 
@@ -546,6 +528,29 @@ Input:
 
 Output summary: `readyToCommit`, `readyToPush`, current branch, staged files, blocker findings, warnings, and recommended next steps.
 
+## `prepare_git_work_branch`
+
+Prepares `dev` or a generated `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` branch. Requires OAuth `files.write` and local write mode `elevated`.
+
+Input:
+
+```json
+{
+  "workspaceId": "default",
+  "branchKind": "feature",
+  "workCardId": "WC-V1-FIX01",
+  "slug": "safe-branch-workflow-tool",
+  "baseBranch": "dev",
+  "createIfMissing": true
+}
+```
+
+Output summary: branch before/after, whether the branch was created or switched, selected base branch, target branch, clean status before/after, warnings, and recommended next steps.
+
+Safety behavior: the tool does not accept a raw branch name, root path, command, script, shell, args, `approvalToken`, force, reset, merge, rebase, stash, delete, or clobber field. It refuses dirty working trees, staged changes, untracked files, detached HEAD, `main` as the active work target, invalid Work Card IDs, unsafe slugs, missing base branches, and existing target branches that are not based on the selected base branch. It validates the generated branch with `git check-ref-format --branch`. It does not push, merge, rebase, reset, stash, delete branches, tag, or run arbitrary commands.
+
+Active Work Cards should use `dev` or a Work Card feature branch. `main` is reserved for stable release or baseline checkpoints. After branch preparation, the normal sequence is validate, stage reviewed files with `safe_stage_changes`, run `pre_commit_safety_scan`, commit with `commit_validated_changes`, push the current `dev` or feature branch with `push_current_branch`, and merge to `main` only at a stable checkpoint.
+
 ## `safe_stage_changes`
 
 Stages only files that pass public-repo safety rules. Requires OAuth `files.write` and local write mode `elevated`.
@@ -608,6 +613,38 @@ Input:
 Output summary: branch, remote, pushed boolean, sanitized stdout/stderr, and redacted remote URL.
 
 Safety behavior: only `origin` is accepted, force flags are never used, `main` push is refused unless `allowMainPush` is explicitly `true`, and remote URLs are redacted before returning output.
+
+## `git_toolbox.integrate_to_dev`
+
+Integrates a reviewed feature branch into `dev` through the public `git_toolbox` dispatcher. It is not registered as a top-level MCP tool.
+
+Input:
+
+```json
+{
+  "action": "integrate_to_dev",
+  "workspaceId": "champcity_gpt",
+  "params": {
+    "sourceBranch": "feature/WC-V1-0401-harden-oauth-dcr-public-connector",
+    "targetBranch": "dev",
+    "push": false,
+    "requireCleanWorkingTree": true,
+    "requireSourceBranchPushed": true,
+    "requireValidationReport": true,
+    "validationReportPath": "planning/phases/phase-v1.0/Builder_Reports/BUILDER_REPORT_WC-V1-0401_harden_oauth_dcr_public_connector.md",
+    "mergeMode": "no-ff",
+    "dryRun": true
+  }
+}
+```
+
+Defaults: `sourceBranch` is the current branch, `targetBranch` is `dev`, `push` is `false`, `requireCleanWorkingTree` is `true`, `requireSourceBranchPushed` is `true`, `requireValidationReport` is `true`, `mergeMode` is `no-ff`, and `dryRun` is `true`.
+
+Dry run does not mutate git state. It reports the resolved workspace, repository identity, source/target branch existence, upstream/pushed status, source and target commits, commits that would be integrated, validation report status, blockers, warnings, and planned operations.
+
+Execute mode only proceeds when guardrails pass. It resolves the workspace by `workspaceId`, requires a clean working tree, rejects `main` and `dev` as source branches, requires local source branch existence, requires local `dev` or an existing `origin/dev` tracking branch, requires the source branch to be pushed, requires a Builder Report unless explicitly disabled, uses `git merge --no-ff` by default, aborts on conflicts, runs `git diff --check`, `npm run check:public`, and `npm run mcp:self-test -- --json` after merge, and pushes only with `git push origin dev` when `push: true` and checks pass.
+
+Safety behavior: the action does not accept a root path, shell command, approval token, arbitrary git command, force option, rebase option, reset option, stash option, branch deletion option, tag option, package option, release option, or `main` target. It does not package or publish releases. If `push: false`, a successful local `dev` merge is left unpushed and reported.
 
 ## `run_allowed_script`
 

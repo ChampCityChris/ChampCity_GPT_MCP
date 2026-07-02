@@ -14,6 +14,12 @@ export const OAUTH_PUBLIC_MCP_URL = `${OAUTH_PUBLIC_ISSUER}/mcp`;
 export const OAUTH_SCOPES = ["files.read", "files.write"] as const;
 export type OAuthScope = (typeof OAUTH_SCOPES)[number];
 
+const DCR_GRANT_TYPES = ["authorization_code", "refresh_token"] as const;
+const DCR_RESPONSE_TYPES = ["code"] as const;
+const MAX_CLIENT_METADATA_STRING_LENGTH = 200;
+const MAX_CLIENT_URI_LENGTH = 2048;
+const MAX_REDIRECT_URI_LENGTH = 2048;
+
 export interface OAuthClient {
   client_id: string;
   redirect_uris: string[];
@@ -210,21 +216,121 @@ function assertStringArray(value: unknown, label: string): string[] {
   return value.map((entry) => entry.trim());
 }
 
+function isLocalOAuthHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
+}
+
+function assertSupportedStringArray<T extends string>(
+  value: unknown,
+  label: string,
+  supportedValues: readonly T[],
+  requiredValue: T
+): T[] {
+  const entries = assertStringArray(value, label);
+  const unsupported = entries.filter((entry) => !supportedValues.includes(entry as T));
+  if (unsupported.length > 0) {
+    throw new Error(`${label} contains unsupported value "${unsupported[0]}".`);
+  }
+
+  if (!entries.includes(requiredValue)) {
+    throw new Error(`${label} must include ${requiredValue}.`);
+  }
+
+  return [...new Set(entries)] as T[];
+}
+
+function assertOAuthUrl(value: string, label: string, maxLength: number): string {
+  if (value.length > maxLength) {
+    throw new Error(`${label} is too long.`);
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${label} must be an absolute http or https URL.`);
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error(`${label} must not include credentials.`);
+  }
+
+  if (parsed.hash) {
+    throw new Error(`${label} must not include a fragment.`);
+  }
+
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== "https:" && !(protocol === "http:" && isLocalOAuthHostname(parsed.hostname))) {
+    throw new Error(`${label} must use https, except localhost http URLs for local testing.`);
+  }
+
+  return parsed.toString();
+}
+
 function assertRedirectUriArray(value: unknown): string[] {
   if (!Array.isArray(value) || value.length === 0 || value.some((entry) => typeof entry !== "string" || entry === "")) {
     throw new Error("redirect_uris must be a non-empty array of strings.");
   }
 
-  return [...(value as string[])];
+  return [...new Set((value as string[]).map((entry) => assertOAuthUrl(entry.trim(), "redirect_uri", MAX_REDIRECT_URI_LENGTH)))];
 }
 
-export function normalizeOAuthPublicBaseUrl(value: string): string {
-  const normalized = value.trim().replace(/\/+$/u, "");
+function optionalClientMetadataString(value: unknown, label: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be a string.`);
+  }
+
+  const normalized = value.trim();
   if (!normalized) {
-    return DEFAULT_OAUTH_PUBLIC_BASE_URL;
+    return undefined;
+  }
+
+  if (normalized.length > MAX_CLIENT_METADATA_STRING_LENGTH) {
+    throw new Error(`${label} is too long.`);
+  }
+
+  if (/[\r\n]/u.test(normalized)) {
+    throw new Error(`${label} must be a single line.`);
   }
 
   return normalized;
+}
+
+function optionalClientUri(value: unknown): string | undefined {
+  const normalized = optionalClientMetadataString(value, "client_uri");
+  return normalized ? assertOAuthUrl(normalized, "client_uri", MAX_CLIENT_URI_LENGTH) : undefined;
+}
+
+export function normalizeOAuthPublicBaseUrl(value: string): string {
+  const raw = value.trim();
+  if (!raw) {
+    return DEFAULT_OAUTH_PUBLIC_BASE_URL;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return DEFAULT_OAUTH_PUBLIC_BASE_URL;
+  }
+
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== "https:" && !(protocol === "http:" && isLocalOAuthHostname(parsed.hostname))) {
+    return DEFAULT_OAUTH_PUBLIC_BASE_URL;
+  }
+
+  parsed.username = "";
+  parsed.password = "";
+  parsed.search = "";
+  parsed.hash = "";
+
+  const pathname = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/u, "");
+  return `${parsed.protocol}//${parsed.host}${pathname}` || DEFAULT_OAUTH_PUBLIC_BASE_URL;
 }
 
 export function getOAuthPublicBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
@@ -383,14 +489,20 @@ export function registerOAuthClient(repoRoot: string, payload: Record<string, un
   if (tokenEndpointAuthMethod !== "none") {
     throw new Error("token_endpoint_auth_method must be none for ChatGPT public PKCE clients.");
   }
+  const grantTypes = Array.isArray(payload.grant_types)
+    ? assertSupportedStringArray(payload.grant_types, "grant_types", DCR_GRANT_TYPES, "authorization_code")
+    : [...DCR_GRANT_TYPES];
+  const responseTypes = Array.isArray(payload.response_types)
+    ? assertSupportedStringArray(payload.response_types, "response_types", DCR_RESPONSE_TYPES, "code")
+    : [...DCR_RESPONSE_TYPES];
 
   const client: OAuthClient = {
     client_id: `champcity_${randomBytes(18).toString("base64url")}`,
     redirect_uris: redirectUris,
-    client_name: typeof payload.client_name === "string" ? payload.client_name : undefined,
-    client_uri: typeof payload.client_uri === "string" ? payload.client_uri : undefined,
-    grant_types: Array.isArray(payload.grant_types) ? assertStringArray(payload.grant_types, "grant_types") : ["authorization_code"],
-    response_types: Array.isArray(payload.response_types) ? assertStringArray(payload.response_types, "response_types") : ["code"],
+    client_name: optionalClientMetadataString(payload.client_name, "client_name"),
+    client_uri: optionalClientUri(payload.client_uri),
+    grant_types: grantTypes,
+    response_types: responseTypes,
     scope: normalizeScope(payload.scope),
     created_at: nowIso()
   };

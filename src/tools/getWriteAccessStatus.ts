@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { type AppConfig } from "../config.js";
 import { getPendingPatchProposalCount } from "../pendingPatches.js";
+import { type RuntimeScopeToolDiagnostics } from "./domainToolboxes.js";
 import { withAudit } from "./common.js";
 
 export const GetWriteAccessStatusInputSchema = z.object({});
@@ -15,9 +16,14 @@ export interface GetWriteAccessStatusOutput {
   legacyApprovalTokenConfigured: boolean;
   pendingPatchProposalCount: number;
   oauthFilesWriteGranted: boolean | "unknown";
+  diagnostics?: RuntimeScopeToolDiagnostics;
 }
 
-export async function getWriteAccessStatus(rawInput: unknown, config: AppConfig): Promise<GetWriteAccessStatusOutput> {
+export async function getWriteAccessStatus(
+  rawInput: unknown,
+  config: AppConfig,
+  diagnostics?: RuntimeScopeToolDiagnostics
+): Promise<GetWriteAccessStatusOutput> {
   return withAudit(config, { toolName: "get_write_access_status" }, async () => {
     GetWriteAccessStatusInputSchema.parse(rawInput);
     return {
@@ -28,7 +34,8 @@ export async function getWriteAccessStatus(rawInput: unknown, config: AppConfig)
       elevatedOperationsAllowed: config.elevatedOperationsAllowed,
       legacyApprovalTokenConfigured: config.writeApprovalToken.source !== "none",
       pendingPatchProposalCount: getPendingPatchProposalCount(config.repoRoot),
-      oauthFilesWriteGranted: "unknown"
+      oauthFilesWriteGranted: diagnostics?.oauth.filesWriteGranted ?? "unknown",
+      ...(diagnostics ? { diagnostics } : {})
     };
   });
 }

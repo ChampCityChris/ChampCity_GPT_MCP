@@ -14,6 +14,10 @@ This queue is derived from the answered operator intake file:
 - P0 means a v1.0 blocker unless explicitly waived by the operator.
 - P1/P2 items may clarify sequencing but must not convert deferred features into v1.0 commitments.
 - No Work Card in this queue authorizes fallback architecture, release publication, tag movement, package generation, source implementation, or protected-subsystem changes outside its own future approved scope.
+- Active implementation Work Cards should use `dev` or a generated `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` branch. `main` is reserved for stable release or baseline checkpoints.
+- `prepare_git_work_branch` is the safe MCP branch-preparation path. It refuses dirty working trees and `main` as the active work target, and it does not push, merge, rebase, reset, stash, delete, force, or run arbitrary commands.
+- Stable domain toolbox expansion should prefer internal allowlisted actions under `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox` instead of adding new top-level MCP tools when possible. After `WC-V1-FIX05`, these seven toolbox tools are the only public ChatGPT-visible tools. Figma belongs under `integration_toolbox` as governed broker behavior; do not add `figma_toolbox`.
+- Normal reviewed Work Card lifecycle is feature branch implementation, Architect review, commit staged changes, push the feature branch, run `git_toolbox.integrate_to_dev` dry run, run `git_toolbox.integrate_to_dev` execute with `push: true`, package/promote from `dev` when needed, live validation, and merge to `main` only at a stable checkpoint.
 
 ## Phase 0 — Scope Lock And Baseline
 
@@ -125,6 +129,45 @@ This queue is derived from the answered operator intake file:
 
 ## Phase 2 — Safe Purpose-Built MCP Tool Architecture
 
+### WC-V1-FIX02 — Add stable domain toolbox tools
+
+- ID: `WC-V1-FIX02`
+- Title: Add stable domain toolbox tools
+- Priority: P0
+- Owner mode: Codex/Builder
+- Type: MCP reliability / tool governance
+- Objective: Add a durable small set of top-level MCP toolbox tools so future capability expansion can prefer internal allowlisted actions over new top-level MCP tools.
+- Scope: Add `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox` with minimal safe initial actions. Preserve existing legacy tools. Do not add `figma_toolbox`; Figma and other external services belong under `integration_toolbox`.
+- Acceptance criteria: The seven toolbox tools are registered and visible with `files.read`; write-capable actions fail safely without OAuth `files.write` and local write-mode permission; unknown actions and unknown services fail with structured errors; toolbox schemas avoid forbidden root, command, token, force/reset/merge/rebase/stash/delete, and secret fields; MCP self-test covers the toolbox surface.
+- Validation: Typecheck, unit tests, lint, build, public safety scan, MCP self-test, ChatGPT evidence template validation, diff check, and live ChatGPT connector validation by the operator after runtime update.
+- Dependencies or notes: Depends on `WC-V1-FIX01` and `prepare_git_work_branch`. This card reduces top-level MCP schema churn but does not migrate or remove existing narrow tools.
+
+### WC-V1-FIX04 — Add explicit multi-workspace routing for toolbox actions
+
+- ID: `WC-V1-FIX04`
+- Title: Add explicit multi-workspace routing for toolbox actions
+- Priority: P0
+- Owner mode: Codex/Builder
+- Type: MCP reliability / workspace routing
+- Objective: Route project-specific toolbox actions through server-defined workspace IDs instead of a single global default workspace.
+- Scope: Add a workspace registry to runtime config, preserve legacy `allowedRoots`, add safe workspace discovery, and route repo/git/artifact/diagnostics/integration/browser/knowledge toolbox actions through explicit `workspaceId` resolution. Preserve legacy tools and do not add `figma_toolbox`.
+- Acceptance criteria: Multiple allowed workspaces produce stable safe workspace IDs; `diagnostics_toolbox.list_workspaces` returns safe metadata without unnecessary absolute roots; explicit workspace IDs route repo/git/artifact actions to the selected fixture repo; ambiguous `workspaceId: default` fails safely when multiple workspaces exist and no explicit default is configured; public toolbox schemas remain `action`, `workspaceId`, and `params`.
+- Validation: Typecheck, unit tests, lint, build, public safety scan, MCP self-test including multi-workspace fixtures, ChatGPT evidence template validation, diff check, and live ChatGPT connector validation by the operator after package promotion.
+- Dependencies or notes: Depends on `WC-V1-FIX02`. Do not implement mutable active workspace state, fallback routing, public root params, OAuth changes, Cloudflare changes, packaging, release publication, or `WC-V1-0401`.
+
+### WC-V1-FIX06 — Add guarded dev integration action to git_toolbox
+
+- ID: `WC-V1-FIX06`
+- Title: Add guarded dev integration action to git_toolbox
+- Priority: P0
+- Owner mode: Codex/Builder
+- Type: Source-control workflow / MCP reliability
+- Objective: Allow a reviewed feature branch to be integrated into `dev` through an internal allowlisted `git_toolbox` action instead of adding another public top-level MCP tool.
+- Scope: Add `git_toolbox.integrate_to_dev` with dry-run and execute modes, strict workspace resolution by `workspaceId`, clean-tree/source/target/upstream/Builder Report guardrails, fixed post-merge validation checks, optional safe push to `origin/dev`, tests, docs, and Builder Reports.
+- Acceptance criteria: Public ChatGPT-facing tool surface remains exactly the seven toolbox tools; no `dev_toolbox`, `branch_toolbox`, direct top-level `integrate_to_dev`, legacy direct tool, `figma_toolbox`, or `run_allowed_script` public exposure is added; dry run mutates nothing; execute refuses blockers and only pushes `dev` after validation passes.
+- Validation: Typecheck, unit tests with temporary fixture repositories, lint, build, public safety scan, MCP self-test, ChatGPT evidence template validation, diff check, package/promote only when the card explicitly requests it, and live old-chat toolbox-action validation by the operator after runtime promotion.
+- Dependencies or notes: Depends on `WC-V1-FIX05` stable public toolbox surface. This card does not authorize merging to `dev`, merging to `main`, tagging, release publication, OAuth/DCR changes, Cloudflare changes, or fallback architectures.
+
 ### WC-V1-0201 — Replace arbitrary command execution with purpose-built tools
 
 - ID: `WC-V1-0201`
@@ -203,7 +246,7 @@ This queue is derived from the answered operator intake file:
 - Scope: Provide purpose-built status, diff, scan, stage, commit, pull, push, tag-preflight, and evidence tools with guardrails.
 - Acceptance criteria: ChatGPT can coordinate normal source-control flow without asking the operator to run git commands manually.
 - Validation: Unit tests, sandbox/repo identity tests, public safety scan, and live ChatGPT workflow validation.
-- Dependencies or notes: Must not allow unsafe git reset, checkout, force-push, or tag movement without explicit future approval.
+- Dependencies or notes: Must not allow unsafe git reset, checkout, force-push, or tag movement without explicit future approval. `WC-V1-FIX01` adds the narrow `prepare_git_work_branch` prerequisite for safe `dev` or Work Card feature branch preparation; broader source-control workflow remains in this card.
 
 ### WC-V1-0302 — Build MCP-native release publication workflow
 
@@ -244,7 +287,7 @@ This queue is derived from the answered operator intake file:
 - Scope: Verify dynamic client registration, protected resource metadata, token flow, scope enforcement, and public connector documentation.
 - Acceptance criteria: Public setup does not require bearer/PAT/manual auth except when separately approved for safety-layer compatibility.
 - Validation: OAuth/DCR tests, live ChatGPT connector validation, and operator setup review.
-- Dependencies or notes: Protected OAuth/DCR subsystem; implementation requires a separate approved card.
+- Dependencies or notes: Protected OAuth/DCR subsystem; implementation requires a separate approved card. `WC-V1-0401` remains paused until `WC-V1-FIX01` is reviewed, committed, pushed, and available through MCP.
 
 ### WC-V1-0402 — Implement Cloudflare tunnel persistence setup and validation
 
@@ -451,4 +494,4 @@ This queue is derived from the answered operator intake file:
 
 ## Work Card Count
 
-This queue contains 32 P0 Work Cards.
+This queue contains 35 P0 Work Cards.

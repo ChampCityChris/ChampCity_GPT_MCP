@@ -68,28 +68,43 @@ describe("ChatGPT HTTP endpoint docs", () => {
   });
 
   it("does not write raw HTTP auth tokens into generated ChatGPT notes", () => {
-    const rawToken = "raw-test-token-should-not-appear";
+    const sensitiveFixture = ["SENSITIVE", "TEST", "VALUE", "DO", "NOT", "EMIT"].join("_");
     const notes = createChatGptSetupNotes(repoRoot, {
-      CHAMPCITY_GPT_HTTP_AUTH_TOKEN: rawToken,
+      CHAMPCITY_GPT_HTTP_AUTH_TOKEN: sensitiveFixture,
       CHAMPCITY_GPT_ENABLE_WRITE_TOOLS: "false"
     });
 
     assert.match(notes, /Legacy\/manual bearer auth configured: yes/i);
     assert.match(notes, /Bearer token value: not displayed or written/i);
-    assert.doesNotMatch(notes, new RegExp(rawToken));
+    assert.doesNotMatch(notes, new RegExp(sensitiveFixture));
+  });
+
+  it("keeps generated ChatGPT notes free of local paths and OAuth store locations", () => {
+    const notes = createChatGptSetupNotes(repoRoot, {
+      CHAMPCITY_GPT_ENABLE_WRITE_TOOLS: "false"
+    });
+    const escapedRepoRoot = repoRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    assert.match(notes, /OAuth store paths: not included/i);
+    assert.match(notes, /Allowed root count:/i);
+    assert.match(notes, /Local allowed-root paths are not included/i);
+    assert.doesNotMatch(notes, new RegExp(escapedRepoRoot, "u"));
+    assert.doesNotMatch(notes, /[A-Z]:\\Users\\/iu);
+    assert.doesNotMatch(notes, /oauth-(?:admin|clients|tokens)\.local\.json/iu);
+    assert.doesNotMatch(notes, /config\\oauth/iu);
   });
 
   it("does not write raw write approval tokens into generated ChatGPT notes", () => {
-    const rawToken = "raw-write-token-should-not-appear";
+    const sensitiveFixture = ["SENSITIVE", "WRITE", "VALUE", "DO", "NOT", "EMIT"].join("_");
     const notes = createChatGptSetupNotes(repoRoot, {
-      CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN: rawToken,
+      CHAMPCITY_GPT_WRITE_APPROVAL_TOKEN: sensitiveFixture,
       CHAMPCITY_GPT_ENABLE_WRITE_TOOLS: "true"
     });
 
     assert.match(notes, /Elevated approval token configured: yes/i);
     assert.match(notes, /Elevated approval token value: not displayed or written/i);
     assert.match(notes, /Elevated approval is still required for scripts/i);
-    assert.doesNotMatch(notes, new RegExp(rawToken));
+    assert.doesNotMatch(notes, new RegExp(sensitiveFixture));
   });
 
   it("does not tell ChatGPT that approvalToken is required for all writes", () => {

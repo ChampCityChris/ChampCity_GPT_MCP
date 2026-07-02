@@ -6,7 +6,9 @@ export type AppErrorCode =
   | "COMMAND_DENIED"
   | "APPROVAL_REQUIRED"
   | "GIT_REQUIRED"
-  | "PROCESS_FAILED";
+  | "PROCESS_FAILED"
+  | "WORKSPACE_REQUIRED"
+  | "WORKSPACE_NOT_FOUND";
 
 export class AppError extends Error {
   readonly code: AppErrorCode;

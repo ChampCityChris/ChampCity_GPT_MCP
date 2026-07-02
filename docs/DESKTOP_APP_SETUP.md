@@ -15,7 +15,7 @@ The packaged launcher runs the HTTP MCP server in-process from Electron. End use
 - Opens the generated config folder, audit log, logs folder, and documentation.
 - Starts and stops the local HTTP MCP server in-process from Electron.
 - Configures ChatGPT OAuth setup: admin password, client reset, token revocation, metadata links, MCP URL copy, and OAuth setup notes.
-- Configures the HTTP auth token through a desktop modal instead of the browser prompt API.
+- Configures a legacy/manual HTTP auth token through a desktop modal for local testing or temporary operator-approved fallback only.
 - Shows the current experimental/deferred Figma handoff controls.
 - Shows runtime mode and runtime-local config/log/generated directories.
 - Runs a first-run setup wizard when required runtime config is missing.
@@ -184,6 +184,25 @@ The local config shape is:
 }
 ```
 
+For concurrent project work, the same file may define server-named workspaces:
+
+```json
+{
+  "workspaces": [
+    {
+      "workspaceId": "champcity_gpt",
+      "label": "ChampCity GPT MCP",
+      "root": "C:\\Users\\<you>\\Projects\\ChampCity_GPT",
+      "remote": "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git"
+    }
+  ],
+  "defaultWorkspaceId": "champcity_gpt",
+  "requireGitRoot": true
+}
+```
+
+`allowedRoots` remains supported. If only `allowedRoots` is configured, the server derives safe workspace IDs from folder names. ChatGPT-facing toolbox calls should use `diagnostics_toolbox.list_workspaces` and pass explicit workspace IDs instead of local paths.
+
 Environment variables still override the local config. The local config overrides safe defaults.
 
 ## Configure ChatGPT OAuth
@@ -221,18 +240,7 @@ Actions:
 - `Copy MCP Server URL`
 - `Generate ChatGPT OAuth Setup Notes`
 
-The admin password is stored only as a hash in:
-
-```text
-oauth-admin.local.json
-```
-
-Registered clients, hashed access tokens, and hashed refresh-session metadata are stored in ignored local files:
-
-```text
-oauth-clients.local.json
-oauth-tokens.local.json
-```
+The admin password is stored only as a runtime-local hash. Registered clients, hashed access tokens, and hashed refresh-session metadata are stored in runtime-local ignored OAuth state files.
 
 The launcher never displays passwords, access tokens, refresh tokens, client secrets, or bearer tokens in status, generated notes, logs, or docs. Access tokens default to 2 hours, 7200 seconds. Refresh tokens default to 30 days, 2592000 seconds, and keep ChatGPT connected across access-token expiry. Do not make tokens permanent, remove OAuth, expose unauthenticated `/mcp`, or enable write mode by default.
 
@@ -287,42 +295,11 @@ Recommended workflow:
 4. Use `Elevated` rarely for scripts or legacy fallback, with the elevated token.
 5. Set write mode back to `Off`.
 
-## Figma Handoff
+## Figma Broker Placeholder
 
-v1.0 scope note: Figma tools are deferred from v1.0 production-core scope. The current Figma workflow must be revisited before it can be treated as a supported product feature. v1.0 remains focused on ChatGPT-to-local-repository access, connector reliability, source-control/release automation, guided setup, and public-user distribution.
+The legacy direct Figma handoff flow was removed in WC-V1-FIX05. The launcher preserves the old UI/API surface as disabled placeholder controls, but saving tokens, parsing Figma URLs, testing direct Figma connections, and creating Figma/Codex handoff packages are no longer supported paths.
 
-Use the `Figma Handoff` section to save the Figma token once and monitor Figma handoff status. For Figma Make, the primary online workflow is ChatGPT calling `run_figma_make_handoff`; the local exported-package fallback is ChatGPT calling `run_figma_make_file_handoff` with a `.make` path under an allowed root. The URL fields and buttons can remain useful for manual Design-file debugging.
-
-Status fields:
-
-- Figma token configured: yes/no
-- Figma token source: env/local-file/dev-local-file/none
-- Figma config path
-- MCP Make handoff tool: available/unavailable
-- Last parsed node
-
-Actions:
-
-- `Save`: saves the masked Figma token to runtime-local `figma.local.json`.
-- `Clear Figma Token`: removes only the local token file. If the token source is `env`, change `CHAMPCITY_GPT_FIGMA_ACCESS_TOKEN` outside the app.
-- `Test Figma Connection`: fetches a compact file summary only after a Figma file key or URL is entered.
-- `Parse Figma URL`: extracts file key, normalized node ID, and URL type without a network call.
-- `Create Figma Handoff Package`: writes `design\figma-handoff` by default.
-- `Create Codex UI Handoff Prompt`: writes `docs\handoffs\CODEX_UI_REDESIGN_HANDOFF.md` by default.
-
-The local token file shape is:
-
-```json
-{
-  "figmaAccessToken": "<FIGMA_ACCESS_TOKEN>"
-}
-```
-
-The launcher never displays the token after saving and does not include it in generated setup notes. Figma handoff/package writes still require the configured MCP write mode to allow docs-style writes. Generated handoffs may include screenshots and metadata from private Figma files, so review them before committing or sharing.
-
-After the token is saved, ChatGPT can pass a Figma `/make/` URL to `run_figma_make_handoff`. The tool writes `design\figma-handoff\make` and `docs\handoffs\CODEX_FIGMA_MAKE_UI_HANDOFF.md` by default, returns artifact paths and warnings, and does not require the user to fill the launcher URL field or click `Create Figma Handoff Package`.
-
-If the user exports a `.make` package from Figma Make, places it under the repo or another configured allowed root, and gives ChatGPT that path, ChatGPT can call `run_figma_make_file_handoff`. The tool writes `design\figma-handoff\make-file` and `docs\handoffs\CODEX_FIGMA_MAKE_FILE_HANDOFF.md` by default. This fallback parses the local package directly, copies assets, preserves important raw package files, parses Make chat history, reconstructs source where deterministic, and is not a screenshot or browser-scraping workflow.
+Figma and Figma Make remain listed only as `integration_toolbox` service IDs. Current service status/capability/configuration responses report `broker_not_implemented`, `governedBrokerOnly: true`, `arbitraryUpstreamMcpPassthrough: false`, and `legacyDirectFigmaToolsRemoved: true`.
 
 ## Legacy HTTP Auth Token
 
@@ -344,7 +321,7 @@ The file shape is:
 
 `http-auth.local.json` is ignored by git in source development and stored under the runtime config directory in installed/portable mode. Do not upload it, share it, paste it into generated notes, or include it in release files. If `CHAMPCITY_GPT_HTTP_AUTH_TOKEN` is set, it overrides the local file and the app reports that the token is configured via environment variable. `Clear Token` only removes the local file; environment variables must be changed outside the app.
 
-Static bearer-token auth was useful for manual testing but is not enough for ChatGPT's OAuth connector flow.
+Static bearer-token auth was useful for manual testing but is not enough for ChatGPT's OAuth connector flow and is not the normal public v1.0 connector path.
 
 ## Generate MCP Client Configs
 
@@ -387,7 +364,7 @@ That means you usually do not need a persistent background process for Codex-sty
 node .\dist\src\index.js --transport http --host 127.0.0.1 --port 3333
 ```
 
-For ChatGPT OAuth mode, configure the OAuth admin password first. The server can then start without a legacy bearer token because `/mcp` is protected by OAuth access tokens. A legacy auth token from `CHAMPCITY_GPT_HTTP_AUTH_TOKEN` or `config\http-auth.local.json` can still start manual bearer-auth testing. If neither OAuth admin password nor legacy token is configured, startup is refused unless you explicitly enable local unauthenticated test mode.
+For ChatGPT OAuth mode, configure the OAuth admin password first. The server can then start without a legacy bearer token because `/mcp` is protected by OAuth access tokens. A legacy auth token can still start manual bearer-auth testing as a temporary operator-approved local fallback, but it is not the public ChatGPT connector setup path. If neither OAuth admin password nor legacy token is configured, startup is refused unless you explicitly enable local unauthenticated test mode.
 
 Unauthenticated local mode remains clearly labeled `LOCAL TEST ONLY - DO NOT TUNNEL.` Do not tunnel it.
 

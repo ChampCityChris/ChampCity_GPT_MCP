@@ -98,6 +98,7 @@ function testConfig(): AppConfig {
   return {
     repoRoot: tempRoot,
     allowedRoots: [tempRoot],
+    workspaces: [{ workspaceId: "fixture_repo", label: "Fixture Repo", root: tempRoot, source: "configured" }],
     auditLogPath: path.join(auditRoot, "audit.log"),
     requireGitRoot: true,
     allowedCommands: [],
@@ -127,8 +128,8 @@ describe("public-safe facade tools", () => {
 
     const result = await getWorkspaceStatusSummary({}, testConfig());
 
-    assert.equal(result.workspaceId, "default");
-    assert.equal(result.workspaceLabel, path.basename(tempRoot));
+    assert.equal(result.workspaceId, "fixture_repo");
+    assert.equal(result.workspaceLabel, "Fixture Repo");
     assert.equal(result.repositoryName, "ChampCityChris/ChampCity_GPT_MCP");
     assert.equal(result.branch, "dev");
     assert.equal(result.isClean, false);

@@ -115,6 +115,23 @@ function writeHtml(res: ServerResponse, statusCode: number, html: string): void 
   res.end(html);
 }
 
+function safeOAuthErrorDescription(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw
+    .replace(/[A-Z]:[\\/]+Users[\\/]+[^\\/ \r\n"'`]+/giu, "%USERPROFILE%")
+    .replace(/[A-Z]:[\\/]+Windows[\\/]+Temp[\\/]+[^ \r\n"'`]+/giu, "%TEMP%")
+    .replace(/[A-Z]:[\\/]+Temp[\\/]+[^ \r\n"'`]+/giu, "%TEMP%")
+    .replace(/\/Users\/[^/ \r\n"'`]+/gu, "%USERPROFILE%")
+    .replace(/\/home\/[^/ \r\n"'`]+/gu, "%USERPROFILE%")
+    .replace(/\/tmp\/[^ \r\n"'`]+/gu, "%TEMP%")
+    .replace(
+      /\b(?<key>access[_-]?token|refresh[_-]?token|authorization[_-]?code|code[_-]?verifier|code[_-]?challenge|client[_-]?secret|password|secret)\b\s*[:=]\s*["']?[^"'\s\r\n]+["']?/giu,
+      "$<key>=<REDACTED_SECRET>"
+    )
+    .replace(/\s+/gu, " ")
+    .slice(0, 240);
+}
+
 function redirect(res: ServerResponse, location: string): void {
   res.writeHead(302, {
     location,
@@ -613,7 +630,7 @@ async function handleOAuthRegister(config: AppConfig, req: IncomingMessage, res:
   try {
     body = await readRequestBody(req);
   } catch (error) {
-    writeJson(res, 400, { error: "invalid_client_metadata", error_description: error instanceof Error ? error.message : String(error) });
+    writeJson(res, 400, { error: "invalid_client_metadata", error_description: safeOAuthErrorDescription(error) });
     return;
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -635,7 +652,7 @@ async function handleOAuthRegister(config: AppConfig, req: IncomingMessage, res:
       token_endpoint_auth_method: "none"
     });
   } catch (error) {
-    writeJson(res, 400, { error: "invalid_client_metadata", error_description: error instanceof Error ? error.message : String(error) });
+    writeJson(res, 400, { error: "invalid_client_metadata", error_description: safeOAuthErrorDescription(error) });
   }
 }
 
@@ -666,7 +683,7 @@ async function handleOAuthAuthorize(config: AppConfig, req: IncomingMessage, res
   try {
     body = await readRequestBody(req);
   } catch (error) {
-    writeJson(res, 400, { error: "invalid_request", error_description: error instanceof Error ? error.message : String(error) });
+    writeJson(res, 400, { error: "invalid_request", error_description: safeOAuthErrorDescription(error) });
     return;
   }
   const params = new URLSearchParams();
@@ -717,7 +734,7 @@ async function handleOAuthToken(config: AppConfig, req: IncomingMessage, res: Se
   try {
     body = await readRequestBody(req);
   } catch (error) {
-    writeJson(res, 400, { error: "invalid_request", error_description: error instanceof Error ? error.message : String(error) });
+    writeJson(res, 400, { error: "invalid_request", error_description: safeOAuthErrorDescription(error) });
     return;
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) {

@@ -1,0 +1,10 @@
+prefix_rule(
+  pattern = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "./scripts/codex-validate.ps1"],
+  decision = "allow",
+  justification = "ChampCity_GPT validation wrapper is the approved normal-Windows validation lane for child-process-heavy validation commands that can fail falsely in the sandbox.",
+  match = [
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/codex-validate.ps1 -Suite full",
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/codex-validate.ps1 -Suite unit",
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/codex-validate.ps1 -Suite build"
+  ]
+)

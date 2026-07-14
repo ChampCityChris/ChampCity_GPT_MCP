@@ -4,9 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { type AppConfig } from "../src/config.js";
-import { createToolboxRuntimeContext } from "../src/server/registerTools.js";
+import { createToolboxRuntimeContext, toolResponse } from "../src/server/registerTools.js";
 import { gitStatus as legacyGitStatus } from "../src/tools/gitStatus.js";
 import {
   artifactToolbox,
@@ -58,6 +59,17 @@ function writeFileIn(root: string, relativePath: string, content: string): void 
   fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
   fs.writeFileSync(absolutePath, content, "utf8");
 }
+
+function writeBinaryFile(relativePath: string, content: Buffer): void {
+  const absolutePath = path.join(tempRoot, ...relativePath.split("/"));
+  fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+  fs.writeFileSync(absolutePath, content);
+}
+
+const ONE_PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64"
+);
 
 function initRepo(): void {
   git(["init"]);
@@ -166,6 +178,143 @@ describe("stable domain toolbox tools", () => {
     assert.equal(gitResult.ok, false);
     assert.equal(gitResult.error?.code, "INVALID_INPUT");
     assert.ok(Array.isArray(gitResult.error?.details?.supportedActions));
+  });
+
+  it("artifact_toolbox.read_image_artifact returns PNG pixels as MCP image content and safe structured metadata", async () => {
+    initRepo();
+    const relativePath = "planning/phases/phase-v1.0/evidence/screenshots/example.png";
+    writeBinaryFile(relativePath, ONE_PIXEL_PNG);
+    const config: AppConfig = {
+      ...testConfig("off"),
+      workspaces: [{ workspaceId: "test_workspace", label: "Test Workspace", root: tempRoot, source: "configured" }],
+      defaultWorkspaceId: "test_workspace",
+      defaultWorkspaceIdSource: "local-file"
+    };
+
+    const toolboxResult = await artifactToolbox(
+      {
+        action: "read_image_artifact",
+        workspaceId: "test_workspace",
+        params: { path: relativePath }
+      },
+      config,
+      context(config, "files.read")
+    );
+    const mcpResult = toolResponse(toolboxResult);
+    const textContent = mcpResult.content.find((entry) => entry.type === "text");
+    const imageContent = mcpResult.content.find((entry) => entry.type === "image");
+    const metadata = mcpResult.structuredContent as Record<string, unknown>;
+
+    assert.equal(toolboxResult.ok, true);
+    assert.doesNotThrow(() => CallToolResultSchema.parse(mcpResult));
+    assert.equal(textContent?.type, "text");
+    assert.equal(textContent?.type === "text" ? textContent.text : "", `Loaded image artifact: ${relativePath}`);
+    assert.equal(imageContent?.type, "image");
+    assert.equal(imageContent?.type === "image" ? imageContent.mimeType : "", "image/png");
+    assert.equal(imageContent?.type === "image" ? imageContent.data : "", ONE_PIXEL_PNG.toString("base64"));
+    assert.equal((textContent?.type === "text" ? textContent.text : "").includes(ONE_PIXEL_PNG.toString("base64")), false);
+    assert.equal(JSON.stringify(metadata).includes(ONE_PIXEL_PNG.toString("base64")), false);
+    assert.equal(metadata.path, relativePath);
+    assert.equal(metadata.workspaceId, "test_workspace");
+    assert.equal(metadata.mimeType, "image/png");
+    assert.equal(metadata.sizeBytes, ONE_PIXEL_PNG.length);
+    assert.equal(metadata.width, 1);
+    assert.equal(metadata.height, 1);
+    assert.match(String(metadata.sha256), /^[a-f0-9]{64}$/u);
+    assert.equal(typeof metadata.lastModifiedAt, "string");
+  });
+
+  it("artifact_toolbox.read_image_artifact rejects unsafe paths and non-evidence locations", async () => {
+    initRepo();
+    const relativePath = "planning/evidence/example.png";
+    writeBinaryFile(relativePath, ONE_PIXEL_PNG);
+    writeBinaryFile("src/example.png", ONE_PIXEL_PNG);
+    writeBinaryFile("planning/secrets/example.png", ONE_PIXEL_PNG);
+    const config = testConfig("off");
+    const toolboxContext = context(config, "files.read");
+
+    const traversal = await artifactToolbox(
+      { action: "read_image_artifact", params: { path: "../secret.png" } },
+      config,
+      toolboxContext
+    );
+    const absolute = await artifactToolbox(
+      { action: "read_image_artifact", params: { path: path.join(tempRoot, ...relativePath.split("/")) } },
+      config,
+      toolboxContext
+    );
+    const arbitraryDirectory = await artifactToolbox(
+      { action: "read_image_artifact", params: { path: "src/example.png" } },
+      config,
+      toolboxContext
+    );
+    const secretsDirectory = await artifactToolbox(
+      { action: "read_image_artifact", params: { path: "planning/secrets/example.png" } },
+      config,
+      toolboxContext
+    );
+
+    assert.equal(traversal.error?.code, "PATH_DENIED");
+    assert.equal(absolute.error?.code, "PATH_DENIED");
+    assert.equal(arbitraryDirectory.error?.code, "FILE_DENIED");
+    assert.equal(secretsDirectory.error?.code, "FILE_DENIED");
+  });
+
+  it("artifact_toolbox.read_image_artifact rejects unsupported, oversized, spoofed, and missing files", async () => {
+    initRepo();
+    const oversizedPng = Buffer.alloc(5_000_001);
+    ONE_PIXEL_PNG.copy(oversizedPng);
+    writeBinaryFile("planning/evidence/unsupported.txt", ONE_PIXEL_PNG);
+    writeBinaryFile("planning/evidence/oversized.png", oversizedPng);
+    writeBinaryFile("planning/evidence/spoofed.png", Buffer.from("not a png", "utf8"));
+    const config = testConfig("off");
+    const toolboxContext = context(config, "files.read");
+
+    const unsupported = await artifactToolbox(
+      { action: "read_image_artifact", params: { path: "planning/evidence/unsupported.txt" } },
+      config,
+      toolboxContext
+    );
+    const oversized = await artifactToolbox(
+      { action: "read_image_artifact", params: { path: "planning/evidence/oversized.png" } },
+      config,
+      toolboxContext
+    );
+    const spoofed = await artifactToolbox(
+      { action: "read_image_artifact", params: { path: "planning/evidence/spoofed.png" } },
+      config,
+      toolboxContext
+    );
+    const missing = await artifactToolbox(
+      { action: "read_image_artifact", params: { path: "planning/evidence/missing.png" } },
+      config,
+      toolboxContext
+    );
+
+    assert.equal(unsupported.error?.code, "FILE_DENIED");
+    assert.equal(oversized.error?.code, "FILE_DENIED");
+    assert.equal(spoofed.error?.code, "FILE_DENIED");
+    assert.equal(missing.error?.code, "FILE_DENIED");
+  });
+
+  it("artifact_toolbox.read_image_artifact rejects a final path outside the workspace root", async () => {
+    initRepo();
+    const outsideDirectory = path.join(auditRoot, "outside-images");
+    fs.mkdirSync(outsideDirectory, { recursive: true });
+    fs.writeFileSync(path.join(outsideDirectory, "escape.png"), ONE_PIXEL_PNG);
+    const linkPath = path.join(tempRoot, "planning", "evidence", "outside-link");
+    fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+    fs.symlinkSync(outsideDirectory, linkPath, process.platform === "win32" ? "junction" : "dir");
+    const config = testConfig("off");
+
+    const result = await artifactToolbox(
+      { action: "read_image_artifact", params: { path: "planning/evidence/outside-link/escape.png" } },
+      config,
+      context(config, "files.read")
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "PATH_DENIED");
   });
 
   it("routes default toolbox workspaces to the configured allowed root in packaged runtime configs", async () => {

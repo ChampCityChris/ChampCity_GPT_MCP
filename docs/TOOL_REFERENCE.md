@@ -127,8 +127,23 @@ Initial actions:
 - `release_artifact_summary`
 - `release_publication_summary`
 - `local_package_summary`
+- `read_image_artifact`
 
 Read actions return bounded project-artifact summaries. The obsolete Figma-specific Codex handoff prompt action was removed.
+
+`read_image_artifact` is a constrained screenshot/image-evidence reader, not a general binary file read capability. It accepts a workspace-relative PNG path under an approved artifact directory (`planning/`, `evidence/`, `artifacts/`, `Builder_Reports/`, `release/`, `reports/`, `validation/`, or `screenshots/`) and an optional `maxBytes` value that can only lower the hard 5,000,000-byte limit. Absolute paths, traversal, paths outside the selected workspace, blocked/cache/secret directories, unsupported extensions, non-files, oversized files, missing files, and PNG extension spoofing are rejected. Successful calls return a short text item, an MCP `image` content item, and structured metadata; base64 image bytes are never included in the text summary.
+
+```json
+{
+  "action": "read_image_artifact",
+  "workspaceId": "champcity_gpt",
+  "params": {
+    "path": "planning/phases/phase-v1.0/evidence/screenshots/example.png"
+  }
+}
+```
+
+When a validation report references a PNG and visual inspection is needed, ChatGPT should call this action with the reported repository-relative path, then inspect the returned image content. The server performs no OCR, interpretation, or AI analysis.
 
 ### `diagnostics_toolbox`
 

@@ -73,6 +73,8 @@ Legacy `git_status`, `get_commit_readiness`, `list_project_files`, and `run_allo
 
 The Builder Report facade implementations are limited to `planning/phases/<phaseFolder>/Builder_Reports/BUILDER_REPORT*.md` and are public through `artifact_toolbox` actions. `builder_report_index` returns repository-relative metadata only; `builder_report_summary` returns one bounded preview by safe report lookup and redacts private local path-like and token-like content. They do not accept arbitrary roots, arbitrary globs, command strings, shell arguments, write controls, or mutation inputs. Normal ChatGPT workflows should avoid broad file-listing calls that combine `planning/phases`, `**/BUILDER_REPORT*.md`, high `maxResults`, and absolute local roots.
 
+`artifact_toolbox.read_image_artifact` is a PNG-only evidence reader, not a general binary file reader. It accepts only workspace-relative paths under approved artifact/evidence directories, verifies the real final path remains inside the selected configured workspace, applies blocked-file and image-specific cache/secret directory policy, enforces a hard 5,000,000-byte maximum, and checks PNG signature/IHDR bytes before returning MCP image content. Base64 bytes are confined to the MCP image content item and are omitted from text and structured metadata. The server performs no OCR or image analysis.
+
 These tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, `CAV-030`, and `CAV-033`. Local tests can verify registration and schema safety, but live ChatGPT validation is still required before claiming full platform safety-layer remediation.
 
 ## Stable Domain Toolbox Security Model

@@ -127,11 +127,14 @@ For normal ChatGPT-facing read-only status and release diagnostics, use the tool
 - `artifact_toolbox.release_publication_summary`
 - `artifact_toolbox.builder_report_index`
 - `artifact_toolbox.builder_report_summary`
+- `artifact_toolbox.read_image_artifact`
 - `diagnostics_toolbox.public_safety_status`
 
 These actions avoid caller-supplied local roots, command-string inputs, and executable file globs. They return structured summaries with repository-relative paths where possible. `run_allowed_script` is not exposed publicly.
 
 For Builder Reports, ask ChatGPT to call `artifact_toolbox` with `action: "builder_report_index"`, optionally with `phaseFolder` and `workCardId`. For a specific report, ask ChatGPT to call `artifact_toolbox` with `action: "builder_report_summary"` and the returned repository-relative `reportPath`, or use a narrow expected-path `repo_toolbox.read_file` call only after the index has identified the path.
+
+When a validation report references a PNG screenshot that needs visual inspection, ask ChatGPT to call `artifact_toolbox` with `action: "read_image_artifact"`, the selected `workspaceId`, and `params.path` set to the repository-relative screenshot path. This action returns MCP image content; it is limited to approved evidence/artifact directories and is not a general binary file reader.
 
 Normal ChatGPT workflows should avoid broad file-listing calls that combine `planning/phases`, `**/BUILDER_REPORT*.md`, and high `maxResults`. The Builder Report facade supports `CAV-033` by avoiding that broad recursive query shape.
 
@@ -187,7 +190,7 @@ Current public action groups:
 
 - `repo_toolbox`: `status`, `list_files`, `read_file`, `search_files`, `write_markdown_artifact`, `write_json_artifact`, `propose_patch`, `apply_approved_patch`
 - `git_toolbox`: `status`, `diff`, `prepare_work_branch`, `pre_commit_scan`, `stage_paths`, `commit_staged`, `push_current_branch`, `readiness_summary`, `integrate_to_dev`
-- `artifact_toolbox`: `builder_report_index`, `builder_report_summary`, `release_artifact_summary`, `release_publication_summary`, `local_package_summary`
+- `artifact_toolbox`: `builder_report_index`, `builder_report_summary`, `release_artifact_summary`, `release_publication_summary`, `local_package_summary`, `read_image_artifact`
 - `diagnostics_toolbox`: `runtime_status`, `write_access_status`, `tool_exposure_status`, `oauth_scope_status`, `chatgpt_discovery_status`, `list_workspaces`, `public_safety_status`
 - `integration_toolbox`: `list_supported_services`, `get_service_status`, `list_service_capabilities`, `validate_service_configuration`, `prepare_external_handoff`
 - `browser_toolbox`: `get_browser_capabilities`, `validate_public_endpoint`

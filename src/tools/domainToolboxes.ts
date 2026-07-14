@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 import { type AppConfig } from "../config.js";
@@ -28,6 +29,7 @@ import { gitDiff } from "./gitDiff.js";
 import { listProjectFiles } from "./listProjectFiles.js";
 import { proposePatch } from "./proposePatch.js";
 import { readProjectFile } from "./readProjectFile.js";
+import { MAX_IMAGE_ARTIFACT_BYTES, readImageArtifact } from "./readImageArtifact.js";
 import { searchProjectFiles } from "./searchProjectFiles.js";
 import { writeJsonArtifact } from "./writeJsonArtifact.js";
 import { writeMarkdownArtifact } from "./writeMarkdownArtifact.js";
@@ -104,7 +106,7 @@ interface ToolboxInput {
   params: Record<string, unknown>;
 }
 
-interface ToolboxResult {
+export interface ToolboxResult {
   toolbox: ToolboxName;
   action: string;
   ok: boolean;
@@ -112,6 +114,8 @@ interface ToolboxResult {
   error?: ReturnType<typeof serializeError>;
   warnings?: string[];
   recommendedNextSteps?: string[];
+  mcpContent?: CallToolResult["content"];
+  structuredContent?: Record<string, unknown>;
 }
 
 const TOOLBOX_RUNTIME_STARTED_AT = new Date().toISOString();
@@ -251,6 +255,12 @@ const ReleasePublicationParamsSchema = z
     includeAssets: z.boolean().default(false)
   })
   .strict();
+const ReadImageArtifactParamsSchema = z
+  .object({
+    path: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH),
+    maxBytes: z.number().int().positive().max(MAX_IMAGE_ARTIFACT_BYTES).default(MAX_IMAGE_ARTIFACT_BYTES)
+  })
+  .strict();
 const IntegrationServiceParamsSchema = z
   .object({
     serviceId: z.string().min(1).max(64).regex(SERVICE_ID_PATTERN)
@@ -295,7 +305,8 @@ const SUPPORTED_ARTIFACT_ACTIONS = [
   "builder_report_summary",
   "release_artifact_summary",
   "release_publication_summary",
-  "local_package_summary"
+  "local_package_summary",
+  "read_image_artifact"
 ] as const;
 const SUPPORTED_DIAGNOSTICS_ACTIONS = [
   "runtime_status",
@@ -460,6 +471,23 @@ function ok(toolbox: ToolboxName, action: string, result: unknown, warnings: str
     result: sanitizeToolboxValue(result),
     warnings,
     recommendedNextSteps
+  };
+}
+
+function okWithMcpContent(
+  toolbox: ToolboxName,
+  action: string,
+  result: object,
+  mcpContent: CallToolResult["content"]
+): ToolboxResult {
+  const safeResult = sanitizeToolboxValue(result) as Record<string, unknown>;
+  return {
+    toolbox,
+    action,
+    ok: true,
+    result: safeResult,
+    mcpContent,
+    structuredContent: safeResult
   };
 }
 
@@ -682,6 +710,21 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
       case "local_package_summary":
         EmptyParamsSchema.parse(input.params);
         return ok("artifact_toolbox", input.action, localPackageSummary(resolveWorkspaceRoot(input.workspaceId, config)));
+      case "read_image_artifact": {
+        const params = ReadImageArtifactParamsSchema.parse(input.params);
+        const image = await readImageArtifact({ workspaceId: input.workspaceId, ...params }, config);
+        return okWithMcpContent("artifact_toolbox", input.action, image.metadata, [
+          {
+            type: "text",
+            text: `Loaded image artifact: ${image.metadata.path}`
+          },
+          {
+            type: "image",
+            data: image.base64Data,
+            mimeType: image.metadata.mimeType
+          }
+        ]);
+      }
       default:
         return supportedActionError("artifact_toolbox", input.action, SUPPORTED_ARTIFACT_ACTIONS);
     }

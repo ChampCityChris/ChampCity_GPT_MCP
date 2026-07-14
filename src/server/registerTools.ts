@@ -6,6 +6,7 @@ import {
   ListToolsRequestSchema,
   ListToolsResultSchema,
   ToolSchema,
+  type CallToolResult,
   type Tool
 } from "@modelcontextprotocol/sdk/types.js";
 
@@ -283,7 +284,7 @@ export const tools = [
   {
     name: "artifact_toolbox",
     description:
-      "Stable artifact toolbox. Routes allowlisted Builder Report, release-summary, package-summary, and handoff-prompt actions through existing safeguards.",
+      "Stable artifact toolbox. Routes allowlisted Builder Report, release-summary, package-summary, and image-evidence actions through existing safeguards.",
     inputSchema: toolboxInputSchema
   },
   {
@@ -863,7 +864,21 @@ function serializeMcpToolsListPayloadWithoutRecursing(exposedTools: readonly unk
   );
 }
 
-function toolResponse(data: unknown) {
+function hasMcpContent(data: unknown): data is {
+  mcpContent: CallToolResult["content"];
+  structuredContent?: Record<string, unknown>;
+} {
+  return Boolean(data && typeof data === "object" && Array.isArray((data as { mcpContent?: unknown }).mcpContent));
+}
+
+export function toolResponse(data: unknown): CallToolResult {
+  if (hasMcpContent(data)) {
+    return {
+      content: data.mcpContent,
+      ...(data.structuredContent ? { structuredContent: data.structuredContent } : {})
+    };
+  }
+
   return {
     content: [
       {

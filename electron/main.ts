@@ -154,7 +154,8 @@ interface LauncherCodexPromptPayload {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const FIXED_STARTUP_DIAGNOSTIC_ARG = "--champcity-fixed-startup-diagnostic";
-const fixedStartupDiagnosticMode = process.argv.includes(FIXED_STARTUP_DIAGNOSTIC_ARG);
+const fixedStartupDiagnosticMode =
+  process.argv.includes(FIXED_STARTUP_DIAGNOSTIC_ARG) || process.env.CHAMPCITY_GPT_STARTUP_DIAGNOSTIC === "1";
 
 function emitFixedStartupDiagnosticEvent(
   phase: "main" | "preload" | "renderer" | "shutdown",
@@ -164,14 +165,24 @@ function emitFixedStartupDiagnosticEvent(
   if (!fixedStartupDiagnosticMode) {
     return;
   }
-  console.log(
-    `CHAMPCITY_DIAGNOSTIC_EVENT ${JSON.stringify({
+  const line = `CHAMPCITY_DIAGNOSTIC_EVENT ${JSON.stringify({
       timestamp: new Date().toISOString(),
       phase,
       milestone,
       ...(detail ? { detail } : {})
-    })}`
-  );
+    })}`;
+  console.log(line);
+
+  const outputPath = process.env.CHAMPCITY_GPT_STARTUP_DIAGNOSTIC_OUTPUT;
+  if (outputPath) {
+    const resolvedOutputPath = path.resolve(outputPath);
+    const expectedDirectory = path.resolve(repoRoot, "logs");
+    const validName = /^architect-startup-[a-f0-9]{32}\.jsonl$/u.test(path.basename(resolvedOutputPath));
+    if (path.dirname(resolvedOutputPath) === expectedDirectory && validName) {
+      fs.mkdirSync(expectedDirectory, { recursive: true });
+      fs.appendFileSync(resolvedOutputPath, `${line}\n`, "utf8");
+    }
+  }
 }
 
 let mainWindow: BrowserWindow | null = null;

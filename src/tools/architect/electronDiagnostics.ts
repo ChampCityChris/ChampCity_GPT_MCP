@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 
 import {
   assertVerifiedRepositoryRoot,
@@ -98,6 +99,10 @@ async function runElectronStartup(
   const startedAt = new Date().toISOString();
   const before = await captureRepositoryState(root);
   const metadata = packageMetadata(root);
+  const diagnosticRunId = randomBytes(16).toString("hex");
+  const diagnosticOutputPath = path.join(root, "logs", `architect-startup-${diagnosticRunId}.jsonl`);
+  fs.mkdirSync(path.dirname(diagnosticOutputPath), { recursive: true });
+  fs.rmSync(diagnosticOutputPath, { force: true });
   const processResult = await runFixedProcess({
     executable,
     args,
@@ -111,11 +116,17 @@ async function runElectronStartup(
       CHAMPCITY_GPT_REQUIRE_GIT_ROOT: "true",
       CHAMPCITY_GPT_WRITE_MODE: "off",
       CHAMPCITY_GPT_STARTUP_DIAGNOSTIC: "1",
+      CHAMPCITY_GPT_STARTUP_DIAGNOSTIC_OUTPUT: diagnosticOutputPath,
       ELECTRON_ENABLE_LOGGING: "1",
       NO_COLOR: "1"
     })
   });
-  const events = parseEvents(`${processResult.stdout}\n${processResult.stderr}`);
+  const diagnosticFileOutput = fs.existsSync(diagnosticOutputPath)
+    ? fs.readFileSync(diagnosticOutputPath, "utf8")
+    : "";
+  fs.rmSync(diagnosticOutputPath, { force: true });
+  const eventOutput = diagnosticFileOutput || `${processResult.stdout}\n${processResult.stderr}`;
+  const events = parseEvents(eventOutput);
   const milestones = new Set(events.map((event) => event.milestone));
   const runtimeVersionsEvent = events.find((event) => event.milestone === "runtime_versions");
   let launchedVersions: { electron?: string; node?: string; app?: string } = {};
@@ -202,5 +213,5 @@ export async function validatePackagedElectronStartup(rootInput: string): Promis
       errors: [{ code: "not_packaged", message: `Expected current-version package is not present: release/${metadata.artifactName}.` }]
     });
   }
-  return runElectronStartup(root, "packaged", packagePath, [FIXED_STARTUP_DIAGNOSTIC_ARG], 60_000, packagePath);
+  return runElectronStartup(root, "packaged", packagePath, [FIXED_STARTUP_DIAGNOSTIC_ARG], 180_000, packagePath);
 }

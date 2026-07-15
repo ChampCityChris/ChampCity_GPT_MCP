@@ -35,6 +35,8 @@ The implementation keeps the seven-toolbox public surface and uses purpose-built
 - Used the TypeScript compiler API, not regex, as the source parser.
 - Used fixed direct Git subprocess arrays with `shell: false`.
 - Used one internal application-owned Electron startup diagnostic flag; it is not caller configurable.
+- Classified the existing TypeScript compiler as a production dependency because source analysis is a runtime MCP action; this prevents packaged startup from resolving compiler code through development-only repository paths.
+- Added a fixed, repository-bounded JSONL event channel for the portable wrapper because the NSIS GUI wrapper does not relay Electron stdout/stderr.
 - Did not add a saved-report file API because existing safe repository file tools already cover durable reports.
 
 ## Tools and Actions Added
@@ -129,7 +131,8 @@ No new report listing/reading tool was added. Existing safe `repo_toolbox` and `
 - `npm run typecheck` - normal Windows lane - PASS.
 - `npm run build` - normal Windows lane - PASS.
 - `npm test` - normal Windows lane - PASS, 283 tests.
-- `npm run check:public` - normal Windows lane - PASS, 172 source candidates.
+- `npm run check:public` - normal Windows lane - PASS, 173 source candidates.
+- `npm run check:release` - normal Windows lane - PASS, 2,783 release files.
 - `npm run mcp:self-test -- --json` - normal Windows lane - PASS, 22 checks.
 - Fixed MCP startup diagnostic - normal Windows lane - PASS, HTTP 200, clean shutdown.
 - Fixed development Electron startup diagnostic - normal Windows lane - PASS on v0.2.0, Electron 42.5.0, Node 24.17.0, renderer initialized, MCP registration validated, clean shutdown.
@@ -138,11 +141,20 @@ No new report listing/reading tool was added. Existing safe `repo_toolbox` and `
 
 ## Packaging Results
 
-Pending the clean-source implementation commit and repository packaging run.
+- Command: `npm run app:package` in the normal Windows lane.
+- Result: PASS; Electron Builder produced the final current-version portable executable.
+- Final executable: `C:\Users\<you>\Projects\ChampCity_GPT\release\ChampCity GPT MCP Launcher-0.2.0-x64.exe`
+- LastWriteTime: `2026-07-15T21:50:28.392Z`
+- Size: `96,024,311` bytes.
+- SHA-256: `ab29c09fabbe098f1e7d7a33ea446608aa93f56a6baa365dcdc305ac9c31fbac`
+- Runtime promotion: PASS to `C:\Users\<you>\Apps\ChampCity_GPT_MCP_Runtime\ChampCity GPT MCP Launcher-live.exe`; size and SHA-256 match the final artifact.
+- ChampCity launcher processes left running after packaging, diagnostic validation, and promotion: none.
 
 ## Packaged Startup Result
 
-Pending packaging.
+PASS using the final versioned portable executable. The fixed diagnostic completed in 39,457 ms, reported app v0.2.0, Electron 42.5.0, Node 24.17.0, MCP registration with seven public tools, window creation, DOM readiness, renderer initialization, clean-shutdown request, and `will_quit`; no fatal errors were reported.
+
+The first packaged diagnostic exposed an eager runtime import of the dev-only TypeScript dependency. The final package corrects that dependency classification and was rebuilt before the passing packaged diagnostic. `release/win-unpacked` was not used as packaging-success evidence.
 
 ## Version Change
 
@@ -152,7 +164,8 @@ Pending packaging.
 
 ## Commit, Tag, Push, and GitHub Release
 
-- Implementation commit: pending
+- Implementation commit: `5bae182c7a3752578d5105dd65484f9ed63d0ef9`
+- Packaged-runtime correction commit: `9bd3b3362df05e71a9cb598cb69a94c2d12cb383`
 - Release/report finalization commit: pending
 - Tag: `v0.2.0` pending
 - Push status: pending
@@ -173,7 +186,7 @@ These capabilities were not partially implemented. They require a separate opera
 
 - Static analysis cannot fully resolve dependency injection, computed calls, runtime IPC dispatch, or non-literal dynamic imports.
 - Project validation requires repository-development mode with Node.js/npm available.
-- Source analysis requires repository TypeScript source and `tsconfig.json`.
+- Source analysis requires repository TypeScript source and `tsconfig.json`; packaged runtimes without source return `source_unavailable`.
 - Preload completion is not directly observable through the preserved preload contract.
 - Electron startup validates MCP registration but does not start a second listener; `mcp_server_startup` validates listener readiness separately.
 - Real ChatGPT tool visibility cannot be proven by local tests.
@@ -186,7 +199,6 @@ Use a new ChatGPT conversation after refreshing the packaged connector. Confirm 
 
 - Operator live ChatGPT connector validation.
 - Define canonical artifact and workflow-state architecture in a separate approved phase before adding those tools.
-- Refresh the runtime copy after the active v0.1.2 runtime process is closed.
 
 ## Final Git Status
 

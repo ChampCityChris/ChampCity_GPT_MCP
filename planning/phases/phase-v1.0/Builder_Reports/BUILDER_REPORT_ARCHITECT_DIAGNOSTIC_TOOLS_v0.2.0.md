@@ -166,10 +166,10 @@ The first packaged diagnostic exposed an eager runtime import of the dev-only Ty
 
 - Implementation commit: `5bae182c7a3752578d5105dd65484f9ed63d0ef9`
 - Packaged-runtime correction commit: `9bd3b3362df05e71a9cb598cb69a94c2d12cb383`
-- Release/report finalization commit: pending
-- Tag: `v0.2.0` pending
-- Push status: pending
-- GitHub release status: pending
+- Release/report finalization commit: `9e0047da3f3784582b3c0948d06102e3a76a3e68`
+- Tag: annotated `v0.2.0`, tag object `05950106f87d4ca77908c2f46fb95e63ee4f4e71`, targeting release commit `9e0047da3f3784582b3c0948d06102e3a76a3e68`
+- Push status: PASS; `dev` and `v0.2.0` pushed to `origin` without force.
+- GitHub release status: blocked. The GitHub release does not exist; the external-action reviewer rejected uploading the built executable until the operator gives separate explicit public-binary-upload approval.
 
 ## Explicitly Excluded Capabilities
 
@@ -198,6 +198,7 @@ Use a new ChatGPT conversation after refreshing the packaged connector. Confirm 
 ## Remaining Work
 
 - Operator live ChatGPT connector validation.
+- Create the GitHub release and upload the final portable executable after explicit public-binary-upload approval.
 - Define canonical artifact and workflow-state architecture in a separate approved phase before adding those tools.
 
 ## Final Git Status

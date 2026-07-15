@@ -1,5 +1,17 @@
 ﻿# Release Notes
 
+## v0.2.0 - Purpose-built architect diagnostics
+
+- Added fixed project validation operations for typecheck, build, tests, and release checks.
+- Added MCP startup, registration, and public inventory diagnostics.
+- Added fixed development and packaged Electron startup diagnostics with typed milestones and automatic shutdown.
+- Added TypeScript compiler API analysis for symbols, references, imports, callers/callees, and MCP registrations.
+- Added bounded read-only Git log, commit, diff, file-history, blame, merge-base, and ancestry inspection.
+- Kept the public surface at seven stable toolbox tools; no generic command runner, shell, browser automation, arbitrary IPC, executable, argument, or environment input was added.
+- Canonical artifact verification, canonical hashing, registry validation, and workflow-state tracing remain explicitly excluded pending a separate architecture specification.
+
+Packaged source analysis returns `source_unavailable` when repository TypeScript source is not present. Preload completion is not directly observable through the preserved preload contract; Electron diagnostics report that limitation explicitly.
+
 ## 2026-06-26 - Windows desktop app rebuild
 
 Summary:

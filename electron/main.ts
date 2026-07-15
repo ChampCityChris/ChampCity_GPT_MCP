@@ -153,6 +153,26 @@ interface LauncherCodexPromptPayload {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const FIXED_STARTUP_DIAGNOSTIC_ARG = "--champcity-fixed-startup-diagnostic";
+const fixedStartupDiagnosticMode = process.argv.includes(FIXED_STARTUP_DIAGNOSTIC_ARG);
+
+function emitFixedStartupDiagnosticEvent(
+  phase: "main" | "preload" | "renderer" | "shutdown",
+  milestone: string,
+  detail?: string
+): void {
+  if (!fixedStartupDiagnosticMode) {
+    return;
+  }
+  console.log(
+    `CHAMPCITY_DIAGNOSTIC_EVENT ${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      phase,
+      milestone,
+      ...(detail ? { detail } : {})
+    })}`
+  );
+}
 
 let mainWindow: BrowserWindow | null = null;
 let lastDoctorResult: DoctorResult | null = null;
@@ -1616,8 +1636,25 @@ function createWindow(): void {
       sandbox: false
     }
   });
+  emitFixedStartupDiagnosticEvent("main", "window_created");
 
   attachTextContextMenu(mainWindow.webContents);
+  if (fixedStartupDiagnosticMode) {
+    mainWindow.webContents.once("dom-ready", () => {
+      emitFixedStartupDiagnosticEvent("renderer", "dom_ready");
+    });
+    mainWindow.webContents.once("did-finish-load", () => {
+      emitFixedStartupDiagnosticEvent("renderer", "renderer_initialized");
+      emitFixedStartupDiagnosticEvent("preload", "preload_bridge_not_directly_observable");
+      setTimeout(() => {
+        emitFixedStartupDiagnosticEvent("shutdown", "clean_shutdown_requested");
+        app.quit();
+      }, 250).unref();
+    });
+    mainWindow.webContents.once("render-process-gone", (_event, details) => {
+      emitFixedStartupDiagnosticEvent("renderer", "renderer_process_gone", `${details.reason}:${details.exitCode}`);
+    });
+  }
 
   const htmlPath = fs.existsSync(path.join(repoRoot, "electron", "renderer", "index.html"))
     ? path.join(repoRoot, "electron", "renderer", "index.html")
@@ -1645,6 +1682,33 @@ app.on("web-contents-created", (_event, webContents) => {
 });
 
 app.whenReady().then(() => {
+  emitFixedStartupDiagnosticEvent("main", "app_ready");
+  emitFixedStartupDiagnosticEvent("main", "mcp_subsystem_module_loaded");
+  if (fixedStartupDiagnosticMode) {
+    emitFixedStartupDiagnosticEvent(
+      "main",
+      "runtime_versions",
+      JSON.stringify({ electron: process.versions.electron, node: process.versions.node, app: app.getVersion() })
+    );
+    try {
+      const diagnosticConfig = loadConfig(process.env, repoRoot, { defaultWriteToolsEnabled: false });
+      const toolDiagnostics = getToolExposureDiagnostics(diagnosticConfig, { scope: "files.read" });
+      if (toolDiagnostics.invalidToolSchemas.length > 0 || toolDiagnostics.invalidChatGptToolSchemas.length > 0) {
+        throw new Error("MCP tool registration contains invalid schemas.");
+      }
+      emitFixedStartupDiagnosticEvent(
+        "main",
+        "mcp_tool_registration_validated",
+        JSON.stringify({ publicToolCount: toolDiagnostics.exposedToolNames.length })
+      );
+    } catch (error) {
+      emitFixedStartupDiagnosticEvent(
+        "main",
+        "mcp_tool_registration_failed",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1664,8 +1728,18 @@ app.on("before-quit", (event) => {
 });
 
 app.on("will-quit", (event) => {
+  emitFixedStartupDiagnosticEvent("shutdown", "will_quit");
   deferQuitUntilServerStopped(event, "app will-quit");
 });
+
+if (fixedStartupDiagnosticMode) {
+  process.on("uncaughtException", (error) => {
+    emitFixedStartupDiagnosticEvent("main", "uncaught_exception", error.message);
+  });
+  process.on("unhandledRejection", (reason) => {
+    emitFixedStartupDiagnosticEvent("main", "unhandled_rejection", reason instanceof Error ? reason.message : String(reason));
+  });
+}
 
 process.on("SIGINT", () => {
   void stopOwnedServerForShutdown("SIGINT").finally(() => {

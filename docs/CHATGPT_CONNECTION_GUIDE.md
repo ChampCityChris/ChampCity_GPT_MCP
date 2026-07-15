@@ -189,14 +189,16 @@ Use explicit workspace IDs when more than one project is configured. Ask ChatGPT
 Current public action groups:
 
 - `repo_toolbox`: `status`, `list_files`, `read_file`, `search_files`, `write_markdown_artifact`, `write_json_artifact`, `propose_patch`, `apply_approved_patch`
-- `git_toolbox`: `status`, `diff`, `prepare_work_branch`, `pre_commit_scan`, `stage_paths`, `commit_staged`, `push_current_branch`, `readiness_summary`, `integrate_to_dev`
+- `git_toolbox`: `status`, `diff`, `prepare_work_branch`, `pre_commit_scan`, `stage_paths`, `commit_staged`, `push_current_branch`, `readiness_summary`, `integrate_to_dev`, `inspect_history`
 - `artifact_toolbox`: `builder_report_index`, `builder_report_summary`, `release_artifact_summary`, `release_publication_summary`, `local_package_summary`, `read_image_artifact`
-- `diagnostics_toolbox`: `runtime_status`, `write_access_status`, `tool_exposure_status`, `oauth_scope_status`, `chatgpt_discovery_status`, `list_workspaces`, `public_safety_status`
+- `diagnostics_toolbox`: `runtime_status`, `write_access_status`, `tool_exposure_status`, `oauth_scope_status`, `chatgpt_discovery_status`, `list_workspaces`, `public_safety_status`, `project_validation`, `mcp_server_startup`, `mcp_tool_registration`, `mcp_tool_inventory`, `electron_development_startup`, `electron_packaged_startup`
 - `integration_toolbox`: `list_supported_services`, `get_service_status`, `list_service_capabilities`, `validate_service_configuration`, `prepare_external_handoff`
 - `browser_toolbox`: `get_browser_capabilities`, `validate_public_endpoint`
-- `knowledge_toolbox`: `list_supported_sources`, `get_project_memory_status`, `get_reference_capabilities`
+- `knowledge_toolbox`: `list_supported_sources`, `get_project_memory_status`, `get_reference_capabilities`, `source_analysis`
 
 Do not expect a `figma_toolbox`. Figma is represented under `integration_toolbox` as `figma` and `figma_make`, but current Figma responses are broker-not-implemented placeholders and do not call old direct Figma API/token/MCP code. `integration_toolbox` is a governed broker, not arbitrary upstream MCP passthrough. `browser_toolbox` is constrained validation, not browser scraping. `knowledge_toolbox` is optional project reference capability, not hidden memory mutation.
+
+Architect validation is purpose-built: `project_validation` accepts only the fixed operations `typecheck`, `build`, `test`, and `release_checks`. ChampCity MCP does not expose arbitrary shell or command execution. Source analysis uses repository TypeScript source and can return `source_unavailable` in packaged-runtime mode. Canonical artifact verification and workflow-state tracing are not implemented in this release.
 
 When approving ChatGPT app scopes, use:
 

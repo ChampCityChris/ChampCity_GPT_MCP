@@ -219,6 +219,10 @@ The default allowlist is:
 
 The dedicated git tools run fixed git commands only. There is no MCP tool that accepts arbitrary git command strings.
 
+The public architect diagnostics do not route through `run_allowed_script` or the legacy maintenance allowlist. `diagnostics_toolbox.project_validation` accepts only a fixed operation enum and launches the corresponding repository-owned npm script through a fixed Node.js/npm CLI resolution with `shell: false`. `git_toolbox.inspect_history` accepts only fixed read-only operations and constructed argument arrays. Electron diagnostics accept empty params and use only the application-owned startup diagnostic flag. Source analysis uses the TypeScript parser and never executes analyzed code.
+
+All architect subprocess output is bounded and redacted. The inherited environment is reduced to an internal safe key set; callers cannot supply environment variables. Timeout cleanup terminates process descendants on Windows. Git inspection disables pagers, external diff helpers, interactive/credential prompts, system Git configuration, and color output.
+
 ## Write Mode Model
 
 The old universal per-write `approvalToken` model was replaced because ChatGPT already authenticates with OAuth, allowed roots are narrow, blocked paths remain enforced, git provides rollback/review, and audit logging records MCP operations. The lower-friction model lets ChatGPT create Markdown planning artifacts in `docs` mode without pasting a token on every call.

@@ -2,7 +2,7 @@
 
 ChampCity GPT MCP Launcher is a pre-release ChatGPT-compatible MCP server and Electron launcher for controlled local project-file access. It can expose read-only and approval-gated write tools over local STDIO or local HTTP. For ChatGPT.com-compatible public HTTPS connectors, OAuth with Dynamic Client Registration is the standard path.
 
-Current maturity: `v0.1.2`, pre-release/private-tooling quality. Review the code and security model before using it with sensitive repositories.
+Current maturity: `v0.2.0`, pre-release/private-tooling quality. Review the code and security model before using it with sensitive repositories.
 
 License: not yet selected. See [docs/LICENSE_DECISION_NEEDED.md](docs/LICENSE_DECISION_NEEDED.md).
 
@@ -11,6 +11,7 @@ License: not yet selected. See [docs/LICENSE_DECISION_NEEDED.md](docs/LICENSE_DE
 - Lists, reads, and searches files inside configured allowed roots.
 - Reports git status and git diffs for allowed git worktrees.
 - Provides safe git workflow tools for readiness checks, safety scans, filtered staging, validated local commits, and optional non-force pushes.
+- Provides purpose-built project validation, MCP/Electron startup diagnostics, TypeScript source analysis, and bounded read-only Git history inspection without arbitrary command execution.
 - Keeps Figma and Figma Make as deferred governed broker placeholders under `integration_toolbox`; direct Figma tools are not public v1.0 tools.
 - Supports write modes: `off`, `docs`, `patch`, and `elevated`.
 - Provides an Electron launcher for local setup, status checks, OAuth administration, and client config generation.
@@ -27,6 +28,8 @@ License: not yet selected. See [docs/LICENSE_DECISION_NEEDED.md](docs/LICENSE_DE
 - It does not enable writes by default.
 - It does not commit or expose Figma tokens, auth headers, cookies, or session credentials.
 - It does not replace human review. Review generated patches and git diffs before committing.
+- It does not expose arbitrary shell commands, package scripts, executables, process arguments, environment variables, browser automation, or arbitrary Electron/IPC operations.
+- It does not implement canonical artifact verification or workflow-state tracing; those domains require future operator-approved architecture specifications.
 
 ## Security Model
 

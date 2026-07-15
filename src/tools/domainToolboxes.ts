@@ -33,6 +33,17 @@ import { MAX_IMAGE_ARTIFACT_BYTES, readImageArtifact } from "./readImageArtifact
 import { searchProjectFiles } from "./searchProjectFiles.js";
 import { writeJsonArtifact } from "./writeJsonArtifact.js";
 import { writeMarkdownArtifact } from "./writeMarkdownArtifact.js";
+import { completedResult, type ArchitectToolResult } from "./architect/common.js";
+import { validateDevelopmentElectronStartup, validatePackagedElectronStartup } from "./architect/electronDiagnostics.js";
+import { runGitInspection, type GitInspectionInput } from "./architect/gitInspection.js";
+import {
+  buildMcpToolInventory,
+  runMcpServerStartupDiagnostic,
+  validateMcpToolRegistration,
+  type RegisteredToolDefinition
+} from "./architect/mcpDiagnostics.js";
+import { runProjectValidation, type ProjectValidationOperation } from "./architect/projectValidation.js";
+import { runSourceAnalysis, type SourceAnalysisInput } from "./architect/sourceAnalysis.js";
 import {
   MAX_GLOB_LENGTH,
   MAX_APPROVAL_TOKEN_LENGTH,
@@ -70,6 +81,7 @@ export interface ToolboxRuntimeContext {
   schemaValidExposedToolCount: number;
   scopeFilteredToolCount: number;
   registeredToolNames: string[];
+  registeredToolDefinitions: RegisteredToolDefinition[];
   readToolNames: string[];
   writeToolNames: string[];
   exposedToolNames: string[];
@@ -255,6 +267,21 @@ const ReleasePublicationParamsSchema = z
     includeAssets: z.boolean().default(false)
   })
   .strict();
+const GitInspectParamsSchema = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("log"), maxCount: z.number().int().min(1).max(100).default(25), ref: z.string().min(1).max(128).optional() }).strict(),
+  z.object({ operation: z.literal("show_commit"), ref: z.string().min(1).max(128) }).strict(),
+  z.object({ operation: z.literal("diff_refs"), baseRef: z.string().min(1).max(128), targetRef: z.string().min(1).max(128) }).strict(),
+  z.object({ operation: z.literal("file_history"), file: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH), maxCount: z.number().int().min(1).max(100).default(25) }).strict(),
+  z.object({
+    operation: z.literal("blame"),
+    file: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH),
+    ref: z.string().min(1).max(128).optional(),
+    startLine: z.number().int().min(1).max(100_000).optional(),
+    endLine: z.number().int().min(1).max(100_000).optional()
+  }).strict(),
+  z.object({ operation: z.literal("merge_base"), baseRef: z.string().min(1).max(128), targetRef: z.string().min(1).max(128) }).strict(),
+  z.object({ operation: z.literal("check_ancestry"), ancestorRef: z.string().min(1).max(128), descendantRef: z.string().min(1).max(128) }).strict()
+]);
 const ReadImageArtifactParamsSchema = z
   .object({
     path: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH),
@@ -278,6 +305,16 @@ const BrowserEndpointParamsSchema = z
     endpointKind: z.enum(["configured_public", "local"]).default("configured_public")
   })
   .strict();
+const ProjectValidationParamsSchema = z.object({ operation: z.enum(["typecheck", "build", "test", "release_checks"]) }).strict();
+const SourceAnalysisParamsSchema = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("find_symbol"), symbol: z.string().min(1).max(200) }).strict(),
+  z.object({ operation: z.literal("find_references"), symbol: z.string().min(1).max(200) }).strict(),
+  z.object({ operation: z.literal("import_graph"), file: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH), maxDepth: z.number().int().min(1).max(5).default(2) }).strict(),
+  z.object({ operation: z.literal("get_callers"), symbol: z.string().min(1).max(200) }).strict(),
+  z.object({ operation: z.literal("get_callees"), symbol: z.string().min(1).max(200) }).strict(),
+  z.object({ operation: z.literal("mcp_registrations") }).strict(),
+  z.object({ operation: z.literal("duplicate_mcp_tool_names") }).strict()
+]);
 
 const SUPPORTED_REPO_ACTIONS = [
   "status",
@@ -298,7 +335,8 @@ const SUPPORTED_GIT_ACTIONS = [
   "commit_staged",
   "push_current_branch",
   "readiness_summary",
-  "integrate_to_dev"
+  "integrate_to_dev",
+  "inspect_history"
 ] as const;
 const SUPPORTED_ARTIFACT_ACTIONS = [
   "builder_report_index",
@@ -315,7 +353,13 @@ const SUPPORTED_DIAGNOSTICS_ACTIONS = [
   "oauth_scope_status",
   "chatgpt_discovery_status",
   "list_workspaces",
-  "public_safety_status"
+  "public_safety_status",
+  "project_validation",
+  "mcp_server_startup",
+  "mcp_tool_registration",
+  "mcp_tool_inventory",
+  "electron_development_startup",
+  "electron_packaged_startup"
 ] as const;
 const SUPPORTED_INTEGRATION_ACTIONS = [
   "list_supported_services",
@@ -325,7 +369,7 @@ const SUPPORTED_INTEGRATION_ACTIONS = [
   "prepare_external_handoff"
 ] as const;
 const SUPPORTED_BROWSER_ACTIONS = ["get_browser_capabilities", "validate_public_endpoint"] as const;
-const SUPPORTED_KNOWLEDGE_ACTIONS = ["list_supported_sources", "get_project_memory_status", "get_reference_capabilities"] as const;
+const SUPPORTED_KNOWLEDGE_ACTIONS = ["list_supported_sources", "get_project_memory_status", "get_reference_capabilities", "source_analysis"] as const;
 
 export const SUPPORTED_INTEGRATION_SERVICES = [
   "figma",
@@ -471,6 +515,26 @@ function ok(toolbox: ToolboxName, action: string, result: unknown, warnings: str
     result: sanitizeToolboxValue(result),
     warnings,
     recommendedNextSteps
+  };
+}
+
+function architectResult(toolbox: ToolboxName, action: string, result: ArchitectToolResult<unknown>): ToolboxResult {
+  const safeResult = sanitizeToolboxValue(result);
+  const firstError = result.errors[0];
+  return {
+    toolbox,
+    action,
+    ok: result.ok,
+    result: safeResult,
+    ...(firstError
+      ? {
+          error: {
+            code: firstError.code,
+            message: firstError.message
+          }
+        }
+      : {}),
+    warnings: result.warnings
   };
 }
 
@@ -661,6 +725,10 @@ export async function gitToolbox(rawInput: unknown, config: AppConfig, context: 
         assertFilesWrite(context, "integrate_to_dev", "git_toolbox", input.action);
         return ok("git_toolbox", input.action, await integrateToDev({ workspaceId: input.workspaceId, ...input.params }, config));
       }
+      case "inspect_history": {
+        const params = GitInspectParamsSchema.parse(input.params) as GitInspectionInput;
+        return architectResult("git_toolbox", input.action, await runGitInspection(root, params));
+      }
       default:
         return supportedActionError("git_toolbox", input.action, SUPPORTED_GIT_ACTIONS);
     }
@@ -733,7 +801,9 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
 
 export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
   return runToolboxAction("diagnostics_toolbox", rawInput, SUPPORTED_DIAGNOSTICS_ACTIONS, async (input) => {
-    EmptyParamsSchema.parse(input.params);
+    if (input.action !== "project_validation") {
+      EmptyParamsSchema.parse(input.params);
+    }
     if (input.action !== "list_workspaces") {
       resolveWorkspaceRoot(input.workspaceId, config);
     }
@@ -786,6 +856,83 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
         return ok("diagnostics_toolbox", input.action, await listWorkspaceCatalog(config));
       case "public_safety_status":
         return ok("diagnostics_toolbox", input.action, await getChangeSetReadinessSummary({ workspaceId: input.workspaceId, targetBranch: "feature" }, config));
+      case "project_validation": {
+        const params = ProjectValidationParamsSchema.parse(input.params);
+        return architectResult(
+          "diagnostics_toolbox",
+          input.action,
+          await runProjectValidation(resolveWorkspaceRoot(input.workspaceId, config), params.operation as ProjectValidationOperation)
+        );
+      }
+      case "mcp_server_startup":
+        return architectResult(
+          "diagnostics_toolbox",
+          input.action,
+          await runMcpServerStartupDiagnostic(resolveWorkspaceRoot(input.workspaceId, config))
+        );
+      case "mcp_tool_registration": {
+        const root = resolveWorkspaceRoot(input.workspaceId, config);
+        const startedAt = new Date().toISOString();
+        const registration = validateMcpToolRegistration(context.registeredToolDefinitions);
+        const expectedArchitectActions = {
+          diagnostics_toolbox: [
+            "project_validation",
+            "mcp_server_startup",
+            "mcp_tool_registration",
+            "mcp_tool_inventory",
+            "electron_development_startup",
+            "electron_packaged_startup"
+          ],
+          git_toolbox: ["inspect_history"],
+          knowledge_toolbox: ["source_analysis"]
+        };
+        const passed = registration.overallResult === "passed";
+        return architectResult(
+          "diagnostics_toolbox",
+          input.action,
+          completedResult({
+            tool: "diagnostics_toolbox.mcp_tool_registration",
+            root,
+            startedAt,
+            status: passed ? "passed" : "validation_failure",
+            data: { ...registration, expectedArchitectActions },
+            errors: passed ? [] : [{ code: "validation_failure", message: "MCP tool registration validation failed." }]
+          })
+        );
+      }
+      case "mcp_tool_inventory": {
+        const root = resolveWorkspaceRoot(input.workspaceId, config);
+        return architectResult(
+          "diagnostics_toolbox",
+          input.action,
+          completedResult({
+            tool: "diagnostics_toolbox.mcp_tool_inventory",
+            root,
+            startedAt: new Date().toISOString(),
+            status: "passed",
+            data: {
+              registeredTools: buildMcpToolInventory(context.registeredToolDefinitions),
+              toolboxActions: {
+                diagnostics_toolbox: [...SUPPORTED_DIAGNOSTICS_ACTIONS],
+                git_toolbox: [...SUPPORTED_GIT_ACTIONS],
+                knowledge_toolbox: [...SUPPORTED_KNOWLEDGE_ACTIONS]
+              }
+            }
+          })
+        );
+      }
+      case "electron_development_startup":
+        return architectResult(
+          "diagnostics_toolbox",
+          input.action,
+          await validateDevelopmentElectronStartup(resolveWorkspaceRoot(input.workspaceId, config))
+        );
+      case "electron_packaged_startup":
+        return architectResult(
+          "diagnostics_toolbox",
+          input.action,
+          await validatePackagedElectronStartup(resolveWorkspaceRoot(input.workspaceId, config))
+        );
       default:
         return supportedActionError("diagnostics_toolbox", input.action, SUPPORTED_DIAGNOSTICS_ACTIONS);
     }
@@ -1007,6 +1154,14 @@ export async function knowledgeToolbox(rawInput: unknown, config: AppConfig): Pr
           webFetchImplemented: false,
           externalDocsRetrievalImplemented: false
         });
+      case "source_analysis": {
+        const params = SourceAnalysisParamsSchema.parse(input.params) as SourceAnalysisInput;
+        return architectResult(
+          "knowledge_toolbox",
+          input.action,
+          await runSourceAnalysis(resolveWorkspaceRoot(input.workspaceId, config), params)
+        );
+      }
       default:
         return supportedActionError("knowledge_toolbox", input.action, SUPPORTED_KNOWLEDGE_ACTIONS);
     }

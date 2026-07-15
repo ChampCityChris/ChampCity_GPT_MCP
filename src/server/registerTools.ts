@@ -278,7 +278,7 @@ export const tools = [
   {
     name: "git_toolbox",
     description:
-      "Stable git workflow toolbox. Routes allowlisted status, diff, readiness, branch, stage, commit, and push actions without accepting raw git commands.",
+      "Stable git toolbox. Routes fixed status, diff, readiness, branch, stage, commit, push, and bounded read-only history-inspection actions without accepting raw git commands or arguments.",
     inputSchema: toolboxInputSchema
   },
   {
@@ -290,7 +290,7 @@ export const tools = [
   {
     name: "diagnostics_toolbox",
     description:
-      "Stable diagnostics toolbox. Returns redacted runtime, write-access, tool-exposure, OAuth-scope, ChatGPT-discovery, and public-safety status.",
+      "Stable diagnostics toolbox. Returns redacted status and runs fixed project validation, MCP startup/registration checks, tool inventory, and fixed Electron development or packaged startup diagnostics. It never accepts commands, scripts, executables, process arguments, or environment variables.",
     inputSchema: toolboxInputSchema
   },
   {
@@ -308,7 +308,7 @@ export const tools = [
   {
     name: "knowledge_toolbox",
     description:
-      "Stable knowledge toolbox. Reports safe project reference capabilities without web fetches, connector scraping, hidden memory writes, or external document retrieval.",
+      "Stable knowledge toolbox. Reports safe project references and performs bounded read-only TypeScript AST analysis without web fetches, arbitrary module loading, connector scraping, or hidden memory writes.",
     inputSchema: toolboxInputSchema
   },
   {
@@ -938,6 +938,11 @@ export function createToolboxRuntimeContext(config: AppConfig, options: ToolExpo
     schemaValidExposedToolCount: diagnostics.schemaValidExposedToolCount,
     scopeFilteredToolCount: diagnostics.scopeFilteredToolCount,
     registeredToolNames: diagnostics.internalToolNames,
+    registeredToolDefinitions: diagnostics.exposedTools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema as unknown as Record<string, unknown>
+    })),
     readToolNames: diagnostics.readToolNames,
     writeToolNames: diagnostics.writeToolNames,
     exposedToolNames: diagnostics.exposedToolNames,

@@ -104,8 +104,11 @@ Initial actions:
 - `push_current_branch`
 - `readiness_summary`
 - `integrate_to_dev`
+- `inspect_history`
 
 The toolbox does not accept arbitrary git commands, reset, rebase, stash, branch delete, force push, checkout path, or raw branch-name controls. Mutating actions require `files.write` and write mode `elevated`. `prepare_work_branch` delegates to the safe `prepare_git_work_branch` behavior. `integrate_to_dev` is a guarded internal action under `git_toolbox`, not a top-level public MCP tool.
+
+`inspect_history` is read-only and accepts a strict `operation` enum: `log`, `show_commit`, `diff_refs`, `file_history`, `blame`, `merge_base`, or `check_ancestry`. Each operation constructs one fixed Git subcommand and validates bounded counts, refs, line ranges, and repository-relative paths. It disables pagers, external diff helpers, color, interactive prompts, and credential prompts. It never accepts arbitrary Git options or subcommands.
 
 Normal reviewed Work Card lifecycle:
 
@@ -156,10 +159,22 @@ Initial actions:
 - `chatgpt_discovery_status`
 - `list_workspaces`
 - `public_safety_status`
+- `project_validation`
+- `mcp_server_startup`
+- `mcp_tool_registration`
+- `mcp_tool_inventory`
+- `electron_development_startup`
+- `electron_packaged_startup`
 
 Diagnostics are redacted and include runtime package version, commit, branch, runtime start time where available, registered tool count, registered tool-name hash, registered toolbox names, workspace-routing summary, observed OAuth scope booleans, local write mode, local write-mode booleans, and latest discovery counts when a discovery trace is available. `list_workspaces` returns safe catalog metadata only: workspace IDs, labels, repository name when available, branch when safely readable, default marker, and expected-remote match status. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, raw credential stores, or unnecessary absolute roots are returned.
 
 `get_write_access_status` also includes a nested diagnostics block when called through MCP so older visible tool surfaces can report runtime, scope, and tool-count state.
+
+`project_validation` accepts only `params.operation: "typecheck" | "build" | "test" | "release_checks"`. Operations map in source to fixed package scripts and the documented normal-Windows validation lane. The action accepts no command, script name, arguments, path, working directory, environment, or timeout. Results include fixed command metadata, execution lane, timestamps, exit/timeout details, bounded redacted output, Git HEAD before/after, and structured changed files. Maintainers update the fixed mapping in `src/tools/architect/projectValidation.ts` when repository scripts change; they must not add a generic command registry.
+
+`mcp_server_startup` starts the repository-owned HTTP server on a fixed ephemeral localhost port, checks its health endpoint, and shuts it down. `mcp_tool_registration` checks public tool uniqueness, schemas, descriptions, and absence of generic command exposure. `mcp_tool_inventory` lists the seven public tools and their toolbox action inventory without exposing internal executables or secrets.
+
+`electron_development_startup` and `electron_packaged_startup` use one application-owned fixed diagnostic flag. They accept empty params only, capture bounded typed startup milestones, and auto-shut down. The packaged action derives the current-version executable from `package.json` and `electron-builder.json`; it returns `not_packaged` when that file is absent. Renderer load is observable. The current preload contract does not directly expose preload completion, so the diagnostic reports that limitation rather than claiming validation.
 
 ### `integration_toolbox`
 
@@ -206,8 +221,26 @@ Initial actions:
 - `list_supported_sources`
 - `get_project_memory_status`
 - `get_reference_capabilities`
+- `source_analysis`
 
 This toolbox is an optional reference/context facade. It does not add arbitrary web fetch, private document connector scraping, hidden persistent memory mutation, or memory writes.
+
+`source_analysis` uses the TypeScript compiler API and accepts these strict operations:
+
+- `find_symbol` and `find_references` with a bounded symbol name.
+- `import_graph` with a repository-relative TypeScript/JavaScript file and depth from 1 through 5.
+- `get_callers` and `get_callees` for statically visible calls.
+- `mcp_registrations` and `duplicate_mcp_tool_names` for the repository tool-registration AST.
+
+Source analysis is read-only, bounded by file/match/node/edge/time limits, rejects absolute paths and traversal, and returns `source_unavailable` in packaged runtimes without repository TypeScript source. Static analysis does not claim complete resolution of dependency injection, computed calls, runtime IPC dispatch, or non-literal dynamic imports.
+
+## Architect Diagnostic Security Boundary
+
+ChampCity MCP does not expose arbitrary shell or command execution. Validation actions are fixed purpose-built operations.
+
+The architect actions use fixed executables, fixed argument construction, fixed repository working directories, `shell: false`, sanitized process environments, bounded output, redaction, fixed timeouts, and Windows-compatible process-tree termination. No action accepts executable names, package-script names, process arguments, environment variables, arbitrary Electron flags, IPC names, URLs, JavaScript, or browser selectors.
+
+Canonical artifact verification, canonical serialization/hashing, artifact-registry validation, workflow-state validation, and workflow tracing are not implemented. This repository does not yet define canonical artifact pairs, a canonical serializer/hash, an artifact registry, a workflow-state store, or transition authority. Those capabilities require a separate operator-approved architecture specification; no placeholder production models or simulated results were added.
 
 ## Local MCP Protocol Self-Test
 

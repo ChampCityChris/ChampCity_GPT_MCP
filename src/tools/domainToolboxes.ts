@@ -10,6 +10,14 @@ import { getOAuthEndpointPaths, scopeIncludes } from "../oauth.js";
 import { readLastMcpDiscoveryTrace } from "../server/discoveryTrace.js";
 import { serializeError, AppError } from "../utils/errors.js";
 import { runGit } from "../utils/git.js";
+import {
+  artifactPairStatus,
+  currentActionContext,
+  latestArtifact,
+  listArtifacts,
+  readArtifactById,
+  reviewQueue
+} from "./artifactCatalog.js";
 import { getBuilderReportIndex, getBuilderReportSummary } from "./builderReportFacade.js";
 import { applyApprovedPatch } from "./applyApprovedPatch.js";
 import { commitValidatedChanges } from "./gitWorkflow/commitValidatedChanges.js";
@@ -288,6 +296,41 @@ const ReadImageArtifactParamsSchema = z
     maxBytes: z.number().int().positive().max(MAX_IMAGE_ARTIFACT_BYTES).default(MAX_IMAGE_ARTIFACT_BYTES)
   })
   .strict();
+const ArtifactCatalogLimitSchema = z.number().int().min(1).max(200).default(50);
+const ArtifactFilterParamsSchema = z
+  .object({
+    phaseId: z.string().min(1).max(128).optional(),
+    artifactType: z.string().min(1).max(128).optional(),
+    workCardId: z.string().min(1).max(128).optional()
+  })
+  .strict();
+const ListArtifactsParamsSchema = ArtifactFilterParamsSchema.extend({
+  limit: ArtifactCatalogLimitSchema,
+  cursor: z.string().min(1).max(32).optional()
+}).strict();
+const ReadArtifactByIdParamsSchema = z
+  .object({
+    artifactId: z.string().min(1).max(128),
+    component: z.enum(["preferred", "markdown", "json", "both"]).default("preferred")
+  })
+  .strict();
+const LatestArtifactParamsSchema = ArtifactFilterParamsSchema.extend({
+  includeContent: z.boolean().default(false)
+}).strict();
+const ArtifactPairStatusParamsSchema = z
+  .object({
+    artifactId: z.string().min(1).max(128)
+  })
+  .strict();
+const CurrentActionContextParamsSchema = z
+  .object({
+    phaseId: z.string().min(1).max(128).optional()
+  })
+  .strict();
+const ReviewQueueParamsSchema = ArtifactFilterParamsSchema.extend({
+  limit: ArtifactCatalogLimitSchema,
+  cursor: z.string().min(1).max(32).optional()
+}).strict();
 const IntegrationServiceParamsSchema = z
   .object({
     serviceId: z.string().min(1).max(64).regex(SERVICE_ID_PATTERN)
@@ -344,7 +387,13 @@ const SUPPORTED_ARTIFACT_ACTIONS = [
   "release_artifact_summary",
   "release_publication_summary",
   "local_package_summary",
-  "read_image_artifact"
+  "read_image_artifact",
+  "list_artifacts",
+  "read_artifact_by_id",
+  "latest_artifact",
+  "artifact_pair_status",
+  "current_action_context",
+  "review_queue"
 ] as const;
 const SUPPORTED_DIAGNOSTICS_ACTIONS = [
   "runtime_status",
@@ -793,6 +842,30 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
           }
         ]);
       }
+      case "list_artifacts": {
+        const params = ListArtifactsParamsSchema.parse(input.params);
+        return ok("artifact_toolbox", input.action, await listArtifacts({ workspaceId: input.workspaceId, ...params }, config));
+      }
+      case "read_artifact_by_id": {
+        const params = ReadArtifactByIdParamsSchema.parse(input.params);
+        return ok("artifact_toolbox", input.action, await readArtifactById({ workspaceId: input.workspaceId, ...params }, config));
+      }
+      case "latest_artifact": {
+        const params = LatestArtifactParamsSchema.parse(input.params);
+        return ok("artifact_toolbox", input.action, await latestArtifact({ workspaceId: input.workspaceId, ...params }, config));
+      }
+      case "artifact_pair_status": {
+        const params = ArtifactPairStatusParamsSchema.parse(input.params);
+        return ok("artifact_toolbox", input.action, await artifactPairStatus({ workspaceId: input.workspaceId, ...params }, config));
+      }
+      case "current_action_context": {
+        const params = CurrentActionContextParamsSchema.parse(input.params);
+        return ok("artifact_toolbox", input.action, await currentActionContext({ workspaceId: input.workspaceId, ...params }, config));
+      }
+      case "review_queue": {
+        const params = ReviewQueueParamsSchema.parse(input.params);
+        return ok("artifact_toolbox", input.action, await reviewQueue({ workspaceId: input.workspaceId, ...params }, config));
+      }
       default:
         return supportedActionError("artifact_toolbox", input.action, SUPPORTED_ARTIFACT_ACTIONS);
     }
@@ -913,6 +986,7 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
             data: {
               registeredTools: buildMcpToolInventory(context.registeredToolDefinitions),
               toolboxActions: {
+                artifact_toolbox: [...SUPPORTED_ARTIFACT_ACTIONS],
                 diagnostics_toolbox: [...SUPPORTED_DIAGNOSTICS_ACTIONS],
                 git_toolbox: [...SUPPORTED_GIT_ACTIONS],
                 knowledge_toolbox: [...SUPPORTED_KNOWLEDGE_ACTIONS]

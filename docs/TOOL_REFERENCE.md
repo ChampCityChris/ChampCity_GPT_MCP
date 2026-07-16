@@ -225,8 +225,26 @@ Initial actions:
 - `release_publication_summary`
 - `local_package_summary`
 - `read_image_artifact`
+- `list_artifacts`
+- `read_artifact_by_id`
+- `latest_artifact`
+- `artifact_pair_status`
+- `current_action_context`
+- `review_queue`
 
-Read actions return bounded project-artifact summaries. The obsolete Figma-specific Codex handoff prompt action was removed.
+Read actions return bounded project-artifact summaries. The obsolete Figma-specific Codex handoff prompt action was removed. All artifact discovery and context actions resolve `workspaceId` through the configured workspace registry, return repository-relative paths only, reject unknown action parameters, reject unsafe metadata paths, and never mutate files, hashes, registry entries, review state, or workflow state.
+
+`list_artifacts` discovers artifacts from structured registry records when present, then JSON sidecars, structured Markdown front matter, documented repository path conventions, and file metadata. It accepts `phaseId`, `artifactType`, `workCardId`, `limit`, and `cursor`. Filters use AND semantics. Results sort by `modifiedAt` descending, then `artifactId` ascending for stable ties. `limit` defaults to `50`, is capped at `200`, and `nextCursor` is returned when more records remain.
+
+`read_artifact_by_id` reads one artifact by stable `artifactId`, registry ID, or pair ID. It accepts `component: "preferred" | "markdown" | "json" | "both"`, defaulting to `preferred`. Markdown is bounded and explicitly reports truncation. JSON is parsed only when the full bounded JSON file can be read; oversized JSON returns metadata and hash without malformed partial JSON.
+
+`latest_artifact` accepts the same structured filters as `list_artifacts` plus `includeContent`. It uses the exact same ordering as `list_artifacts` and returns the first match; it never relies on filename or directory enumeration order.
+
+`artifact_pair_status` reports Markdown, JSON, registry, identity, and payload-hash status separately. It computes raw SHA-256 over the exact bytes on disk, compares stored component hashes when present, reports invalid JSON, missing pair components, registry path or identity mismatches, and leaves all repair or hash rewriting to future explicit write actions. Canonical payload hashing reports `not_configured` unless an authoritative canonicalizer is present; raw JSON stringification is not substituted.
+
+`current_action_context` reads only a structured current-action authority from well-known workspace files such as `.champcity/current-action.json`, `planning/current-action.json`, `planning/workflow/current-action.json`, or phase-scoped equivalents. If no structured authority exists, it returns `status: "not_configured"`. It does not infer current action from prose, branch names, newest files, or builder reports, and it does not advance workflow state.
+
+`review_queue` returns only artifacts with explicit structured review states that mean Architect review is pending, normalized to `awaiting_architect_review` while preserving the source status. Draft, operator-review, approved, rejected, and work-in-progress artifacts are excluded unless their structured state explicitly indicates Architect review is pending. Sorting uses submitted time descending when available, then artifact modified time descending, then artifact ID ascending. If no structured review-state authority exists, it returns `review_authority_not_configured`.
 
 `read_image_artifact` is a constrained screenshot/image-evidence reader, not a general binary file read capability. It accepts a workspace-relative PNG path under an approved artifact directory (`planning/`, `evidence/`, `artifacts/`, `Builder_Reports/`, `release/`, `reports/`, `validation/`, or `screenshots/`) and an optional `maxBytes` value that can only lower the hard 5,000,000-byte limit. Absolute paths, traversal, paths outside the selected workspace, blocked/cache/secret directories, unsupported extensions, non-files, oversized files, missing files, and PNG extension spoofing are rejected. Successful calls return a short text item, an MCP `image` content item, and structured metadata; base64 image bytes are never included in the text summary.
 
@@ -334,7 +352,7 @@ ChampCity MCP does not expose arbitrary shell or command execution. Validation a
 
 The architect actions use fixed executables, fixed argument construction, fixed repository working directories, `shell: false`, sanitized process environments, bounded output, redaction, fixed timeouts, and Windows-compatible process-tree termination. No action accepts executable names, package-script names, process arguments, environment variables, arbitrary Electron flags, IPC names, URLs, JavaScript, or browser selectors.
 
-Canonical artifact verification, canonical serialization/hashing, artifact-registry validation, workflow-state validation, and workflow tracing are not implemented. This repository does not yet define canonical artifact pairs, a canonical serializer/hash, an artifact registry, a workflow-state store, or transition authority. Those capabilities require a separate operator-approved architecture specification; no placeholder production models or simulated results were added.
+Semantic Markdown/JSON equivalence checks, artifact repair, automatic registry repair, canonical payload hashing without a repository canonicalizer, workflow advancement, approval/rejection transitions, historical workflow tracing, and review assignment are not implemented. These capabilities require separate operator-approved architecture specifications; no placeholder transition model or simulated review decisions were added.
 
 ## Local MCP Protocol Self-Test
 

@@ -306,7 +306,7 @@ export const tools = [
   {
     name: "artifact_toolbox",
     description:
-      "Stable artifact toolbox. Routes allowlisted Builder Report, release-summary, package-summary, and image-evidence actions through existing safeguards.",
+      "Stable artifact toolbox. Routes allowlisted artifact discovery, artifact reads by ID, latest-artifact selection, pair synchronization status, current-action context, Architect review queues, Builder Report, release-summary, package-summary, and image-evidence actions through existing safeguards.",
     inputSchema: toolboxInputSchema
   },
   {

@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { type AppConfig } from "../src/config.js";
-import { createMcpToolsListResult, createToolboxRuntimeContext, tools } from "../src/server/registerTools.js";
+import { createMcpToolsListResult, createToolboxRuntimeContext, PUBLIC_TOOL_NAMES, tools } from "../src/server/registerTools.js";
 import { gitToolbox } from "../src/tools/domainToolboxes.js";
 import { type IntegrateToDevOutput } from "../src/tools/gitWorkflow/integrateToDev.js";
 
@@ -22,6 +22,7 @@ const TOOLBOX_TOOL_NAMES = [
   "browser_toolbox",
   "knowledge_toolbox"
 ] as const;
+const PUBLIC_WRITE_SCOPED_TOOL_NAMES = [...PUBLIC_TOOL_NAMES];
 
 let tempRoot: string;
 let repoRoot: string;
@@ -221,15 +222,14 @@ describe("git_toolbox.integrate_to_dev", () => {
     assert.equal(registeredToolNames.includes("dev_toolbox"), false);
     assert.equal(registeredToolNames.includes("branch_toolbox"), false);
     assert.equal(registeredToolNames.includes("figma_toolbox"), false);
-    assert.deepEqual(exposed, [...TOOLBOX_TOOL_NAMES]);
+    assert.deepEqual(exposed, PUBLIC_WRITE_SCOPED_TOOL_NAMES);
   });
 
-  it("keeps public tool exposure exactly seven toolboxes", () => {
+  it("keeps read-only exposure to seven toolboxes and write-scoped exposure to bounded public tools", () => {
     initFixtureRepo();
 
-    for (const scope of ["files.read", "files.read files.write"]) {
-      assert.deepEqual(createMcpToolsListResult(testConfig(), { scope }).tools.map((entry) => entry.name), [...TOOLBOX_TOOL_NAMES]);
-    }
+    assert.deepEqual(createMcpToolsListResult(testConfig(), { scope: "files.read" }).tools.map((entry) => entry.name), [...TOOLBOX_TOOL_NAMES]);
+    assert.deepEqual(createMcpToolsListResult(testConfig(), { scope: "files.read files.write" }).tools.map((entry) => entry.name), PUBLIC_WRITE_SCOPED_TOOL_NAMES);
   });
 
   it("rejects unknown params", async () => {

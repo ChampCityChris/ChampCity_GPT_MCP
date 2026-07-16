@@ -35,6 +35,17 @@ import {
   MAX_RELATIVE_PATH_LENGTH,
   MAX_ROOT_LENGTH
 } from "../tools/inputLimits.js";
+import {
+  ATTACHED_IMAGE_DOWNLOAD_CONNECTION_TIMEOUT_MS,
+  ATTACHED_IMAGE_DOWNLOAD_MAX_REDIRECTS,
+  ATTACHED_IMAGE_DOWNLOAD_TOTAL_TIMEOUT_MS,
+  MAX_ATTACHED_IMAGE_BYTES,
+  MAX_ATTACHED_IMAGE_HEIGHT,
+  MAX_ATTACHED_IMAGE_PIXELS,
+  MAX_ATTACHED_IMAGE_WIDTH,
+  WORKSPACE_WRITE_ATTACHED_IMAGE_TOOL_NAME,
+  workspaceWriteAttachedImage
+} from "../tools/workspaceWriteAttachedImage.js";
 import { serializeError, AppError } from "../utils/errors.js";
 
 const textSchema = { type: "string" };
@@ -50,6 +61,17 @@ const toolboxParamsSchema = {
   type: "object",
   description: "Optional action-specific parameters. Unknown action parameters are rejected by server-side validation.",
   additionalProperties: true
+};
+const openAiFileReferenceSchema = {
+  type: "object",
+  properties: {
+    download_url: { ...textSchema, description: "Temporary ChatGPT-authorized HTTPS download URL." },
+    file_id: { ...textSchema, description: "ChatGPT file identifier for the approved attachment." },
+    mime_type: { ...textSchema, description: "Optional MIME type reported by ChatGPT." },
+    file_name: { ...textSchema, description: "Optional original file name reported by ChatGPT." }
+  },
+  required: ["download_url", "file_id"],
+  additionalProperties: false
 };
 const toolboxInputSchema = {
   type: "object",
@@ -312,6 +334,46 @@ export const tools = [
     inputSchema: toolboxInputSchema
   },
   {
+    name: WORKSPACE_WRITE_ATTACHED_IMAGE_TOOL_NAME,
+    description:
+      "Use this when the user explicitly asks to save one image attached in ChatGPT into an existing ChampCity workspace at a specified repository-relative path. Creates a new image file only and refuses to overwrite existing files.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: {
+          ...workspaceIdSchema,
+          description: "Existing server-defined workspace ID selected from diagnostics_toolbox.list_workspaces."
+        },
+        relativePath: {
+          ...relativePathSchema,
+          description: "Exact repository-relative destination including .png, .jpg, .jpeg, or .webp filename."
+        },
+        image: openAiFileReferenceSchema
+      },
+      required: ["workspaceId", "relativePath", "image"],
+      additionalProperties: false
+    },
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      destructiveHint: false
+    },
+    _meta: {
+      "openai/fileParams": ["image"],
+      "champcity/imageWritePolicy": {
+        supportedFormats: ["png", "jpeg", "webp"],
+        maximumBytes: MAX_ATTACHED_IMAGE_BYTES,
+        maximumWidth: MAX_ATTACHED_IMAGE_WIDTH,
+        maximumHeight: MAX_ATTACHED_IMAGE_HEIGHT,
+        maximumPixelCount: MAX_ATTACHED_IMAGE_PIXELS,
+        connectionTimeoutMs: ATTACHED_IMAGE_DOWNLOAD_CONNECTION_TIMEOUT_MS,
+        totalDownloadTimeoutMs: ATTACHED_IMAGE_DOWNLOAD_TOTAL_TIMEOUT_MS,
+        maxRedirects: ATTACHED_IMAGE_DOWNLOAD_MAX_REDIRECTS,
+        createOnly: true
+      }
+    }
+  },
+  {
     name: "git_status",
     description: "Return git status --short and the current branch for an allowed root.",
     inputSchema: {
@@ -456,6 +518,7 @@ export const READ_TOOL_NAMES = [
 ] as const satisfies readonly RegisteredToolName[];
 
 export const WRITE_TOOL_NAMES = [
+  WORKSPACE_WRITE_ATTACHED_IMAGE_TOOL_NAME,
   "propose_patch",
   "apply_approved_patch",
   "write_markdown_artifact",
@@ -469,7 +532,8 @@ export const WRITE_TOOL_NAMES = [
 
 const READ_TOOL_NAME_SET = new Set<string>(READ_TOOL_NAMES);
 const WRITE_TOOL_NAME_SET = new Set<string>(WRITE_TOOL_NAMES);
-const PUBLIC_TOOL_NAME_SET = new Set<string>(TOOLBOX_TOOL_NAMES);
+export const PUBLIC_TOOL_NAMES = [...TOOLBOX_TOOL_NAMES, WORKSPACE_WRITE_ATTACHED_IMAGE_TOOL_NAME] as const;
+const PUBLIC_TOOL_NAME_SET = new Set<string>(PUBLIC_TOOL_NAMES);
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 const SUPPORTED_JSON_SCHEMA_KEYS = new Set([
   "type",
@@ -724,7 +788,9 @@ function sanitizeToolForChatGpt(tool: (typeof tools)[number]): ChatGptSanitizedT
   const sanitizedTool = {
     name: tool.name,
     description: tool.description,
-    inputSchema: sanitizeJsonSchemaForChatGpt(tool.inputSchema, `${tool.name}.inputSchema`, removedKeywords, errors, true)
+    inputSchema: sanitizeJsonSchemaForChatGpt(tool.inputSchema, `${tool.name}.inputSchema`, removedKeywords, errors, true),
+    ...("annotations" in tool ? { annotations: tool.annotations } : {}),
+    ...("_meta" in tool ? { _meta: tool._meta } : {})
   };
 
   const parsed = ToolSchema.safeParse(sanitizedTool);
@@ -910,6 +976,10 @@ export function assertWriteToolEnabled(toolName: string, config: AppConfig): voi
     throw new AppError("APPROVAL_REQUIRED", "write_json_artifact requires writeMode docs, patch, or elevated.");
   }
 
+  if (toolName === WORKSPACE_WRITE_ATTACHED_IMAGE_TOOL_NAME && !config.docsWritesAllowed) {
+    throw new AppError("APPROVAL_REQUIRED", "workspace_write_attached_image requires writeMode docs, patch, or elevated.");
+  }
+
   if (toolName === "apply_approved_patch" && !config.patchWritesAllowed) {
     throw new AppError("APPROVAL_REQUIRED", "apply_approved_patch requires writeMode patch or elevated.");
   }
@@ -978,7 +1048,7 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
     try {
       if (!PUBLIC_TOOL_NAME_SET.has(request.params.name)) {
         throw new AppError("INVALID_INPUT", "Tool is not exposed on the public toolbox surface.", {
-          publicTools: [...TOOLBOX_TOOL_NAMES]
+          publicTools: [...PUBLIC_TOOL_NAMES]
         });
       }
 
@@ -986,6 +1056,8 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
       const toolboxContext = () => createToolboxRuntimeContext(config, exposureOptions);
 
       switch (request.params.name) {
+        case WORKSPACE_WRITE_ATTACHED_IMAGE_TOOL_NAME:
+          return toolResponse(await workspaceWriteAttachedImage(args, config));
         case "repo_toolbox":
           return toolResponse(await repoToolbox(args, config, toolboxContext()));
         case "git_toolbox":

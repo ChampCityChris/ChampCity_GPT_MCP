@@ -20,7 +20,7 @@ import {
 } from "../src/oauth.js";
 import { createMcpServer } from "../src/server/createMcpServer.js";
 import { readLastMcpDiscoveryTrace } from "../src/server/discoveryTrace.js";
-import { assertWriteToolEnabled, getToolExposureDiagnostics } from "../src/server/registerTools.js";
+import { assertWriteToolEnabled, getToolExposureDiagnostics, PUBLIC_TOOL_NAMES } from "../src/server/registerTools.js";
 import { runHttpTransport, validateHttpBinding } from "../src/transports/httpTransport.js";
 
 let tempRoot: string;
@@ -34,6 +34,7 @@ const toolboxToolNames = [
   "browser_toolbox",
   "knowledge_toolbox"
 ] as const;
+const publicWriteScopedToolNames = [...PUBLIC_TOOL_NAMES];
 
 beforeEach(() => {
   tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "champcity-http-"));
@@ -1330,7 +1331,7 @@ describe("HTTP MCP transport safety", () => {
       const diagnostics = getToolExposureDiagnostics(config, { scope: "files.read files.write" });
 
       assert.deepEqual(toolNames, diagnostics.exposedToolNames);
-      assert.deepEqual(toolNames, [...toolboxToolNames]);
+      assert.deepEqual(toolNames, publicWriteScopedToolNames);
       assert.equal((toolNames as string[]).includes("run_figma_make_file_handoff"), false);
       assert.equal((toolNames as string[]).includes("safe_stage_changes"), false);
     } finally {
@@ -1367,7 +1368,7 @@ describe("HTTP MCP transport safety", () => {
       const toolsResult = firstResult(toolsList.messages, 22);
       assert.doesNotThrow(() => ListToolsResultSchema.parse(toolsResult));
       const toolNames = (toolsResult.tools as Array<{ name: string }>).map((entry) => entry.name);
-      assert.deepEqual(toolNames, [...toolboxToolNames]);
+      assert.deepEqual(toolNames, publicWriteScopedToolNames);
 
       const trace = readLastMcpDiscoveryTrace(config);
       assert.ok(trace);
@@ -1478,7 +1479,12 @@ describe("HTTP MCP transport safety", () => {
       ]);
       assert.deepEqual(trace.tools.finalToolNamesReturned, [...toolboxToolNames]);
       assert.equal((trace.tools.finalToolNamesReturned as string[]).includes("write_markdown_artifact"), false);
-      assert.deepEqual(trace.tools.scopeFilteredTools, []);
+      assert.deepEqual(trace.tools.scopeFilteredTools, [
+        {
+          name: "workspace_write_attached_image",
+          reason: "missing OAuth scope files.write"
+        }
+      ]);
     } finally {
       await handle.close();
     }

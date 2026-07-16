@@ -91,7 +91,7 @@ https://mcp.example.com/mcp
 - Keep write mode off during first tunnel and ChatGPT registration testing.
 - `/mcp` requires OAuth bearer access tokens in HTTP mode.
 - `files.read` allows `tools/list` and the seven public toolbox tools.
-- `files.write` allows write-capable toolbox actions only when local `writeMode` also permits the requested operation.
+- `files.write` allows `workspace_write_attached_image` and write-capable toolbox actions only when local `writeMode` also permits the requested operation.
 - Use `CHAMPCITY_GPT_ALLOW_UNAUTH_LOCAL_HTTP=true` only for local unauthenticated testing.
 - Local unauthenticated mode is `LOCAL TEST ONLY - DO NOT TUNNEL.`
 - Treat the legacy bearer token as a temporary operator-approved development/private-connector safeguard, not the ChatGPT connector auth path.

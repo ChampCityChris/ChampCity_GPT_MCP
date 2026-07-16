@@ -10,6 +10,7 @@ import {
   createToolboxRuntimeContext,
   createMcpToolsListResult,
   getToolExposureDiagnostics,
+  PUBLIC_TOOL_NAMES,
   tools
 } from "../server/registerTools.js";
 import { getBuilderReportIndex, getBuilderReportSummary } from "../tools/builderReportFacade.js";
@@ -77,6 +78,7 @@ const REQUIRED_READ_TOOLS = [
 ] as const;
 
 const REQUIRED_GATED_TOOLS = [
+  "workspace_write_attached_image",
   "write_markdown_artifact",
   "write_json_artifact",
   "propose_patch",
@@ -98,6 +100,7 @@ const SAFE_FACADE_TOOLS = [
 ] as const;
 
 const TOOLBOX_TOOLS = TOOLBOX_TOOL_NAMES;
+const WRITE_SCOPED_PUBLIC_TOOLS = PUBLIC_TOOL_NAMES;
 
 const DISALLOWED_SAFE_FACADE_FIELDS = new Set([
   "root",
@@ -340,9 +343,12 @@ export function evaluateToolsListSchemaValid(config: AppConfig): McpSelfTestChec
   }
 
   const exposedToolNames = result.tools.map((tool) => tool.name);
-  if (exposedToolNames.length !== TOOLBOX_TOOLS.length || exposedToolNames.some((toolName, index) => toolName !== TOOLBOX_TOOLS[index])) {
-    return fail("TOOLS_LIST_SCHEMA_VALID", "tools/list did not expose exactly the seven public toolbox tools.", {
-      expectedToolNames: [...TOOLBOX_TOOLS],
+  if (
+    exposedToolNames.length !== WRITE_SCOPED_PUBLIC_TOOLS.length ||
+    exposedToolNames.some((toolName, index) => toolName !== WRITE_SCOPED_PUBLIC_TOOLS[index])
+  ) {
+    return fail("TOOLS_LIST_SCHEMA_VALID", "tools/list did not expose exactly the expected write-scoped public tools.", {
+      expectedToolNames: [...WRITE_SCOPED_PUBLIC_TOOLS],
       exposedToolNames
     });
   }

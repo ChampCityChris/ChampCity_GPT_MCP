@@ -50,7 +50,7 @@ CHAMPCITY_GPT_PUBLIC_BASE_URL=https://mcp.example.com
 OAuth scopes:
 
 - `files.read`: `tools/list` and the seven public toolbox tools: `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox`.
-- `files.write`: required inside write-capable toolbox actions such as Markdown/JSON artifact writes, patch proposal/application, integration handoff writing, and safe git mutation actions, still gated by local write mode.
+- `files.write`: required for `workspace_write_attached_image` and inside write-capable toolbox actions such as Markdown/JSON artifact writes, patch proposal/application, integration handoff writing, and safe git mutation actions, still gated by local write mode.
 
 Never expose unauthenticated HTTP mode through a tunnel.
 
@@ -95,7 +95,7 @@ Local files matching `config/*.local.json` are ignored by git. Do not commit OAu
 
 ## Figma Broker Placeholder
 
-The old direct Figma/Figma Make handoff implementation was removed in WC-V1-FIX05. Public ChatGPT `tools/list` exposes only the seven toolbox tools and does not expose Figma-specific top-level tools or `figma_toolbox`.
+The old direct Figma/Figma Make handoff implementation was removed in WC-V1-FIX05. Public ChatGPT `tools/list` exposes the seven toolbox tools plus the bounded `workspace_write_attached_image` top-level exception for ChatGPT image attachments. It does not expose Figma-specific top-level tools or `figma_toolbox`.
 
 Figma and Figma Make remain represented under `integration_toolbox` as service IDs `figma` and `figma_make`. Current status, capability, and configuration responses are broker-not-implemented placeholders with governed broker behavior only, no arbitrary upstream MCP passthrough, and no old direct token/API/MCP calls.
 

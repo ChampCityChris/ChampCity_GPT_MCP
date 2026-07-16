@@ -1,6 +1,6 @@
 {
   "name": "champcity-gpt",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "ChatGPT-compatible local MCP launcher with allowlisted project roots, OAuth, and audited file tools.",
   "type": "module",
   "main": "dist/electron/main.js",

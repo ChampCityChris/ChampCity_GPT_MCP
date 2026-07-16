@@ -41,12 +41,12 @@ If ChatGPT reports `PKCE S256 code_challenge is required`, inspect the launcher 
 Scope mapping:
 
 - `files.read`: `tools/list` and the seven public toolbox tools: `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox`.
-- `files.write`: required inside write-capable toolbox actions, including `repo_toolbox.write_markdown_artifact`, `repo_toolbox.write_json_artifact`, `repo_toolbox.propose_patch`, `repo_toolbox.apply_approved_patch`, `integration_toolbox.prepare_external_handoff`, and mutating actions under `git_toolbox`.
+- `files.write`: required for `workspace_write_attached_image` and inside write-capable toolbox actions, including `repo_toolbox.write_markdown_artifact`, `repo_toolbox.write_json_artifact`, `repo_toolbox.propose_patch`, `repo_toolbox.apply_approved_patch`, `integration_toolbox.prepare_external_handoff`, and mutating actions under `git_toolbox`.
 
 Write access uses local write modes instead of a per-write token for every write. OAuth `files.write` is still required, but it is not enough by itself. The local write mode must also permit the operation:
 
 - `off`: no write tools are allowed.
-- `docs`: Markdown and JSON artifact writes are allowed without `approvalToken`.
+- `docs`: Markdown and JSON artifact writes and constrained attached-image imports are allowed without `approvalToken`.
 - `patch`: docs mode plus controlled application of patches that match a stored `propose_patch` proposal hash.
 - `elevated`: reserved for scripts, legacy approval-gated fallback operations, and safe git branch/stage/commit/push/integrate tools.
 
@@ -75,6 +75,8 @@ The Builder Report facade implementations are limited to `planning/phases/<phase
 
 `artifact_toolbox.read_image_artifact` is a PNG-only evidence reader, not a general binary file reader. It accepts only workspace-relative paths under approved artifact/evidence directories, verifies the real final path remains inside the selected configured workspace, applies blocked-file and image-specific cache/secret directory policy, enforces a hard 5,000,000-byte maximum, and checks PNG signature/IHDR bytes before returning MCP image content. Base64 bytes are confined to the MCP image content item and are omitted from text and structured metadata. The server performs no OCR or image analysis.
 
+`workspace_write_attached_image` is the only current top-level public exception to the toolbox surface because ChatGPT attachment file parameters must be top-level inputs. It is not a general file writer. It accepts one ChatGPT-authorized PNG, JPEG, or WebP attachment, validates the downloaded bytes, requires a configured `workspaceId`, requires a repository-relative `.png`, `.jpg`, `.jpeg`, or `.webp` destination, refuses overwrites, rejects traversal/absolute/Windows device/alternate-stream paths, rejects symlink or junction escapes, writes the exact approved bytes create-only, verifies SHA-256 after creation, and omits temporary download URLs from output and audit logs.
+
 These tools are part of the remediation for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, `CAV-030`, and `CAV-033`. Local tests can verify registration and schema safety, but live ChatGPT validation is still required before claiming full platform safety-layer remediation.
 
 ## Stable Domain Toolbox Security Model
@@ -89,7 +91,7 @@ WC-V1-FIX05 leaves exactly seven stable read-visible public domain toolbox tools
 - `browser_toolbox`
 - `knowledge_toolbox`
 
-These tools reduce top-level MCP schema churn. ChatGPT may bind tool schemas for a connector or chat lifecycle, so future expansion should prefer new internal allowlisted toolbox actions over new top-level MCP tools when possible. Root-explicit legacy tools are hidden from public `tools/list` and direct public calls.
+These tools reduce top-level MCP schema churn. `workspace_write_attached_image` is a bounded write-scoped top-level addition for ChatGPT attachment import only. ChatGPT may bind tool schemas for a connector or chat lifecycle, so future expansion should prefer new internal allowlisted toolbox actions over new top-level MCP tools when file-parameter constraints do not require a top-level tool. Root-explicit legacy tools are hidden from public `tools/list` and direct public calls.
 
 The toolbox input shape is stable: `action`, optional `workspaceId`, and optional `params`. The schema is not a security boundary. Each action has strict server-side validation and rejects unknown actions, unknown services, unsafe params, and missing required params with structured errors.
 
@@ -120,7 +122,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-The self-test is deterministic and local. It validates the MCP tool registry, `tools/list` schema, the exact seven-tool public toolbox surface, required internal gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, safety-compatible descriptions, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery, denied docs-write behavior, blocked-path denial, and hidden public exposure for `run_allowed_script`. It uses temporary fixtures for denied write, blocked-path, and multi-workspace probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
+The self-test is deterministic and local. It validates the MCP tool registry, `tools/list` schema, the public surface of seven stable toolboxes plus `workspace_write_attached_image` when write-scoped, required internal gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, safety-compatible descriptions, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery, denied docs-write behavior, blocked-path denial, and hidden public exposure for `run_allowed_script`. It uses temporary fixtures for denied write, blocked-path, and multi-workspace probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
 
 The JSON output is intended for release validation and Builder Reports. It must remain redacted and must not expose secrets, tokens, OAuth stores, local config contents, full private user paths, release binary contents, logs, or generated output contents.
 

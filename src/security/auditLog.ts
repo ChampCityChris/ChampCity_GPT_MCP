@@ -5,15 +5,22 @@ export interface AuditLogEntry {
   timestamp?: string;
   toolName: string;
   action?: string;
+  correlationId?: string;
+  workspaceId?: string;
   root?: string;
   branch?: string;
   fileCount?: number;
   requestedPath?: string;
   resolvedPath?: string;
+  normalizedRelativePath?: string;
   command?: string;
   result: "allow" | "deny";
   reason: string;
   byteCount?: number;
+  detectedFormat?: string;
+  status?: string;
+  durationMs?: number;
+  sha256?: string;
 }
 
 export async function writeAuditLog(auditLogPath: string, entry: AuditLogEntry): Promise<void> {

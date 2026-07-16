@@ -7,7 +7,8 @@
 - Added fixed development and packaged Electron startup diagnostics with typed milestones and automatic shutdown.
 - Added TypeScript compiler API analysis for symbols, references, imports, callers/callees, and MCP registrations.
 - Added bounded read-only Git log, commit, diff, file-history, blame, merge-base, and ancestry inspection.
-- Kept the public surface at seven stable toolbox tools; no generic command runner, shell, browser automation, arbitrary IPC, executable, argument, or environment input was added.
+- Kept the stable public toolbox surface at seven toolbox tools and added one bounded top-level exception, `workspace_write_attached_image`, for ChatGPT-authorized raster image attachments. No generic command runner, shell, browser automation, arbitrary IPC, executable, argument, environment input, arbitrary URL downloader, or general file writer was added.
+- `workspace_write_attached_image` requires `files.write` plus local write mode `docs`, `patch`, or `elevated`; accepts one top-level ChatGPT file parameter; validates PNG, JPEG, and WebP bytes; writes create-only to a configured workspace-relative destination; refuses overwrites; rejects path traversal, Windows unsafe paths, and symlink/junction escapes; and returns SHA-256 evidence for the exact bytes written.
 - Canonical artifact verification, canonical hashing, registry validation, and workflow-state tracing remain explicitly excluded pending a separate architecture specification.
 
 Packaged source analysis returns `source_unavailable` when repository TypeScript source is not present. Preload completion is not directly observable through the preserved preload contract; Electron diagnostics report that limitation explicitly.

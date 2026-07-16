@@ -17,7 +17,7 @@ OAuth metadata:
 Scope mapping:
 
 - `files.read`: `tools/list` and the seven public toolbox tools: `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox`.
-- `files.write`: required inside write-capable toolbox actions such as `repo_toolbox.write_markdown_artifact`, `repo_toolbox.write_json_artifact`, `repo_toolbox.propose_patch`, `repo_toolbox.apply_approved_patch`, `integration_toolbox.prepare_external_handoff`, and git mutating actions under `git_toolbox`.
+- `files.write`: required for `workspace_write_attached_image` and inside write-capable toolbox actions such as `repo_toolbox.write_markdown_artifact`, `repo_toolbox.write_json_artifact`, `repo_toolbox.propose_patch`, `repo_toolbox.apply_approved_patch`, `integration_toolbox.prepare_external_handoff`, and git mutating actions under `git_toolbox`.
 
 Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=off|docs|patch|elevated` is preferred, with `config/write-access.local.json` as the local-file source. Legacy `CHAMPCITY_GPT_ENABLE_WRITE_TOOLS=true` maps to `docs`.
 
@@ -26,7 +26,7 @@ Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=of
 - `patch`: docs plus application of matching pending patch proposals.
 - `elevated`: internal/elevated exception tasks, legacy approval-gated fallback operations, and safe git branch/stage/commit/push tools.
 
-ChatGPT-facing status and release checks should use the stable toolbox actions. The legacy top-level tools remain internal implementation functions where toolbox routers need them, but they are not exposed through public ChatGPT `tools/list` and direct public calls are denied.
+ChatGPT-facing status and release checks should use the stable toolbox actions. `workspace_write_attached_image` is the only current top-level public exception because ChatGPT attachment file parameters must be top-level tool inputs. The legacy top-level tools remain internal implementation functions where toolbox routers need them, but they are not exposed through public ChatGPT `tools/list` and direct public calls are denied.
 
 These facade tools are part of the WC-V1-0102 remediation path for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, and `CAV-030`. Live ChatGPT validation is still required before claiming full remediation.
 
@@ -34,7 +34,7 @@ Builder Report discovery should use `artifact_toolbox.builder_report_index`. Spe
 
 ## Stable Domain Toolbox Tools
 
-WC-V1-FIX05 reduces the public ChatGPT-facing surface to the stable toolbox tools. Future capability expansion should prefer internal allowlisted actions over new top-level MCP tool names. ChatGPT may bind tool schemas for the connector or chat lifecycle, so adding new top-level tools can require connector rediscovery, app reauthorization, or a new chat.
+WC-V1-FIX05 reduced the public ChatGPT-facing surface to the stable toolbox tools. `workspace_write_attached_image` is a later bounded top-level exception for ChatGPT attachment import because nested file parameters are not supported. Future capability expansion should still prefer internal allowlisted actions over new top-level MCP tool names when file-parameter constraints do not require a top-level tool. ChatGPT may bind tool schemas for the connector or chat lifecycle, so adding new top-level tools can require connector rediscovery, app reauthorization, or a new chat.
 
 The stable domain toolbox tools are:
 
@@ -45,6 +45,10 @@ The stable domain toolbox tools are:
 - `integration_toolbox`
 - `browser_toolbox`
 - `knowledge_toolbox`
+
+The current additional public write tool is:
+
+- `workspace_write_attached_image`
 
 Each toolbox accepts:
 
@@ -74,7 +78,97 @@ Toolbox calls return:
 }
 ```
 
-Toolbox visibility uses `files.read`. Write-capable toolbox actions still fail unless the caller has OAuth `files.write` and the local write mode permits the mapped operation. The correct ChatGPT app scopes are `files.read files.write`; `file.read` is a typo and does not grant the required read scope.
+Toolbox visibility uses `files.read`. `workspace_write_attached_image` visibility and calls require OAuth `files.write` plus local write mode `docs`, `patch`, or `elevated`. Write-capable toolbox actions still fail unless the caller has OAuth `files.write` and the local write mode permits the mapped operation. The correct ChatGPT app scopes are `files.read files.write`; `file.read` is a typo and does not grant the required read scope.
+
+## Top-Level Attachment Writer
+
+### `workspace_write_attached_image`
+
+This tool is not a general file writer.
+
+It accepts one ChatGPT-authorized raster image and creates one new file inside an already configured workspace.
+
+It cannot overwrite files or write outside the selected workspace.
+
+Use it only when the user explicitly asks to save an attached ChatGPT image into an existing ChampCity workspace at an exact repository-relative destination. Image editing, resizing, cropping, recompression, metadata stripping, or format conversion must happen before this tool is invoked.
+
+Input:
+
+```json
+{
+  "workspaceId": "champcity_gpt",
+  "relativePath": "src/assets/logo.png",
+  "image": {
+    "download_url": "https://...",
+    "file_id": "file_...",
+    "mime_type": "image/png",
+    "file_name": "logo.png"
+  }
+}
+```
+
+`image` is a top-level ChatGPT file parameter declared with `_meta["openai/fileParams"]`. Only `download_url` and `file_id` are required; `mime_type` and `file_name` are optional. The server does not accept base64 image content, inline byte arrays, local source paths, arbitrary image URLs, caller-provided headers, caller-provided cookies, or multiple files.
+
+Supported formats:
+
+- PNG: `.png`, `image/png`
+- JPEG: `.jpg` or `.jpeg`, `image/jpeg`
+- WebP: `.webp`, `image/webp`
+
+Limits:
+
+- Maximum encoded file size: 25 MiB
+- Maximum width: 16,384 pixels
+- Maximum height: 16,384 pixels
+- Maximum total pixels: 100,000,000
+- HTTPS-only download URL
+- Connection timeout: 10,000 ms
+- Total download timeout: 30,000 ms
+- Redirect limit: 3
+
+Destination rules:
+
+- `workspaceId` must resolve through the configured workspace registry.
+- `relativePath` must be repository-relative and include the destination filename.
+- The destination extension must match the detected image bytes.
+- Missing parent directories may be created inside the selected workspace.
+- Existing destination files return `destination_exists` and are not modified.
+
+Valid destinations:
+
+```text
+src/imports/company-logo.png
+assets/reference/dashboard-layout.webp
+planning/evidence/ui/current-screen.jpg
+```
+
+Invalid destinations:
+
+```text
+C:\image.png
+C:/image.png
+\\server\share\image.png
+/file.png
+../image.png
+src/../../image.png
+file:///image.png
+%USERPROFILE%\image.png
+~\image.png
+CON.png
+image.png:ads
+```
+
+Security behavior:
+
+- Resolves workspace roots only from trusted application configuration.
+- Rejects absolute paths, drive-relative paths, UNC paths, file URIs, traversal, NUL bytes, alternate data streams, Windows device names, trailing-dot segments, trailing-space segments, empty filenames, and unsupported extensions.
+- Resolves the real workspace root and deepest existing destination ancestor before writing.
+- Rejects symlink, junction, or reparse-point escapes.
+- Uses exclusive create-only file creation and removes partial final files on write or verification failure.
+- Computes SHA-256 over the exact bytes written and verifies the final file size and hash before reporting success.
+- Does not return or log the temporary download URL.
+
+Output summary includes `status`, `workspaceId`, `workspaceName`, `relativePath`, detected format and MIME type, original file name when supplied, byte count, dimensions, SHA-256, created directories, Git file status when safely available, warnings, and structured errors. It never returns raw image bytes, base64 content, temporary download URLs, authentication data, or filesystem paths outside the selected workspace.
 
 ### `repo_toolbox`
 
@@ -172,7 +266,7 @@ Diagnostics are redacted and include runtime package version, commit, branch, ru
 
 `project_validation` accepts only `params.operation: "typecheck" | "build" | "test" | "release_checks"`. Operations map in source to fixed package scripts and the documented normal-Windows validation lane. The action accepts no command, script name, arguments, path, working directory, environment, or timeout. Results include fixed command metadata, execution lane, timestamps, exit/timeout details, bounded redacted output, Git HEAD before/after, and structured changed files. Maintainers update the fixed mapping in `src/tools/architect/projectValidation.ts` when repository scripts change; they must not add a generic command registry.
 
-`mcp_server_startup` starts the repository-owned HTTP server on a fixed ephemeral localhost port, checks its health endpoint, and shuts it down. `mcp_tool_registration` checks public tool uniqueness, schemas, descriptions, and absence of generic command exposure. `mcp_tool_inventory` lists the seven public tools and their toolbox action inventory without exposing internal executables or secrets.
+`mcp_server_startup` starts the repository-owned HTTP server on a fixed ephemeral localhost port, checks its health endpoint, and shuts it down. `mcp_tool_registration` checks public tool uniqueness, schemas, descriptions, and absence of generic command exposure. `mcp_tool_inventory` lists the public tools, including the seven toolboxes and the bounded attachment image writer, without exposing internal executables or secrets.
 
 `electron_development_startup` and `electron_packaged_startup` use one application-owned fixed diagnostic flag. They accept empty params only, capture bounded typed startup milestones, and auto-shut down. The packaged action derives the current-version executable from `package.json` and `electron-builder.json`; it returns `not_packaged` when that file is absent. Renderer load is observable. The current preload contract does not directly expose preload completion, so the diagnostic reports that limitation rather than claiming validation.
 
@@ -251,7 +345,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-This self-test checks the local tool registry, MCP `tools/list` schema validity, the exact seven-tool public toolbox surface, required internal gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, tool description safety phrases, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, hidden `run_allowed_script` public exposure, and gated branch workflow tool coverage. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
+This self-test checks the local tool registry, MCP `tools/list` schema validity, the public surface of seven stable toolboxes plus `workspace_write_attached_image` when write-scoped, required internal gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, tool description safety phrases, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, hidden `run_allowed_script` public exposure, and gated branch workflow tool coverage. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
 
 This self-test complements but does not replace live ChatGPT connector validation.
 

@@ -7,6 +7,7 @@ import {
   getToolExposureDiagnostics,
   isReadToolName,
   isWriteToolName,
+  PUBLIC_TOOL_NAMES,
   serializeMcpToolsListPayload,
   tools
 } from "../src/server/registerTools.js";
@@ -41,6 +42,7 @@ const toolboxToolNames = [
   "browser_toolbox",
   "knowledge_toolbox"
 ] as const;
+const publicWriteScopedToolNames = [...PUBLIC_TOOL_NAMES];
 
 const legacyTopLevelToolNames = [
   "list_project_files",
@@ -84,10 +86,14 @@ function publicToolNames(config = testConfig({ writeMode: "elevated" }), scope =
 }
 
 describe("MCP tool schemas", () => {
-  it("keeps the ChatGPT-facing tools/list surface to exactly the seven toolboxes", () => {
+  it("keeps read-only tools/list to the seven toolboxes and write-scoped discovery to the bounded public tools", () => {
     for (const writeMode of ["off", "docs", "patch", "elevated"] as const) {
       assert.deepEqual(publicToolNames(testConfig({ writeMode }), "files.read"), [...toolboxToolNames]);
-      assert.deepEqual(publicToolNames(testConfig({ writeMode }), "files.read files.write"), [...toolboxToolNames]);
+    }
+
+    assert.deepEqual(publicToolNames(testConfig({ writeMode: "off" }), "files.read files.write"), [...toolboxToolNames]);
+    for (const writeMode of ["docs", "patch", "elevated"] as const) {
+      assert.deepEqual(publicToolNames(testConfig({ writeMode }), "files.read files.write"), publicWriteScopedToolNames);
     }
   });
 
@@ -105,6 +111,7 @@ describe("MCP tool schemas", () => {
 
     assert.equal(exposed.includes("figma_toolbox"), false);
     assert.equal(tools.some((entry) => String(entry.name) === "figma_toolbox"), false);
+    assert.equal(exposed.includes("workspace_write_attached_image"), true);
   });
 
   it("registers stable domain toolbox tools as read-visible narrow action dispatchers", () => {
@@ -132,7 +139,7 @@ describe("MCP tool schemas", () => {
     }
   });
 
-  it("serializes a valid JSON-RPC toolbox-only tools/list payload for ChatGPT-facing diagnostics", () => {
+  it("serializes a valid JSON-RPC public tools/list payload for ChatGPT-facing diagnostics", () => {
     const config = testConfig({ writeMode: "docs" });
     const result = createMcpToolsListResult(config, { scope: "files.read files.write" });
     const payload = JSON.parse(serializeMcpToolsListPayload(config, { scope: "files.read files.write", id: 42 })) as {
@@ -145,12 +152,12 @@ describe("MCP tool schemas", () => {
     assert.equal(payload.jsonrpc, "2.0");
     assert.equal(payload.id, 42);
     assert.deepEqual(payload.result, result);
-    assert.deepEqual(payload.result.tools.map((entry) => entry.name), [...toolboxToolNames]);
+    assert.deepEqual(payload.result.tools.map((entry) => entry.name), publicWriteScopedToolNames);
     assert.doesNotThrow(() => ListToolsResultSchema.parse(payload.result));
     assert.doesNotMatch(serialized, /"default"|"maxLength"|"minimum"|"maximum"/u);
   });
 
-  it("excludes malformed non-public schemas from public exposure without changing the seven-tool public surface", () => {
+  it("excludes malformed non-public schemas from public exposure without changing the bounded public surface", () => {
     const mutableTools = tools as unknown as Array<unknown>;
     mutableTools.push({
       name: "broken_optional_tool",
@@ -167,7 +174,7 @@ describe("MCP tool schemas", () => {
     try {
       const diagnostics = getToolExposureDiagnostics(testConfig({ writeMode: "docs" }), { scope: "files.read files.write" });
       assert.ok(diagnostics.invalidToolSchemas.some((entry) => String(entry.name) === "broken_optional_tool"));
-      assert.deepEqual(diagnostics.exposedToolNames, [...toolboxToolNames]);
+      assert.deepEqual(diagnostics.exposedToolNames, publicWriteScopedToolNames);
     } finally {
       mutableTools.pop();
     }
@@ -181,8 +188,8 @@ describe("MCP tool schemas", () => {
 
     assert.deepEqual(diagnostics.internalToolNames, tools.map((entry) => entry.name));
     assert.deepEqual(diagnostics.exposedToolNames, transportResult.tools.map((entry) => entry.name));
-    assert.deepEqual(diagnostics.finalChatGptFacingToolNames, [...toolboxToolNames]);
-    assert.equal(diagnostics.schemaValidExposedToolCount, 7);
+    assert.deepEqual(diagnostics.finalChatGptFacingToolNames, publicWriteScopedToolNames);
+    assert.equal(diagnostics.schemaValidExposedToolCount, publicWriteScopedToolNames.length);
     assert.ok(diagnostics.writeToolNamesBlockedByLocalMode.includes("apply_approved_patch"));
   });
 });

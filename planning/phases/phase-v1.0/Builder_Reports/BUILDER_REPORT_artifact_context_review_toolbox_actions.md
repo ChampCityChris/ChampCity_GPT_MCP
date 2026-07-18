@@ -13,8 +13,8 @@ Add six read-only actions to the existing `artifact_toolbox` without creating a 
 
 ## Repository Verification
 
-- Current working directory: `C:\Users\chapm\Projects\ChampCity_GPT`
-- Git top-level: `C:/Users/chapm/Projects/ChampCity_GPT`
+- Current working directory: `<PROJECT_REPO>`
+- Git top-level: `<PROJECT_REPO>`
 - Remote: `https://github.com/ChampCityChris/ChampCity_GPT_MCP.git`
 - Starting branch: `dev`
 - Starting HEAD: `4e16c81f71d86cc02bb3517e8ff1df0705f1143c`
@@ -213,7 +213,7 @@ Execution lane: normal Windows validation lane, per `docs/dev/VALIDATION_COMMAND
 
 - Packaging command: `npm run app:package`
 - Result: pass.
-- Final portable executable: `C:\Users\chapm\Projects\ChampCity_GPT\release\ChampCity GPT MCP Launcher-0.2.1-x64.exe`
+- Final portable executable: `<RELEASE_ARTIFACT>`
 - LastWriteTime: `2026-07-16T14:42:32.433Z`
 - Size: `96041947`
 - SHA-256: `08ac615da738d930a3d08560efbd5a2e1c6e585e50fe51fed92c2f6b64adee64`

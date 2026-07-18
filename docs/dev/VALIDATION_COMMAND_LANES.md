@@ -20,6 +20,14 @@ Use the repo validation wrapper where available:
 - `npm run validate:codex:unit`
 - `npm run validate:codex:build`
 
+## MCP Tooling Correctness Lane
+
+For MCP toolbox correctness changes, including repository traversal, search consistency, artifact inventory filtering, pagination, planning-corpus export, hash accounting, and current-action diagnostics, use:
+
+- `npm run validate:codex:unit`
+
+This lane validates the toolbox behavior directly through automated unit tests and does not rely on any obsolete Phase 03/04 planning-scope gate. Do not broaden old phase-specific validation gates to approve unrelated planning phases.
+
 ## Commands covered by this rule
 
 Use the normal Windows execution lane for:

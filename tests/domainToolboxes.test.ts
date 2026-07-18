@@ -380,6 +380,78 @@ describe("stable domain toolbox tools", () => {
     assert.equal(legacyGit.branch, "dev");
   });
 
+  it("repo_toolbox lists nested directories with diagnostics and searches by path, filename, and content", async () => {
+    initRepo();
+    writeFile("planning/phases/phase-04/README.md", "# Phase 04\n");
+    writeFile(
+      "planning/phases/phase-04/Implementer_Reports/WC03_IMPLEMENTER_REPORT.md",
+      "# WC03 Report\n\nDistinct WC03 corpus marker.\n"
+    );
+    fs.mkdirSync(path.join(tempRoot, "planning", "phases", "phase-04", "Empty"), { recursive: true });
+    const config = testConfig("off");
+    const toolboxContext = context(config, "files.read");
+
+    const phaseList = await repoToolbox(
+      { action: "list_files", params: { relativePath: "planning\\phases\\phase-04" } },
+      config,
+      toolboxContext
+    );
+    const reportsList = await repoToolbox(
+      { action: "list_files", params: { relativePath: "planning/phases/phase-04/Implementer_Reports" } },
+      config,
+      toolboxContext
+    );
+    const emptyList = await repoToolbox(
+      { action: "list_files", params: { relativePath: "planning/phases/phase-04/Empty" } },
+      config,
+      toolboxContext
+    );
+    const missingList = await repoToolbox(
+      { action: "list_files", params: { relativePath: "planning/phases/phase-04/Missing" } },
+      config,
+      toolboxContext
+    );
+    const traversal = await repoToolbox(
+      { action: "list_files", params: { relativePath: "../outside" } },
+      config,
+      toolboxContext
+    );
+    const exactPathSearch = await repoToolbox(
+      {
+        action: "search_files",
+        params: { query: "planning/phases/phase-04/Implementer_Reports/WC03_IMPLEMENTER_REPORT.md" }
+      },
+      config,
+      toolboxContext
+    );
+    const filenameSearch = await repoToolbox(
+      { action: "search_files", params: { query: "WC03_IMPLEMENTER_REPORT.md", scopePath: "planning/phases/phase-04" } },
+      config,
+      toolboxContext
+    );
+    const contentSearch = await repoToolbox(
+      { action: "search_files", params: { query: "Distinct WC03 corpus marker", scopePath: "planning/phases/phase-04" } },
+      config,
+      toolboxContext
+    );
+
+    assert.equal(phaseList.ok, true);
+    assert.ok((phaseList.result as { files?: string[] }).files?.includes("planning/phases/phase-04/Implementer_Reports/WC03_IMPLEMENTER_REPORT.md"));
+    assert.equal((phaseList.result as { diagnostics?: { pathExists?: boolean; returnedEntryCount?: number } }).diagnostics?.pathExists, true);
+    assert.equal(reportsList.ok, true);
+    assert.deepEqual((reportsList.result as { files?: string[] }).files, ["planning/phases/phase-04/Implementer_Reports/WC03_IMPLEMENTER_REPORT.md"]);
+    assert.equal((emptyList.result as { diagnostics?: { pathExists?: boolean; returnedEntryCount?: number } }).diagnostics?.pathExists, true);
+    assert.equal((emptyList.result as { diagnostics?: { returnedEntryCount?: number } }).diagnostics?.returnedEntryCount, 0);
+    assert.equal((missingList.result as { diagnostics?: { pathExists?: boolean; errorCode?: string } }).diagnostics?.pathExists, false);
+    assert.equal((missingList.result as { diagnostics?: { errorCode?: string } }).diagnostics?.errorCode, "path_not_found");
+    assert.equal(traversal.ok, false);
+    assert.equal(traversal.error?.code, "PATH_DENIED");
+    assert.equal((exactPathSearch.result as { matches?: Array<{ relativePath?: string; matchType?: string }> }).matches?.[0]?.relativePath, "planning/phases/phase-04/Implementer_Reports/WC03_IMPLEMENTER_REPORT.md");
+    assert.equal((exactPathSearch.result as { matches?: Array<{ matchType?: string }> }).matches?.[0]?.matchType, "path");
+    assert.equal((filenameSearch.result as { matches?: Array<{ matchType?: string }> }).matches?.[0]?.matchType, "filename");
+    assert.equal((contentSearch.result as { matches?: Array<{ lineNumber?: number; matchType?: string }> }).matches?.[0]?.matchType, "content");
+  });
+
   it("routes repo, git, artifact, and diagnostics toolbox actions by explicit workspace ID", async () => {
     const gptRoot = path.join(tempRoot, "ChampCity_GPT");
     const aiRoot = path.join(tempRoot, "ChampCity_AI");

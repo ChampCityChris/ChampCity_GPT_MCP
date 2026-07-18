@@ -155,15 +155,14 @@ export const tools = [
   {
     name: "apply_approved_patch",
     description:
-      "Apply a patch only when local write mode is patch/elevated and the patch matches a registered proposal from propose_patch, or when elevated approval is explicitly configured. Preserves allowed-root, blocked-file, regular-file, symlink/submodule, size, and audit safeguards.",
+      "Apply a patch only when local write mode is patch/elevated and the patch exactly matches a live registered proposal from propose_patch. No UI or local approval token is accepted for this action. Preserves allowed-root, blocked-file, regular-file, symlink/submodule, size, and audit safeguards.",
     inputSchema: {
       type: "object",
       properties: {
         root: rootSchema,
         patch: { ...textSchema, minLength: 1, maxLength: MAX_PATCH_LENGTH },
         proposalId: { ...textSchema, description: "Short-lived proposal id returned by propose_patch." },
-        patchHash: { ...textSchema, description: "SHA-256 hash returned by propose_patch." },
-        approvalToken: approvalTokenSchema
+        patchHash: { ...textSchema, description: "SHA-256 hash returned by propose_patch." }
       },
       required: ["root", "patch"]
     }

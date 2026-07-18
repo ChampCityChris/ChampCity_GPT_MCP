@@ -26,4 +26,4 @@ Run these checks before tagging or attaching release assets:
 - Never commit release binaries.
 - Upload release binaries as GitHub Release assets.
 - Keep releases separate from commits; do not create GitHub releases from the git workflow tools.
-- Create tag `v0.2.0` when ready.
+- Create tag `v0.3.0` when ready.

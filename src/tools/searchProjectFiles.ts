@@ -1,18 +1,17 @@
 import fs from "node:fs/promises";
-import path from "node:path";
 
-import picomatch from "picomatch";
 import { z } from "zod";
 
 import { AppConfig } from "../config.js";
-import { DEFAULT_MAX_SEARCH_FILE_BYTES, assertReadableTextFile, getFilePolicyDenial } from "../security/filePolicy.js";
-import { resolveAllowedRoot, toRootRelativePath } from "../security/pathPolicy.js";
+import { DEFAULT_MAX_SEARCH_FILE_BYTES, assertReadableTextFile } from "../security/filePolicy.js";
 import { withAudit } from "./common.js";
-import { MAX_GLOB_LENGTH, MAX_QUERY_LENGTH, MAX_ROOT_LENGTH } from "./inputLimits.js";
+import { MAX_GLOB_LENGTH, MAX_QUERY_LENGTH, MAX_RELATIVE_PATH_LENGTH, MAX_ROOT_LENGTH } from "./inputLimits.js";
+import { resolveRepoPath, walkRepoFiles, type WalkDiagnostics } from "./repoTraversal.js";
 
 export const SearchProjectFilesInputSchema = z.object({
   root: z.string().min(1).max(MAX_ROOT_LENGTH),
   query: z.string().min(1).max(MAX_QUERY_LENGTH),
+  scopePath: z.string().max(MAX_RELATIVE_PATH_LENGTH).default("."),
   glob: z.string().max(MAX_GLOB_LENGTH).default("**/*.{ts,tsx,js,jsx,json,md}"),
   maxResults: z.number().int().positive().max(1000).default(50),
   contextLines: z.number().int().min(0).max(10).default(2)
@@ -26,17 +25,18 @@ export interface SearchMatch {
   line: string;
   before: string[];
   after: string[];
+  matchType: "path" | "filename" | "content";
+  source: "live_traversal";
 }
 
 export interface SearchProjectFilesOutput {
   root: string;
   query: string;
+  scopePath: string;
+  diagnostics: WalkDiagnostics;
+  searchSources: string[];
   matches: SearchMatch[];
   truncated: boolean;
-}
-
-function normalizeForGlob(relativePath: string): string {
-  return relativePath.split(path.sep).join("/");
 }
 
 async function searchFile(absolutePath: string, relativePath: string, query: string, contextLines: number): Promise<SearchMatch[]> {
@@ -57,77 +57,80 @@ async function searchFile(absolutePath: string, relativePath: string, query: str
       lineNumber: index + 1,
       line,
       before: lines.slice(beforeStart, index),
-      after: lines.slice(index + 1, afterEnd)
+      after: lines.slice(index + 1, afterEnd),
+      matchType: "content",
+      source: "live_traversal"
     });
   });
 
   return matches;
 }
 
+function normalizedQueryPath(query: string): string {
+  return query.split(/[\\/]+/u).filter(Boolean).join("/");
+}
+
 export async function searchProjectFiles(rawInput: unknown, config: AppConfig): Promise<SearchProjectFilesOutput> {
   return withAudit(config, { toolName: "search_project_files" }, async (updateAudit) => {
     const input = SearchProjectFilesInputSchema.parse(rawInput);
-    const root = resolveAllowedRoot(input.root, config.allowedRoots);
+    const resolved = await resolveRepoPath(input.root, input.scopePath, config.allowedRoots);
     updateAudit({
-      requestedPath: ".",
-      resolvedPath: root.rootRealPath
+      requestedPath: input.scopePath,
+      resolvedPath: resolved.resolvedPath
     });
 
-    const matcher = picomatch(input.glob, { dot: true });
-    const pending = [root.rootRealPath];
+    const walked = await walkRepoFiles(resolved, { glob: input.glob, maxResults: input.maxResults, recursive: true });
     const matches: SearchMatch[] = [];
     let truncated = false;
+    const queryPath = normalizedQueryPath(input.query).toLowerCase();
 
-    while (pending.length > 0) {
-      const current = pending.pop();
-      if (!current) {
+    for (const file of walked.files) {
+      const rootRelativeLower = file.rootRelativePath.toLowerCase();
+      const scopeRelativeLower = file.scopeRelativePath.toLowerCase();
+      const basenameLower = file.rootRelativePath.split("/").pop()?.toLowerCase() ?? "";
+      if (queryPath && (rootRelativeLower === queryPath || scopeRelativeLower === queryPath || basenameLower === queryPath)) {
+        matches.push({
+          relativePath: file.rootRelativePath,
+          lineNumber: 0,
+          line: "",
+          before: [],
+          after: [],
+          matchType: rootRelativeLower === queryPath || scopeRelativeLower === queryPath ? "path" : "filename",
+          source: "live_traversal"
+        });
+        if (matches.length >= input.maxResults) {
+          truncated = true;
+          break;
+        }
         continue;
       }
 
-      const entries = await fs.readdir(current, { withFileTypes: true });
-      for (const entry of entries) {
-        const absolutePath = path.join(current, entry.name);
-        const relativePath = toRootRelativePath(root.rootRealPath, absolutePath);
-        const globPath = normalizeForGlob(relativePath);
-
-        if (getFilePolicyDenial(absolutePath, relativePath) || entry.isSymbolicLink()) {
-          continue;
-        }
-
-        if (entry.isDirectory()) {
-          pending.push(absolutePath);
-          continue;
-        }
-
-        if (!entry.isFile() || !matcher(globPath)) {
-          continue;
-        }
-
-        try {
-          const fileMatches = await searchFile(absolutePath, globPath, input.query, input.contextLines);
-          for (const match of fileMatches) {
-            matches.push(match);
-            if (matches.length >= input.maxResults) {
-              truncated = true;
-              return {
-                root: root.rootRealPath,
-                query: input.query,
-                matches,
-                truncated
-              };
-            }
+      try {
+        const fileMatches = await searchFile(file.absolutePath, file.rootRelativePath, input.query, input.contextLines);
+        for (const match of fileMatches) {
+          matches.push(match);
+          if (matches.length >= input.maxResults) {
+            truncated = true;
+            break;
           }
-        } catch {
-          continue;
         }
+      } catch {
+        continue;
+      }
+
+      if (truncated) {
+        break;
       }
     }
 
     return {
-      root: root.rootRealPath,
+      root: resolved.rootRealPath,
       query: input.query,
+      scopePath: resolved.normalizedRelativePath,
+      diagnostics: walked.diagnostics,
+      searchSources: ["live_traversal"],
       matches,
-      truncated
+      truncated: truncated || walked.truncated
     };
   });
 }

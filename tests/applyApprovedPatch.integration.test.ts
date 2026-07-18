@@ -97,13 +97,16 @@ describe("apply_approved_patch integration", () => {
       "+note.txt"
     ].join("\n")}\n`;
 
+    const proposal = registerPatchProposal(tempRoot, tempRoot, patch, ["link.txt"]);
+
     await assert.rejects(
       () =>
         applyApprovedPatch(
           {
             root: tempRoot,
             patch,
-            approvalToken: "test-write-token"
+            proposalId: proposal.id,
+            patchHash: proposal.patchHash
           },
           { ...testConfig(), writeMode: "elevated", elevatedOperationsAllowed: true }
         ),

@@ -1,5 +1,14 @@
 ﻿# Release Notes
 
+## v0.3.0 - Planning-corpus reliability and deterministic patch approval
+
+- Unified repository listing and search on one safe traversal implementation with nested-directory, Windows/POSIX path, filename, path, and content matching diagnostics.
+- Added source, sidecar, and derived artifact classification with backward-compatible filters and stable pagination.
+- Added the read-only `artifact_toolbox.export_planning_corpus` action with deterministic manifests, SHA-256 file hashes, full-text coverage accounting, and explicit unsupported or excluded-file reporting.
+- Expanded `current_action_context` diagnostics without inferring workflow authority when no structured current-action record exists.
+- Removed the elevated approval-token fallback from `apply_approved_patch`; all patch applications now require an exact, live, unused proposal match in both patch and elevated modes.
+- Added focused regression coverage for traversal, artifact filtering, planning-corpus export, current-action diagnostics, and proposal-mismatch behavior.
+
 ## v0.2.0 - Purpose-built architect diagnostics
 
 - Added fixed project validation operations for typecheck, build, tests, and release checks.

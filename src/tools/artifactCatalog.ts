@@ -9,6 +9,7 @@ import { getFilePolicyDenial, isLikelyTextBuffer } from "../security/filePolicy.
 import { assertSafeRelativePath, isPathInside, toRootRelativePath } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
 import { resolveWorkspace } from "../workspaces.js";
+import { resolveRepoPath, walkRepoFiles } from "./repoTraversal.js";
 
 const MAX_SCAN_FILES = 3000;
 const MAX_SCAN_DEPTH = 12;
@@ -50,6 +51,7 @@ const AWAITING_ARCHITECT_REVIEW = new Set([
 
 type MetadataSource = "registry" | "json_sidecar" | "structured_header" | "derived_path";
 type IdSource = "registry" | "sidecar" | "structured_metadata" | "derived";
+type ArtifactRecordKind = "source" | "sidecar" | "derived";
 
 export interface ArtifactCatalogRecord {
   artifactId: string;
@@ -82,7 +84,15 @@ export interface ArtifactCatalogRecord {
 export interface ArtifactFilters {
   phaseId?: string;
   artifactType?: string;
+  artifactTypes?: string[];
   workCardId?: string;
+  status?: string;
+  statuses?: string[];
+  pathPrefix?: string;
+  recordKind?: ArtifactRecordKind;
+  includeDerived?: boolean;
+  includeSidecars?: boolean;
+  sourceOnly?: boolean;
 }
 
 export interface ListArtifactsInput extends ArtifactFilters {
@@ -116,6 +126,19 @@ export interface ReviewQueueInput extends ArtifactFilters {
   workspaceId: string;
   limit?: number;
   cursor?: string;
+}
+
+export interface ExportPlanningCorpusInput {
+  workspaceId: string;
+  pathPrefix?: string;
+  includeFullText?: boolean;
+  includeDerived?: boolean;
+  includeSidecars?: boolean;
+  artifactTypes?: string[];
+  statuses?: string[];
+  cursor?: string;
+  limit?: number;
+  maxBundleBytes?: number;
 }
 
 interface Catalog {
@@ -763,15 +786,57 @@ function filtersObject(filters: ArtifactFilters): ArtifactFilters {
   return {
     ...(filters.phaseId ? { phaseId: filters.phaseId } : {}),
     ...(filters.artifactType ? { artifactType: filters.artifactType } : {}),
-    ...(filters.workCardId ? { workCardId: filters.workCardId } : {})
+    ...(filters.artifactTypes?.length ? { artifactTypes: filters.artifactTypes } : {}),
+    ...(filters.workCardId ? { workCardId: filters.workCardId } : {}),
+    ...(filters.status ? { status: filters.status } : {}),
+    ...(filters.statuses?.length ? { statuses: filters.statuses } : {}),
+    ...(filters.pathPrefix ? { pathPrefix: filters.pathPrefix } : {}),
+    ...(filters.recordKind ? { recordKind: filters.recordKind } : {}),
+    ...(filters.includeDerived !== undefined ? { includeDerived: filters.includeDerived } : {}),
+    ...(filters.includeSidecars !== undefined ? { includeSidecars: filters.includeSidecars } : {}),
+    ...(filters.sourceOnly ? { sourceOnly: filters.sourceOnly } : {})
   };
 }
 
+function artifactRecordKind(record: ArtifactCatalogRecord): ArtifactRecordKind {
+  if (record.metadataSource === "json_sidecar") {
+    return "sidecar";
+  }
+  if (record.metadataSource === "derived_path" || record.idSource === "derived") {
+    return "derived";
+  }
+  return "source";
+}
+
+function recordPaths(record: ArtifactCatalogRecord): string[] {
+  return [record.markdownPath, record.jsonPath, record.registryPath].filter((value): value is string => Boolean(value));
+}
+
+function normalizeOptionalPathPrefix(pathPrefix: string | undefined): string | undefined {
+  if (!pathPrefix) {
+    return undefined;
+  }
+  const safe = assertSafeRelativePath(pathPrefix);
+  const normalized = normalizeSlashPath(safe);
+  return normalized === "." ? undefined : normalized.replace(/\/$/u, "");
+}
+
 function matchesFilters(record: ArtifactCatalogRecord, filters: ArtifactFilters): boolean {
+  const kind = artifactRecordKind(record);
+  const artifactTypes = filters.artifactTypes?.length ? filters.artifactTypes : filters.artifactType ? [filters.artifactType] : undefined;
+  const statuses = filters.statuses?.length ? filters.statuses : filters.status ? [filters.status] : undefined;
+  const pathPrefix = normalizeOptionalPathPrefix(filters.pathPrefix);
+
   return (
     (!filters.phaseId || record.phaseId === filters.phaseId) &&
-    (!filters.artifactType || record.artifactType === filters.artifactType) &&
-    (!filters.workCardId || record.workCardId === filters.workCardId)
+    (!artifactTypes || artifactTypes.includes(record.artifactType)) &&
+    (!filters.workCardId || record.workCardId === filters.workCardId) &&
+    (!statuses || statuses.includes(record.status ?? record.reviewStatus ?? "")) &&
+    (!pathPrefix || recordPaths(record).some((recordPath) => recordPath === pathPrefix || recordPath.startsWith(`${pathPrefix}/`))) &&
+    (!filters.recordKind || kind === filters.recordKind) &&
+    (!filters.sourceOnly || kind === "source") &&
+    (filters.includeDerived !== false || kind !== "derived") &&
+    (filters.includeSidecars !== false || kind !== "sidecar")
   );
 }
 
@@ -797,10 +862,13 @@ function pageRecords<T>(records: T[], limit: number, cursor: string | undefined)
 }
 
 function publicArtifact(record: ArtifactCatalogRecord) {
+  const recordKind = artifactRecordKind(record);
   return {
     artifactId: record.artifactId,
     ...(record.pairId ? { pairId: record.pairId } : {}),
     idSource: record.idSource,
+    recordKind,
+    metadataSource: record.metadataSource,
     ...(record.phaseId ? { phaseId: record.phaseId } : {}),
     artifactType: record.artifactType,
     ...(record.workCardId ? { workCardId: record.workCardId } : {}),
@@ -809,6 +877,8 @@ function publicArtifact(record: ArtifactCatalogRecord) {
     ...(record.reviewStatus ? { reviewStatus: record.reviewStatus } : {}),
     ...(record.markdownPath ? { markdownPath: record.markdownPath } : {}),
     ...(record.jsonPath ? { jsonPath: record.jsonPath } : {}),
+    ...(record.registryPath ? { registryPath: record.registryPath } : {}),
+    sourceOrParent: record.sourceBundleId ?? record.pairId ?? record.registryId,
     modifiedAt: record.modifiedAt,
     synchronization: synchronizationLabel(record)
   };
@@ -924,23 +994,237 @@ function findByArtifactId(records: ArtifactCatalogRecord[], artifactId: string):
   return records.find((record) => record.artifactId === artifactId || record.registryId === artifactId || record.pairId === artifactId);
 }
 
+function planningPathPrefix(pathPrefix: string | undefined): string {
+  const normalized = normalizeSlashPath(assertSafeRelativePath(pathPrefix ?? "planning"));
+  const trimmed = normalized.replace(/\/$/u, "");
+  if (trimmed !== "planning" && !trimmed.startsWith("planning/")) {
+    throw new AppError("PATH_DENIED", "export_planning_corpus pathPrefix must stay under planning/.");
+  }
+  return trimmed || "planning";
+}
+
+function fileRecordKind(relativePath: string, artifact?: ArtifactCatalogRecord): ArtifactRecordKind {
+  if (artifact) {
+    const kind = artifactRecordKind(artifact);
+    if (kind !== "derived") {
+      return kind;
+    }
+  }
+  if (/\.json$/iu.test(relativePath)) {
+    return "sidecar";
+  }
+  return "source";
+}
+
+function artifactForFile(records: ArtifactCatalogRecord[], relativePath: string): ArtifactCatalogRecord | undefined {
+  return records.find((record) => record.markdownPath === relativePath || record.jsonPath === relativePath || record.registryPath === relativePath);
+}
+
+function hashRequestId(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 24);
+}
+
+async function fileManifestEntry(root: string, relativePath: string, artifact: ArtifactCatalogRecord | undefined, recordKind: ArtifactRecordKind) {
+  try {
+    const file = await fileBytesAndHash(root, relativePath);
+    return {
+      path: relativePath,
+      ...(artifact ? { artifactId: artifact.artifactId, artifactType: artifact.artifactType, artifactStatus: artifact.status } : {}),
+      recordKind,
+      sizeBytes: file.bytes,
+      sha256: file.sha256,
+      readStatus: "hashed"
+    };
+  } catch (error) {
+    return {
+      path: relativePath,
+      ...(artifact ? { artifactId: artifact.artifactId, artifactType: artifact.artifactType, artifactStatus: artifact.status } : {}),
+      recordKind,
+      sizeBytes: null,
+      sha256: null,
+      readStatus: "failed",
+      failureReason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function readFullTextEntry(root: string, relativePath: string, sizeBytes: number, maxBundleBytes: number) {
+  const absolutePath = path.join(root, ...relativePath.split("/"));
+  if (sizeBytes > maxBundleBytes) {
+    return {
+      path: relativePath,
+      readStatus: "excluded",
+      contentComplete: false,
+      exclusionReason: "file_exceeds_remaining_bundle_limit",
+      sizeBytes
+    };
+  }
+
+  const readable = await ensureReadableText(root, relativePath, maxBundleBytes);
+  if (!readable) {
+    return {
+      path: relativePath,
+      readStatus: "unsupported",
+      contentComplete: false,
+      exclusionReason: "binary_unsupported_or_oversized",
+      sizeBytes
+    };
+  }
+
+  return {
+    path: relativePath,
+    readStatus: "read",
+    contentComplete: true,
+    sizeBytes,
+    boundary: `----- BEGIN ${relativePath} -----`,
+    content: await fs.readFile(absolutePath, "utf8"),
+    endBoundary: `----- END ${relativePath} -----`
+  };
+}
+
+export async function exportPlanningCorpus(input: ExportPlanningCorpusInput, config: AppConfig) {
+  const workspace = resolveWorkspace(input.workspaceId, config);
+  const pathPrefix = planningPathPrefix(input.pathPrefix);
+  const limit = input.limit ?? 50;
+  const maxBundleBytes = input.maxBundleBytes ?? 200_000;
+  const cursor = input.cursor;
+  const offset = decodeCursor(cursor);
+  const artifactFilters = filtersObject({
+    artifactTypes: input.artifactTypes?.map((value) => validateArtifactFilter(value, "artifactTypes")).filter((value): value is string => Boolean(value)),
+    statuses: input.statuses?.map((value) => validateArtifactFilter(value, "statuses")).filter((value): value is string => Boolean(value)),
+    pathPrefix,
+    includeDerived: input.includeDerived,
+    includeSidecars: input.includeSidecars
+  });
+
+  const [catalog, resolved] = await Promise.all([
+    buildCatalog(input.workspaceId, config),
+    resolveRepoPath(workspace.root, pathPrefix, config.allowedRoots)
+  ]);
+  const walked = await walkRepoFiles(resolved, { glob: "**/*", maxResults: 5000, recursive: true });
+  const matchingArtifactRecords = catalog.records.filter((record) => matchesFilters(record, artifactFilters));
+  const matchingArtifactPaths = new Set(matchingArtifactRecords.flatMap(recordPaths));
+  const manifestCandidates = walked.files
+    .map((file) => {
+      const artifact = artifactForFile(matchingArtifactRecords, file.rootRelativePath);
+      const recordKind = fileRecordKind(file.rootRelativePath, artifact);
+      const excluded =
+        input.includeSidecars !== true && recordKind === "sidecar" ||
+        input.includeDerived !== true && recordKind === "derived" ||
+        input.artifactTypes?.length && (!artifact || !input.artifactTypes.includes(artifact.artifactType)) ||
+        input.statuses?.length && (!artifact || !input.statuses.includes(artifact.status ?? artifact.reviewStatus ?? ""));
+      return {
+        file,
+        artifact,
+        recordKind,
+        excluded: Boolean(excluded),
+        exclusionReason: excluded ? "filtered_by_request" : undefined
+      };
+    });
+  const includedCandidates = manifestCandidates.filter((entry) => !entry.excluded);
+  const pageItems = includedCandidates.slice(offset, offset + limit);
+  const allManifestEntries = await Promise.all(
+    includedCandidates.map((entry) => fileManifestEntry(catalog.root, entry.file.rootRelativePath, entry.artifact, entry.recordKind))
+  );
+  const manifest = allManifestEntries.slice(offset, offset + limit);
+  const successfullyHashed = allManifestEntries.filter((entry) => entry.readStatus === "hashed").length;
+
+  const fullText: unknown[] = [];
+  let fullTextBytes = 0;
+  let successfullyRead = 0;
+  if (input.includeFullText) {
+    for (const entry of pageItems) {
+      const nextBytes = entry.file.sizeBytes;
+      const textEntry = await readFullTextEntry(catalog.root, entry.file.rootRelativePath, nextBytes, maxBundleBytes - fullTextBytes);
+      fullText.push(textEntry);
+      if ((textEntry as { readStatus?: string }).readStatus === "read") {
+        successfullyRead += 1;
+        fullTextBytes += nextBytes;
+      }
+    }
+  }
+
+  const nextOffset = offset + pageItems.length;
+  const hasMore = nextOffset < includedCandidates.length;
+  const totalSidecarCount = manifestCandidates.filter((entry) => entry.recordKind === "sidecar").length;
+  const totalDerivedRecordCount = matchingArtifactRecords.filter((record) => artifactRecordKind(record) === "derived").length;
+  const totalSourceFileCount = manifestCandidates.filter((entry) => entry.recordKind === "source").length;
+  const request = {
+    workspaceId: workspace.workspaceId,
+    pathPrefix,
+    includeFullText: Boolean(input.includeFullText),
+    includeDerived: Boolean(input.includeDerived),
+    includeSidecars: Boolean(input.includeSidecars),
+    artifactTypes: input.artifactTypes ?? [],
+    statuses: input.statuses ?? [],
+    limit,
+    maxBundleBytes
+  };
+
+  return {
+    status: "ok",
+    request,
+    manifestId: hashRequestId({ ...request, discovered: walked.files.map((file) => file.rootRelativePath) }),
+    page: {
+      cursor: cursor ?? null,
+      offset,
+      limit,
+      nextCursor: hasMore ? String(nextOffset) : null,
+      hasMore
+    },
+    counts: {
+      totalDiscoveredFilesystemFileCount: walked.files.length,
+      totalMatchingArtifactRecordCount: matchingArtifactRecords.length,
+      totalIncludedSourceFileCount: totalSourceFileCount,
+      totalSidecarCount,
+      totalDerivedRecordCount,
+      totalSuccessfullyHashedCount: successfullyHashed,
+      pageSuccessfullyReadCount: input.includeFullText ? successfullyRead : null,
+      totalSuccessfullyReadCount: input.includeFullText && !cursor && !hasMore ? successfullyRead : null,
+      totalExcludedCount: manifestCandidates.filter((entry) => entry.excluded).length,
+      totalFailedCount: allManifestEntries.filter((entry) => entry.readStatus === "failed").length,
+      fullTextCoverageComplete: input.includeFullText && !cursor && !hasMore ? successfullyRead === includedCandidates.length : false
+    },
+    diagnostics: {
+      requestedScope: input.pathPrefix ?? "planning/",
+      normalizedScope: pathPrefix,
+      traversal: walked.diagnostics,
+      matchingArtifactPaths: [...matchingArtifactPaths].sort()
+    },
+    manifest,
+    ...(input.includeFullText ? { fullText, fullTextBytes } : {}),
+    warnings: catalog.warnings
+  };
+}
+
 export async function listArtifacts(input: ListArtifactsInput, config: AppConfig) {
   const filters = filtersObject({
     phaseId: validateArtifactFilter(input.phaseId, "phaseId"),
     artifactType: validateArtifactFilter(input.artifactType, "artifactType"),
-    workCardId: validateArtifactFilter(input.workCardId, "workCardId")
+    artifactTypes: input.artifactTypes?.map((value) => validateArtifactFilter(value, "artifactTypes")).filter((value): value is string => Boolean(value)),
+    workCardId: validateArtifactFilter(input.workCardId, "workCardId"),
+    status: validateArtifactFilter(input.status, "status"),
+    statuses: input.statuses?.map((value) => validateArtifactFilter(value, "statuses")).filter((value): value is string => Boolean(value)),
+    pathPrefix: normalizeOptionalPathPrefix(input.pathPrefix),
+    recordKind: input.recordKind,
+    includeDerived: input.includeDerived,
+    includeSidecars: input.includeSidecars,
+    sourceOnly: input.sourceOnly
   });
   const catalog = await buildCatalog(input.workspaceId, config);
   const records = catalog.records.filter((record) => matchesFilters(record, filters));
   const limit = input.limit ?? 50;
   const page = pageRecords(records, limit, input.cursor);
+  const offset = decodeCursor(input.cursor);
 
   return {
     status: "ok",
     filters,
-    sort: { field: "modifiedAt", direction: "descending" },
+    sort: { fields: ["modifiedAt desc", "artifactId asc"], stable: true },
     artifacts: page.page.map(publicArtifact),
     ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+    page: { cursor: input.cursor ?? null, offset, limit, hasMore: Boolean(page.nextCursor) },
+    totalMatchingRecords: records.length,
     totalReturned: page.page.length,
     truncated: page.truncated,
     warnings: catalog.warnings
@@ -1286,24 +1570,35 @@ export async function currentActionContext(input: CurrentActionContextInput, con
     ...(phaseId ? [`planning/phases/${phaseId}/current-action.json`, `planning/phases/${phaseId}/workflow/current-action.json`] : []),
     ...CURRENT_ACTION_PATHS
   ];
+  const checkedLocations: Array<{ relativePath: string; exists: boolean; valid?: boolean; reasonCode?: string }> = [];
 
   for (const relativePath of candidates) {
     const absolutePath = path.join(workspace.root, ...relativePath.split("/"));
     if (!fsSync.existsSync(absolutePath)) {
+      checkedLocations.push({ relativePath, exists: false, reasonCode: "missing" });
       continue;
     }
     const parsed = await safeJsonParse(absolutePath);
     if (!parsed.validJson || !isObject(parsed.parsed)) {
+      checkedLocations.push({ relativePath, exists: true, valid: false, reasonCode: "invalid_json" });
       return {
         status: "invalid_state",
+        reasonCode: "current_action_authority_invalid_json",
         workspaceId: workspace.workspaceId,
+        workspaceRoot: workspace.root,
+        configurationSource: "structured_current_action_file",
+        checkedLocations,
+        invalidCandidatePresent: true,
+        authoritySource: { path: relativePath },
         currentAction: null,
         expectedOutput: null,
         sourceBundle: null,
         controllingFiles: [{ relativePath, exists: true, reason: "invalid_json" }],
+        remediation: "Fix or remove the invalid structured current-action JSON file.",
         warnings: [`Current-action authority is invalid JSON: ${relativePath}`]
       };
     }
+    checkedLocations.push({ relativePath, exists: true, valid: true, reasonCode: "selected" });
     const state = parsed.parsed;
     const controllingFiles = Array.isArray(state.controllingFiles)
       ? state.controllingFiles.map((entry) => safeControlFile(workspace.root, isObject(entry) ? entry.relativePath ?? entry.path : entry)).filter(Boolean)
@@ -1322,9 +1617,15 @@ export async function currentActionContext(input: CurrentActionContextInput, con
 
     return {
       status: stringValue(state.currentAction) || stringValue(state.currentActionId) ? "ok" : "no_current_action",
+      reasonCode: stringValue(state.currentAction) || stringValue(state.currentActionId) ? "configured" : "configured_without_current_action",
       workspaceId: workspace.workspaceId,
+      workspaceRoot: workspace.root,
       ...(phaseId ? { phaseId } : {}),
       authority: { path: relativePath },
+      authoritySource: { type: "structured_current_action_file", path: relativePath },
+      configurationSource: "structured_current_action_file",
+      checkedLocations,
+      invalidCandidatePresent: false,
       currentAction: stringValue(state.currentAction) ?? null,
       currentActionId: stringValue(state.currentActionId),
       expectedOutput: state.expectedOutput ?? null,
@@ -1343,12 +1644,18 @@ export async function currentActionContext(input: CurrentActionContextInput, con
 
   return {
     status: "not_configured",
+    reasonCode: "current_action_authority_not_configured",
     workspaceId: workspace.workspaceId,
+    workspaceRoot: workspace.root,
     ...(phaseId ? { phaseId } : {}),
+    configurationSource: "structured_current_action_file",
+    checkedLocations,
+    invalidCandidatePresent: false,
     currentAction: null,
     expectedOutput: null,
     sourceBundle: null,
     controllingFiles: [],
+    remediation: "Create an approved structured current-action authority file in one of the checked locations, or leave this unset when no current action is configured.",
     warnings: ["No structured current-action authority is configured for this workspace."]
   };
 }

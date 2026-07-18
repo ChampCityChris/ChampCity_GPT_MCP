@@ -235,7 +235,7 @@ The old universal per-write `approvalToken` model was replaced because ChatGPT a
 
 `propose_patch` requires OAuth `files.write`, generates a unified diff, computes a SHA-256 hash of the exact patch text, and stores short-lived metadata in `config/pending-patches.local.json`. The store contains proposal ID, root, hash, affected files, timestamps, expiry, and used status; it does not store the patch body.
 
-`apply_approved_patch` requires OAuth `files.write` and write mode `patch` or `elevated`. In `patch` mode it applies only when the supplied patch exactly matches a non-expired unused proposal for the same root. The proposal is marked used after successful application. In `elevated` mode, an elevated approval token can be used as a high-risk fallback when no proposal matches.
+`apply_approved_patch` requires OAuth `files.write` and write mode `patch` or `elevated`. In either mode it applies only when the supplied patch exactly matches a non-expired unused proposal for the same root. The proposal is marked used after successful application. Proposal mismatch, reuse, expiry, or hash failure is returned directly as a patch error; patch application never converts those failures into an approval-token request.
 
 `apply_approved_patch` rejects git patches that declare symlink, submodule, or other non-regular file modes. Only regular text file modes are allowed; symlink mode `120000` and submodule/gitlink mode `160000` are denied before `git apply` runs. After a patch applies, the tool also checks changed paths with `lstat` and rejects the operation if any changed path is a symbolic link.
 

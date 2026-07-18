@@ -225,6 +225,31 @@ describe("write approval token enforcement", () => {
     assert.equal(fs.readFileSync(path.join(tempRoot, "note.txt"), "utf8").replace(/\r\n/gu, "\n"), "hello patched\n");
   });
 
+  it("apply_approved_patch reports proposal failures in elevated mode instead of requesting an approval token", async () => {
+    fs.writeFileSync(path.join(tempRoot, "note.txt"), "hello\n", "utf8");
+    const proposal = await proposePatch(
+      {
+        root: tempRoot,
+        changes: [{ relativePath: "note.txt", originalText: "hello", replacementText: "hello patched" }]
+      },
+      testConfig({ writeMode: "elevated", elevatedOperationsAllowed: true, writeApprovalToken: { source: "none" } })
+    );
+
+    await assert.rejects(
+      () =>
+        applyApprovedPatch(
+          {
+            root: tempRoot,
+            patch: proposal.patch.replace("hello patched", "hello changed"),
+            proposalId: proposal.proposalId,
+            patchHash: proposal.patchHash
+          },
+          testConfig({ writeMode: "elevated", elevatedOperationsAllowed: true, writeApprovalToken: { source: "none" } })
+        ),
+      /Patch hash does not match/i
+    );
+  });
+
   it("apply_approved_patch refuses when patch differs from the proposal", async () => {
     fs.writeFileSync(path.join(tempRoot, "note.txt"), "hello\n", "utf8");
     const proposal = await proposePatch(

@@ -185,6 +185,10 @@ Initial actions:
 
 Read actions route through the selected workspace and existing file safety policy. `write_markdown_artifact` and `write_json_artifact` require `files.write` plus write mode `docs`, `patch`, or `elevated`. JSON writes only accept repository-relative `.json` paths, parse and normalize JSON, block local/generated/risky paths, and audit writes. Patch actions wrap the existing proposal/apply implementations without accepting public caller-supplied roots.
 
+`list_files` accepts a repository-relative `relativePath`, normalizes Windows and POSIX separators, keeps the final path inside the selected workspace, and returns repository-relative file paths plus diagnostics. Diagnostics distinguish missing paths, non-directory paths, readable empty directories, filter misses, and traversal/read failures; failures are not reported as unexplained empty results. Globs are evaluated against the repository path, the path relative to the requested directory, and the basename so nested directory listings work with simple patterns such as `*.md`.
+
+`search_files` accepts `query`, optional repository-relative `scopePath`, `glob`, `maxResults`, and `contextLines`. Search uses the same workspace path containment and traversal behavior as `list_files`. Exact repository-relative path, scoped path, and filename matches are returned as path/filename matches even when the query text does not appear inside the file. Content matches remain line-based. Current results report `searchSources`; a miss means only that the bounded search returned no match, not that the file cannot exist.
+
 ### `git_toolbox`
 
 Initial actions:
@@ -230,11 +234,12 @@ Initial actions:
 - `latest_artifact`
 - `artifact_pair_status`
 - `current_action_context`
+- `export_planning_corpus`
 - `review_queue`
 
 Read actions return bounded project-artifact summaries. The obsolete Figma-specific Codex handoff prompt action was removed. All artifact discovery and context actions resolve `workspaceId` through the configured workspace registry, return repository-relative paths only, reject unknown action parameters, reject unsafe metadata paths, and never mutate files, hashes, registry entries, review state, or workflow state.
 
-`list_artifacts` discovers artifacts from structured registry records when present, then JSON sidecars, structured Markdown front matter, documented repository path conventions, and file metadata. It accepts `phaseId`, `artifactType`, `workCardId`, `limit`, and `cursor`. Filters use AND semantics. Results sort by `modifiedAt` descending, then `artifactId` ascending for stable ties. `limit` defaults to `50`, is capped at `200`, and `nextCursor` is returned when more records remain.
+`list_artifacts` discovers artifacts from structured registry records when present, then JSON sidecars, structured Markdown front matter, documented repository path conventions, and file metadata. It accepts `phaseId`, `artifactType`, `artifactTypes`, `workCardId`, `status`, `statuses`, `pathPrefix`, `recordKind`, `includeDerived`, `includeSidecars`, `sourceOnly`, `limit`, and `cursor`. Filters use AND semantics. Each result includes a non-authoritative `recordKind` of `source`, `sidecar`, or `derived`; this is classification for review ergonomics, not an authority ranking. The prior complete inventory view remains the default. Results sort by `modifiedAt` descending, then `artifactId` ascending for stable ties. `limit` defaults to `50`, is capped at `200`, and page metadata plus `nextCursor` are returned when more records remain.
 
 `read_artifact_by_id` reads one artifact by stable `artifactId`, registry ID, or pair ID. It accepts `component: "preferred" | "markdown" | "json" | "both"`, defaulting to `preferred`. Markdown is bounded and explicitly reports truncation. JSON is parsed only when the full bounded JSON file can be read; oversized JSON returns metadata and hash without malformed partial JSON.
 
@@ -243,6 +248,8 @@ Read actions return bounded project-artifact summaries. The obsolete Figma-speci
 `artifact_pair_status` reports Markdown, JSON, registry, identity, and payload-hash status separately. It computes raw SHA-256 over the exact bytes on disk, compares stored component hashes when present, reports invalid JSON, missing pair components, registry path or identity mismatches, and leaves all repair or hash rewriting to future explicit write actions. Canonical payload hashing reports `not_configured` unless an authoritative canonicalizer is present; raw JSON stringification is not substituted.
 
 `current_action_context` reads only a structured current-action authority from well-known workspace files such as `.champcity/current-action.json`, `planning/current-action.json`, `planning/workflow/current-action.json`, or phase-scoped equivalents. If no structured authority exists, it returns `status: "not_configured"`. It does not infer current action from prose, branch names, newest files, or builder reports, and it does not advance workflow state.
+
+`export_planning_corpus` is a read-only planning-corpus review action restricted to `planning/` and descendants. It accepts `pathPrefix`, `includeFullText`, `includeDerived`, `includeSidecars`, `artifactTypes`, `statuses`, `limit`, `cursor`, and `maxBundleBytes`. It returns a deterministic manifest page with repository-relative paths, artifact metadata when available, record kind, file size, SHA-256 hashes calculated from actual file bytes, read status, exclusion/failure reasons, counts, and cursor metadata. In full-text mode it returns multiple files per page where limits permit, includes explicit file boundaries, reports unsupported/binary or oversized files, and does not silently truncate text. Inventory-only manifest review is not equivalent to full-text review; use the full-text coverage counts to confirm which eligible files were actually read.
 
 `review_queue` returns only artifacts with explicit structured review states that mean Architect review is pending, normalized to `awaiting_architect_review` while preserving the source status. Draft, operator-review, approved, rejected, and work-in-progress artifacts are excluded unless their structured state explicitly indicates Architect review is pending. Sorting uses submitted time descending when available, then artifact modified time descending, then artifact ID ascending. If no structured review-state authority exists, it returns `review_authority_not_configured`.
 
@@ -461,7 +468,7 @@ Safety behavior: target files must be allowed readable text files, and `original
 
 ## `apply_approved_patch`
 
-Applies a patch only when local write mode is `patch` or `elevated` and the patch matches a registered proposal from `propose_patch`, or when elevated approval is explicitly configured.
+Applies a patch only when local write mode is `patch` or `elevated` and the patch exactly matches a live registered proposal from `propose_patch`. This action does not accept a UI or local approval token.
 
 Input:
 
@@ -476,7 +483,7 @@ Input:
 
 Output summary: changed files and post-apply git diff summary.
 
-Safety behavior: in `patch` mode the patch must exactly match a non-expired unused proposal for the same root. The proposal is marked used after successful apply. All existing patch checks still run: allowed-root, blocked-file, regular-file, symlink/submodule, size, and non-git-target checks when git enforcement is enabled. After applying, changed paths are checked with `lstat`, and symbolic link paths are rejected with a best-effort rollback. In `elevated` mode, a valid elevated approval token can be used as a high-risk fallback without a proposal match.
+Safety behavior: in both `patch` and `elevated` mode, the patch must exactly match a non-expired unused proposal for the same root. The proposal is marked used after successful apply. All existing patch checks still run: allowed-root, blocked-file, regular-file, symlink/submodule, size, and non-git-target checks when git enforcement is enabled. After applying, changed paths are checked with `lstat`, and symbolic link paths are rejected with a best-effort rollback. Proposal failures remain patch errors and are never replaced with an approval-token challenge.
 
 Review behavior: write operations should still be reviewed with `git diff` before commit.
 

@@ -9,16 +9,14 @@ import { resolveAllowedRoot } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
 import { assertInsideGitRepo, getGitDiffSummary, runGit } from "../utils/git.js";
 import { assertChangedPathsAreNotSymlinks, collectPatchTargetPaths, validatePatchTargets } from "../utils/patch.js";
-import { assertValidWriteApprovalToken } from "../writeAccess.js";
 import { withAudit } from "./common.js";
-import { MAX_APPROVAL_TOKEN_LENGTH, MAX_PATCH_LENGTH, MAX_ROOT_LENGTH } from "./inputLimits.js";
+import { MAX_PATCH_LENGTH, MAX_ROOT_LENGTH } from "./inputLimits.js";
 
 export const ApplyApprovedPatchInputSchema = z.object({
   root: z.string().min(1).max(MAX_ROOT_LENGTH),
   patch: z.string().min(1).max(MAX_PATCH_LENGTH),
   proposalId: z.string().uuid().optional(),
-  patchHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
-  approvalToken: z.string().max(MAX_APPROVAL_TOKEN_LENGTH).optional()
+  patchHash: z.string().regex(/^[a-f0-9]{64}$/u).optional()
 });
 
 export type ApplyApprovedPatchInput = z.infer<typeof ApplyApprovedPatchInputSchema>;
@@ -162,16 +160,14 @@ export async function applyApprovedPatch(rawInput: unknown, config: AppConfig): 
     }
 
     const root = resolveAllowedRoot(input.root, config.allowedRoots);
-    let proposalIdToMark: string | undefined;
-    try {
-      const proposal = assertPatchMatchesPendingProposal(config.repoRoot, root.rootRealPath, input.patch, input.proposalId, input.patchHash);
-      proposalIdToMark = proposal.id;
-    } catch (error) {
-      if (config.writeMode !== "elevated") {
-        throw error;
-      }
-      assertValidWriteApprovalToken("apply_approved_patch", input.approvalToken, config.writeApprovalToken);
-    }
+    const proposal = assertPatchMatchesPendingProposal(
+      config.repoRoot,
+      root.rootRealPath,
+      input.patch,
+      input.proposalId,
+      input.patchHash
+    );
+    const proposalIdToMark = proposal.id;
 
     const changedFiles = validatePatchTargets(input.root, input.patch, config.allowedRoots);
     const patchTargetPaths = collectPatchTargetPaths(input.patch);

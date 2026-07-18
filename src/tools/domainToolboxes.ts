@@ -13,6 +13,7 @@ import { runGit } from "../utils/git.js";
 import {
   artifactPairStatus,
   currentActionContext,
+  exportPlanningCorpus,
   latestArtifact,
   listArtifacts,
   readArtifactById,
@@ -54,7 +55,6 @@ import { runProjectValidation, type ProjectValidationOperation } from "./archite
 import { runSourceAnalysis, type SourceAnalysisInput } from "./architect/sourceAnalysis.js";
 import {
   MAX_GLOB_LENGTH,
-  MAX_APPROVAL_TOKEN_LENGTH,
   MAX_JSON_ARTIFACT_CONTENT_LENGTH,
   MAX_MARKDOWN_ARTIFACT_CONTENT_LENGTH,
   MAX_PATCH_LENGTH,
@@ -166,6 +166,7 @@ const RepoReadFileParamsSchema = z
 const RepoSearchFilesParamsSchema = z
   .object({
     query: z.string().min(1).max(MAX_QUERY_LENGTH),
+    scopePath: z.string().max(MAX_RELATIVE_PATH_LENGTH).default("."),
     glob: z.string().max(MAX_GLOB_LENGTH).default("*.md"),
     maxResults: z.number().int().positive().max(100).default(25),
     contextLines: z.number().int().min(0).max(5).default(2)
@@ -201,8 +202,7 @@ const RepoApplyApprovedPatchParamsSchema = z
   .object({
     patch: z.string().min(1).max(MAX_PATCH_LENGTH),
     proposalId: z.string().uuid().optional(),
-    patchHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
-    approvalToken: z.string().max(MAX_APPROVAL_TOKEN_LENGTH).optional()
+    patchHash: z.string().regex(/^[a-f0-9]{64}$/u).optional()
   })
   .strict();
 
@@ -301,13 +301,34 @@ const ArtifactFilterParamsSchema = z
   .object({
     phaseId: z.string().min(1).max(128).optional(),
     artifactType: z.string().min(1).max(128).optional(),
-    workCardId: z.string().min(1).max(128).optional()
+    artifactTypes: z.array(z.string().min(1).max(128)).max(20).optional(),
+    workCardId: z.string().min(1).max(128).optional(),
+    status: z.string().min(1).max(128).optional(),
+    statuses: z.array(z.string().min(1).max(128)).max(20).optional(),
+    pathPrefix: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH).optional(),
+    recordKind: z.enum(["source", "sidecar", "derived"]).optional(),
+    includeDerived: z.boolean().optional(),
+    includeSidecars: z.boolean().optional(),
+    sourceOnly: z.boolean().optional()
   })
   .strict();
 const ListArtifactsParamsSchema = ArtifactFilterParamsSchema.extend({
   limit: ArtifactCatalogLimitSchema,
   cursor: z.string().min(1).max(32).optional()
 }).strict();
+const ExportPlanningCorpusParamsSchema = z
+  .object({
+    pathPrefix: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH).default("planning/"),
+    includeFullText: z.boolean().default(false),
+    includeDerived: z.boolean().default(false),
+    includeSidecars: z.boolean().default(false),
+    artifactTypes: z.array(z.string().min(1).max(128)).max(20).optional(),
+    statuses: z.array(z.string().min(1).max(128)).max(20).optional(),
+    limit: ArtifactCatalogLimitSchema,
+    cursor: z.string().min(1).max(32).optional(),
+    maxBundleBytes: z.number().int().positive().max(500_000).default(200_000)
+  })
+  .strict();
 const ReadArtifactByIdParamsSchema = z
   .object({
     artifactId: z.string().min(1).max(128),
@@ -393,6 +414,7 @@ const SUPPORTED_ARTIFACT_ACTIONS = [
   "latest_artifact",
   "artifact_pair_status",
   "current_action_context",
+  "export_planning_corpus",
   "review_queue"
 ] as const;
 const SUPPORTED_DIAGNOSTICS_ACTIONS = [
@@ -861,6 +883,10 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
       case "current_action_context": {
         const params = CurrentActionContextParamsSchema.parse(input.params);
         return ok("artifact_toolbox", input.action, await currentActionContext({ workspaceId: input.workspaceId, ...params }, config));
+      }
+      case "export_planning_corpus": {
+        const params = ExportPlanningCorpusParamsSchema.parse(input.params);
+        return ok("artifact_toolbox", input.action, await exportPlanningCorpus({ workspaceId: input.workspaceId, ...params }, config));
       }
       case "review_queue": {
         const params = ReviewQueueParamsSchema.parse(input.params);

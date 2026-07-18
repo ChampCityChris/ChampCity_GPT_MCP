@@ -147,6 +147,34 @@ describe("artifact catalog toolbox actions", () => {
     assertNoAbsolutePath(all);
   });
 
+  it("classifies source, sidecar, and derived artifact records and filters source-only views", async () => {
+    writeFile("docs/artifacts/source.md", "---\nartifactId: ART-SOURCE\nartifactType: plan\nstatus: approved\n---\n# Source\n", "2026-01-03T00:00:00.000Z");
+    writeFile("docs/artifacts/sidecar.json", `${JSON.stringify({ artifactId: "ART-SIDECAR-ONLY", artifactType: "plan", status: "draft" })}\n`, "2026-01-02T00:00:00.000Z");
+    writeFile("docs/artifacts/derived.md", "# Derived\n", "2026-01-01T00:00:00.000Z");
+
+    const all = await call("list_artifacts", { limit: 10 });
+    const sourceOnly = await call("list_artifacts", { sourceOnly: true, limit: 10 });
+    const sidecars = await call("list_artifacts", { recordKind: "sidecar", limit: 10 });
+    const noSupportRecords = await call("list_artifacts", { includeDerived: false, includeSidecars: false, limit: 10 });
+
+    assert.deepEqual(
+      (all.result as { artifacts?: Array<{ recordKind?: string }> }).artifacts?.map((entry) => entry.recordKind).sort(),
+      ["derived", "sidecar", "source"]
+    );
+    assert.deepEqual(
+      (sourceOnly.result as { artifacts?: Array<{ artifactId?: string }> }).artifacts?.map((entry) => entry.artifactId),
+      ["ART-SOURCE"]
+    );
+    assert.deepEqual(
+      (sidecars.result as { artifacts?: Array<{ artifactId?: string }> }).artifacts?.map((entry) => entry.artifactId),
+      ["ART-SIDECAR-ONLY"]
+    );
+    assert.deepEqual(
+      (noSupportRecords.result as { artifacts?: Array<{ artifactId?: string }> }).artifacts?.map((entry) => entry.artifactId),
+      ["ART-SOURCE"]
+    );
+  });
+
   it("reads artifacts by stable ID with preferred, markdown, JSON, both, missing component, and large JSON behavior", async () => {
     writeFile("docs/artifacts/readable.md", "# Readable\n");
     writeFile(
@@ -258,6 +286,35 @@ describe("artifact catalog toolbox actions", () => {
     assert.equal((configured.result as { currentAction?: string }).currentAction, "implement_artifact_actions");
     assert.equal((configured.result as { blockers?: unknown[] }).blockers?.length, 1);
     assert.equal((notConfigured.result as { status?: string }).status, "not_configured");
+    assert.equal((notConfigured.result as { reasonCode?: string }).reasonCode, "current_action_authority_not_configured");
+    assert.ok((notConfigured.result as { checkedLocations?: unknown[] }).checkedLocations?.length);
+  });
+
+  it("exports a planning corpus manifest with hashes, source filtering, full-text paging, and binary reporting", async () => {
+    const alpha = "# Alpha\n\nCorpus alpha text.\n";
+    const beta = "# Beta\n\nCorpus beta text.\n";
+    writeFile("planning/alpha.md", alpha, "2026-01-01T00:00:00.000Z");
+    writeFile("planning/beta.md", beta, "2026-01-02T00:00:00.000Z");
+    writeFile("planning/beta.json", `${JSON.stringify({ artifactId: "ART-BETA", artifactType: "plan", status: "draft", markdownPath: "planning/beta.md" })}\n`);
+    const binaryPath = path.join(tempRoot, "planning", "binary.bin");
+    fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
+    fs.writeFileSync(binaryPath, Buffer.from([0, 1, 2, 3]));
+
+    const manifestOnly = await call("export_planning_corpus", { pathPrefix: "planning", limit: 2 });
+    const page1 = await call("export_planning_corpus", { pathPrefix: "planning", includeFullText: true, limit: 2, maxBundleBytes: 1000 });
+    const nextCursor = (page1.result as { page?: { nextCursor?: string | null } }).page?.nextCursor;
+    const page2 = await call("export_planning_corpus", { pathPrefix: "planning", includeFullText: true, limit: 2, maxBundleBytes: 1000, cursor: nextCursor });
+    const sidecars = await call("export_planning_corpus", { pathPrefix: "planning", includeSidecars: true, limit: 10 });
+    const denied = await call("export_planning_corpus", { pathPrefix: "docs" });
+
+    assert.equal(manifestOnly.ok, true);
+    assert.equal((manifestOnly.result as { counts?: { totalDiscoveredFilesystemFileCount?: number } }).counts?.totalDiscoveredFilesystemFileCount, 4);
+    assert.ok((manifestOnly.result as { manifest?: Array<{ path?: string; sha256?: string }> }).manifest?.some((entry) => entry.path === "planning/alpha.md" && entry.sha256 === sha256(alpha)));
+    assert.equal((page1.result as { fullText?: Array<{ path?: string; readStatus?: string }> }).fullText?.some((entry) => entry.path === "planning/alpha.md" && entry.readStatus === "read"), true);
+    assert.equal((page2.result as { fullText?: Array<{ path?: string; readStatus?: string }> }).fullText?.some((entry) => entry.path === "planning/binary.bin" && entry.readStatus === "unsupported"), true);
+    assert.equal((sidecars.result as { manifest?: Array<{ path?: string }> }).manifest?.some((entry) => entry.path === "planning/beta.json"), true);
+    assert.equal(denied.ok, false);
+    assert.equal(denied.error?.code, "PATH_DENIED");
   });
 
   it("returns only explicit Architect-review queue items and rejects unsafe metadata paths", async () => {

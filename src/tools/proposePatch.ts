@@ -8,6 +8,7 @@ import { assertReadableTextFile } from "../security/filePolicy.js";
 import { resolveProjectPath, toRootRelativePath } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
 import { PreparedTextChange, createUnifiedDiff } from "../utils/patch.js";
+import { assertWorkspaceAuthorityAllowed, resolveWorkspaceAuthorityForRoot } from "../workspaceAuthority.js";
 import { withAudit } from "./common.js";
 import { MAX_PROPOSE_PATCH_TEXT_LENGTH, MAX_RELATIVE_PATH_LENGTH, MAX_ROOT_LENGTH } from "./inputLimits.js";
 
@@ -35,6 +36,7 @@ export interface ProposePatchOutput {
 export async function proposePatch(rawInput: unknown, config: AppConfig): Promise<ProposePatchOutput> {
   return withAudit(config, { toolName: "propose_patch" }, async (updateAudit) => {
     const input = ProposePatchInputSchema.parse(rawInput);
+    assertWorkspaceAuthorityAllowed(resolveWorkspaceAuthorityForRoot(input.root, config, "patch_workflow"));
     const preparedChanges: PreparedTextChange[] = [];
     const affectedFiles: string[] = [];
     let proposalRoot = input.root;

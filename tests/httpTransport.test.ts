@@ -3066,7 +3066,7 @@ describe("HTTP MCP transport safety", () => {
             arguments: {
               action: "write_markdown_artifact",
               params: {
-                relativePath: "new.md",
+                relativePath: "planning/new.md",
                 content: "# New\n"
               }
             }
@@ -3129,7 +3129,7 @@ describe("HTTP MCP transport safety", () => {
             arguments: {
               action: "write_markdown_artifact",
               params: {
-                relativePath: "new.md",
+                relativePath: "planning/new.md",
                 content: "# New\n"
               }
             }
@@ -3188,7 +3188,7 @@ describe("HTTP MCP transport safety", () => {
             arguments: {
               action: "write_markdown_artifact",
               params: {
-                relativePath: "new.md",
+                relativePath: "planning/new.md",
                 content: "# New\n"
               }
             }
@@ -3201,7 +3201,7 @@ describe("HTTP MCP transport safety", () => {
       );
       assert.equal(write.response.status, 200);
       firstResult(write.messages, 2);
-      assert.equal(fs.readFileSync(path.join(tempRoot, "new.md"), "utf8"), "# New\n");
+      assert.equal(fs.readFileSync(path.join(tempRoot, "planning", "new.md"), "utf8"), "# New\n");
     } finally {
       await handle.close();
     }
@@ -3248,7 +3248,7 @@ describe("HTTP MCP transport safety", () => {
             arguments: {
               action: "write_markdown_artifact",
               params: {
-                relativePath: "new.md",
+                relativePath: "planning/new.md",
                 content: "# New\n"
               }
             }
@@ -3261,7 +3261,7 @@ describe("HTTP MCP transport safety", () => {
       );
       assert.equal(write.response.status, 200);
       firstResult(write.messages, 2);
-      assert.equal(fs.readFileSync(path.join(tempRoot, "new.md"), "utf8"), "# New\n");
+      assert.equal(fs.readFileSync(path.join(tempRoot, "planning", "new.md"), "utf8"), "# New\n");
     } finally {
       await handle.close();
     }

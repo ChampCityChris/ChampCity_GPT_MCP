@@ -201,9 +201,30 @@ For concurrent project work, the same file may define server-named workspaces:
 }
 ```
 
+Each workspace may also define a write policy:
+
+```json
+{
+  "workspaces": [
+    {
+      "workspaceId": "new_project_planning",
+      "label": "New Project Planning",
+      "root": "C:\\Users\\<you>\\Projects\\New_Project",
+      "writePolicy": "artifact_only",
+      "artifactWriteRoots": ["planning"]
+    }
+  ],
+  "defaultWorkspaceId": "new_project_planning"
+}
+```
+
+`writePolicy` is either `git_required` or `artifact_only`. Existing and newly added ordinary project roots default to `git_required`. `artifact_only` permits only bounded Markdown and JSON artifact persistence through `repo_toolbox.write_markdown_artifact` and `repo_toolbox.write_json_artifact`; patch and Git workflows remain unavailable. `artifactWriteRoots` are server-configured workspace-relative directory prefixes. If omitted for `artifact_only`, the launcher/server default is `planning`. The special root `.` is accepted only when explicitly saved and the launcher warns that it permits Markdown/JSON artifact-extension writes throughout the workspace.
+
+The Allowed Roots Manager shows each workspace label, safe workspace ID, root, write policy selector, and artifact roots when planning mode is selected. Saving preserves labels, roots, remotes, default workspace selection, audit settings, allowed commands, and unrelated local config metadata. The app does not automatically run `git init`.
+
 `allowedRoots` remains supported. If only `allowedRoots` is configured, the server derives safe workspace IDs from folder names. ChatGPT-facing toolbox calls should use `diagnostics_toolbox.list_workspaces` and pass explicit workspace IDs instead of local paths.
 
-Environment variables still override the local config. The local config overrides safe defaults.
+Environment variables still override local config for documented fields, but no environment value can globally bypass Git-backed mutation requirements. Legacy `requireGitRoot:false` is deprecated and only affects bounded legacy Markdown/JSON artifact persistence for non-Git derived roots; explicit workspace `writePolicy` is preferred.
 
 ## Configure ChatGPT OAuth
 

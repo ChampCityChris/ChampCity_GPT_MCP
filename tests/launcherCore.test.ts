@@ -13,6 +13,7 @@ import {
   getLauncherOAuthStatus,
   getSetupStatePath,
   isAllowedLauncherCommand,
+  readLocalConfig,
   readSetupState,
   resetSetupState,
   writeSetupState,
@@ -74,6 +75,36 @@ describe("launcher client config generation", () => {
     assert.ok(fs.existsSync(path.join(result.directory, "claude-desktop-mcp-config.example.json")));
     assert.ok(fs.existsSync(path.join(result.directory, "chatgpt-connection-notes.md")));
     assert.ok(fs.existsSync(path.join(result.directory, "chatgpt-champcity-net-setup.md")));
+  });
+
+  it("round-trips workspace policy metadata without discarding unrelated config", () => {
+    const validation = writeLocalConfig(tempRoot, {
+      allowedRoots: [tempRoot],
+      requireGitRoot: false,
+      auditLog: getAuditLogPath(tempRoot),
+      allowedCommands: DEFAULT_ALLOWED_COMMANDS,
+      defaultWorkspaceId: "planning_workspace",
+      workspaces: [
+        {
+          workspaceId: "planning_workspace",
+          label: "Planning Workspace",
+          root: tempRoot,
+          remote: "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git",
+          writePolicy: "artifact_only",
+          artifactWriteRoots: ["planning"],
+          preservedWorkspaceMeta: "keep"
+        }
+      ],
+      preservedTopLevelMeta: "keep"
+    });
+    const saved = readLocalConfig(tempRoot);
+
+    assert.equal(validation.config.workspaces?.[0]?.writePolicy, "artifact_only");
+    assert.deepEqual(saved.workspaces?.[0]?.artifactWriteRoots, ["planning"]);
+    assert.equal(saved.workspaces?.[0]?.remote, "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git");
+    assert.equal(saved.workspaces?.[0]?.preservedWorkspaceMeta, "keep");
+    assert.equal(saved.preservedTopLevelMeta, "keep");
+    assert.equal(saved.defaultWorkspaceId, "planning_workspace");
   });
 
   it("does not include the auth token file or raw token in generated notes", () => {

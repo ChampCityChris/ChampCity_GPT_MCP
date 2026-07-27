@@ -66,6 +66,8 @@ The public schema stays stable, but action-specific server-side validation is st
 
 Workspace routing is stateless per call. Use `diagnostics_toolbox` with `action: "list_workspaces"` to discover safe server-defined workspace IDs such as `champcity_gpt`, then pass the chosen ID on project-specific toolbox calls. `workspaceId: "default"` is accepted only when deterministic: a single workspace is configured, or `defaultWorkspaceId` is explicitly configured. With multiple workspaces and no explicit default, project-specific calls fail with `WORKSPACE_REQUIRED` and safe available workspace IDs.
 
+Workspace write policy is server-configured and never caller supplied. `git_required` is the default and keeps artifact persistence, patch workflow, and Git workflows tied to a confirmed Git repository. `artifact_only` is explicit planning mode; it permits only Markdown/JSON artifact persistence under configured `artifactWriteRoots`, defaulting to `planning`, and denies patch and Git workflows. The special artifact root `.` is allowed only when explicitly configured and diagnostics report a warning.
+
 Toolbox calls return:
 
 ```ts
@@ -185,7 +187,7 @@ Initial actions:
 - `propose_patch`
 - `apply_approved_patch`
 
-Read actions route through the selected workspace and existing file safety policy. `write_markdown_artifact` and `write_json_artifact` require `files.write` plus write mode `docs`, `patch`, or `elevated`. JSON writes only accept repository-relative `.json` paths, parse and normalize JSON, block local/generated/risky paths, and audit writes. Patch actions wrap the existing proposal/apply implementations without accepting public caller-supplied roots.
+Read actions route through the selected workspace and existing file safety policy. `write_markdown_artifact` and `write_json_artifact` require `files.write` plus write mode `docs`, `patch`, or `elevated`. In `artifact_only` workspaces they are limited to configured artifact roots and do not invoke Git. JSON writes only accept repository-relative `.json` paths, parse and normalize JSON, block local/generated/risky paths, and audit writes. Patch actions wrap the existing proposal/apply implementations without accepting public caller-supplied roots; they always require a Git-backed workspace and are denied in `artifact_only`.
 
 `list_files` accepts a repository-relative `relativePath`, normalizes Windows and POSIX separators, keeps the final path inside the selected workspace, and returns repository-relative file paths plus diagnostics. Diagnostics distinguish missing paths, non-directory paths, readable empty directories, filter misses, and traversal/read failures; failures are not reported as unexplained empty results. Globs are evaluated against the repository path, the path relative to the requested directory, and the basename so nested directory listings work with simple patterns such as `*.md`.
 
@@ -206,7 +208,7 @@ Initial actions:
 - `integrate_to_dev`
 - `inspect_history`
 
-The toolbox does not accept arbitrary git commands, reset, rebase, stash, branch delete, force push, checkout path, or raw branch-name controls. Mutating actions require `files.write` and write mode `elevated`. `prepare_work_branch` delegates to the safe `prepare_git_work_branch` behavior. `integrate_to_dev` is a guarded internal action under `git_toolbox`, not a top-level public MCP tool.
+The toolbox does not accept arbitrary git commands, reset, rebase, stash, branch delete, force push, checkout path, or raw branch-name controls. Mutating actions require `files.write`, write mode `elevated`, and a Git-backed workspace regardless of legacy `requireGitRoot`. `artifact_only` workspaces receive structured policy denial. `prepare_work_branch` delegates to the safe `prepare_git_work_branch` behavior. `integrate_to_dev` is a guarded internal action under `git_toolbox`, not a top-level public MCP tool.
 
 `inspect_history` is read-only and accepts a strict `operation` enum: `log`, `show_commit`, `diff_refs`, `file_history`, `blame`, `merge_base`, or `check_ancestry`. Each operation constructs one fixed Git subcommand and validates bounded counts, refs, line ranges, and repository-relative paths. It disables pagers, external diff helpers, color, interactive prompts, and credential prompts. It never accepts arbitrary Git options or subcommands.
 
@@ -288,7 +290,7 @@ Initial actions:
 - `electron_development_startup`
 - `electron_packaged_startup`
 
-Diagnostics are redacted and include runtime package version, selected workspace package version, package-version match status, runtime/source commit hints when safely available, branch, runtime start time where available, registered tool count, registered tool-name hash, registered toolbox names, workspace-routing summary, observed OAuth scope booleans, local write mode, local write-mode booleans, latest discovery counts when a discovery trace is available, and recent correlated MCP tool-call trace summaries. `runtime_status` warns when the running MCP package version differs from the selected workspace package version; package, promote, restart, and reconnect the runtime before relying on current source behavior. `list_workspaces` returns safe catalog metadata only: workspace IDs, labels, repository name when available, branch when safely readable, default marker, and expected-remote match status. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, raw credential stores, or unnecessary absolute roots are returned.
+Diagnostics are redacted and include runtime package version, selected workspace package version, package-version match status, runtime/source commit hints when safely available, branch, runtime start time where available, registered tool count, registered tool-name hash, registered toolbox names, workspace-routing summary, observed OAuth scope booleans, local write mode, local write-mode booleans, latest discovery counts when a discovery trace is available, and recent correlated MCP tool-call trace summaries. `runtime_status` warns when the running MCP package version differs from the selected workspace package version; package, promote, restart, and reconnect the runtime before relying on current source behavior. `list_workspaces` returns safe catalog metadata only: workspace IDs, labels, repository name when available, branch when safely readable, default marker, expected-remote match status, `writePolicy`, Git detected yes/no, relative `artifactWriteRoots`, artifact-persistence capability/reason, Git-mutation capability/reason, and safe warnings. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, raw credential stores, or absolute roots are returned.
 
 `recent_tool_calls` accepts optional `params.limit` (default 20, minimum 1, maximum 50), `params.since` as a strict ISO-8601 timestamp, `params.correlationId`, and `params.publicToolName`. It reads only the redacted MCP tool-call trace and returns deterministic classifications: `NO_SERVER_RECEIPT_EVIDENCE`, `RECEIVED_NOT_DISPATCHED`, `DISPATCHED_NOT_EXECUTED`, `APP_POLICY_DENIED`, `APP_EXECUTION_ERROR`, `RESULT_RETURNED`, `RESPONSE_COMPLETED`, or `TRANSPORT_ERROR`. Valid dispatch correlation is bound by the MCP SDK JSON-RPC request ID supplied as handler metadata. Malformed `tools/call` requests receive receipt evidence before SDK rejection. Toolbox action scope requirements come from one canonical policy registry; OAuth scope denials classify as `APP_POLICY_DENIED` without fabricated dispatch stages, and mixed batches keep call-specific denial evidence. String JSON-RPC IDs are sanitized and capped at 128 characters, and arbitrary absolute paths in diagnostic strings are redacted while route fields such as `/mcp` and `/health` remain route values. Tool-call, discovery, and HTTP transport diagnostics use shared field-aware redaction. Missing receipt evidence means only that no matching server receipt evidence was found.
 
@@ -488,7 +490,7 @@ Input:
 
 Output summary: changed files and post-apply git diff summary.
 
-Safety behavior: in both `patch` and `elevated` mode, the patch must exactly match a non-expired unused proposal for the same root. The proposal is marked used after successful apply. All existing patch checks still run: allowed-root, blocked-file, regular-file, symlink/submodule, size, and non-git-target checks when git enforcement is enabled. After applying, changed paths are checked with `lstat`, and symbolic link paths are rejected with a best-effort rollback. Proposal failures remain patch errors and are never replaced with an approval-token challenge.
+Safety behavior: in both `patch` and `elevated` mode, the patch must exactly match a non-expired unused proposal for the same root. The proposal is marked used after successful apply. Patch proposal and application always require a confirmed Git-backed workspace, regardless of legacy `requireGitRoot`. All existing patch checks still run: allowed-root, blocked-file, regular-file, symlink/submodule, size, and non-Git-target checks. After applying, changed paths are checked with `lstat`, and symbolic link paths are rejected with a best-effort rollback. Proposal failures remain patch errors and are never replaced with an approval-token challenge.
 
 After source corrections to this behavior, run the package-and-promote path before treating the fix as active in ChatGPT. Runtime drift diagnostics identify stale packaged deployments where source and active runtime versions differ.
 
@@ -509,9 +511,9 @@ Input:
 }
 ```
 
-Output summary: relative path, size, and SHA-256.
+Output summary: relative path, size, SHA-256, workspace ID, and write policy.
 
-Safety behavior: allowed roots, `.md`-only writes, blocked-file policy, overwrite rules, atomic write, and audit logging. No `approvalToken` is required for Markdown writes in `docs`, `patch`, or `elevated` mode.
+Safety behavior: allowed roots, workspace write policy, artifact-root boundaries for `artifact_only`, `.md`-only writes, blocked-file policy, overwrite rules, regular-file target checks, atomic write, and audit logging. No `approvalToken` is required for Markdown writes in `docs`, `patch`, or `elevated` mode.
 
 ## `get_write_access_status`
 

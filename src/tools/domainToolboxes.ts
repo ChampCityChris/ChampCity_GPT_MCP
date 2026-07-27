@@ -11,6 +11,7 @@ import { readLastMcpDiscoveryTrace } from "../server/discoveryTrace.js";
 import { readRecentToolCalls, recordToolCallTrace, updateCurrentToolCallTraceContext } from "../server/toolCallTrace.js";
 import { serializeError, AppError } from "../utils/errors.js";
 import { runGit } from "../utils/git.js";
+import { assertWorkspaceAuthorityAllowed, resolveWorkspaceAuthority } from "../workspaceAuthority.js";
 import {
   artifactPairStatus,
   currentActionContext,
@@ -534,11 +535,14 @@ export async function buildRuntimeScopeToolDiagnostics(
   const selectedWorkspacePackageVersion = packageVersion(selectedWorkspaceRoot);
   const packageVersionMatch = comparePackageVersions(runtimePackageVersion, selectedWorkspacePackageVersion);
   const runtimeDriftDetected = packageVersionMatch === false;
-  const warnings = runtimeDriftDetected
-    ? [
-        "The active MCP runtime package version does not match the selected ChampCity_GPT workspace version. Package, promote, restart, and reconnect the runtime before relying on current source behavior."
-      ]
-    : [];
+  const warnings = [
+    ...(runtimeDriftDetected
+      ? [
+          "The active MCP runtime package version does not match the selected ChampCity_GPT workspace version. Package, promote, restart, and reconnect the runtime before relying on current source behavior."
+        ]
+      : []),
+    ...(config.configWarnings ?? [])
+  ];
 
   return {
     runtime: {
@@ -774,6 +778,9 @@ export async function repoToolbox(rawInput: unknown, config: AppConfig, context:
 export async function gitToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
   return runToolboxAction("git_toolbox", rawInput, SUPPORTED_GIT_ACTIONS, config, context, async (input) => {
     const root = resolveWorkspaceRoot(input.workspaceId, config);
+    const assertGitBacked = () => {
+      assertWorkspaceAuthorityAllowed(resolveWorkspaceAuthority(input.workspaceId, config, "git_mutation"));
+    };
 
     switch (input.action) {
       case "status":
@@ -784,30 +791,37 @@ export async function gitToolbox(rawInput: unknown, config: AppConfig, context: 
         return ok("git_toolbox", input.action, await gitDiff({ root, ...params }, config));
       }
       case "prepare_work_branch": {
+        assertGitBacked();
         const params = GitPrepareWorkBranchParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await prepareGitWorkBranch({ workspaceId: input.workspaceId, ...params }, config));
       }
       case "pre_commit_scan": {
+        assertGitBacked();
         const params = GitPreCommitScanParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await preCommitSafetyScan({ root, ...params }, config));
       }
       case "stage_paths": {
+        assertGitBacked();
         const params = GitStagePathsParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await safeStageChanges({ root, mode: "paths", paths: params.paths }, config));
       }
       case "commit_staged": {
+        assertGitBacked();
         const params = GitCommitStagedParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await commitValidatedChanges({ root, ...params, allowMainCommit: false }, config));
       }
       case "push_current_branch": {
+        assertGitBacked();
         const params = GitPushCurrentBranchParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await pushCurrentBranch({ root, remote: "origin", ...params, allowMainPush: false }, config));
       }
       case "readiness_summary": {
+        assertGitBacked();
         const params = GitReadinessParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await getCommitReadiness({ root, targetBranch: params.targetBranch }, config));
       }
       case "integrate_to_dev": {
+        assertGitBacked();
         return ok("git_toolbox", input.action, await integrateToDev({ workspaceId: input.workspaceId, ...input.params }, config));
       }
       case "inspect_history": {
@@ -931,7 +945,18 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
           docsWritesAllowed: config.docsWritesAllowed,
           patchWritesAllowed: config.patchWritesAllowed,
           elevatedOperationsAllowed: config.elevatedOperationsAllowed,
-          writeToolsHiddenByLocalMode: context.writeToolNamesBlockedByLocalMode
+          writeToolsHiddenByLocalMode: context.writeToolNamesBlockedByLocalMode,
+          workspaceWriteAuthority: (await listWorkspaceCatalog(config)).workspaces.map((workspace) => ({
+            workspaceId: workspace.workspaceId,
+            writePolicy: workspace.writePolicy,
+            gitDetected: workspace.gitDetected,
+            artifactWriteRoots: workspace.artifactWriteRoots,
+            artifactPersistenceAvailable: workspace.artifactPersistenceAvailable,
+            artifactPersistenceReason: workspace.artifactPersistenceReason,
+            gitMutationAvailable: workspace.gitMutationAvailable,
+            gitMutationReason: workspace.gitMutationReason,
+            warnings: workspace.warnings
+          }))
         });
       case "tool_exposure_status":
         return ok("diagnostics_toolbox", input.action, {

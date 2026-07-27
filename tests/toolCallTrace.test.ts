@@ -99,6 +99,8 @@ describe("MCP tool-call trace diagnostics", () => {
       COMMAND_DENIED: "policy",
       APPROVAL_REQUIRED: "policy",
       GIT_REQUIRED: "policy",
+      WORKSPACE_POLICY_DENIED: "policy",
+      TARGET_OUTSIDE_ARTIFACT_ROOTS: "policy",
       PROCESS_FAILED: "execution",
       WORKSPACE_REQUIRED: "policy",
       WORKSPACE_NOT_FOUND: "policy",

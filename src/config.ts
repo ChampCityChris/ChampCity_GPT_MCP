@@ -19,6 +19,12 @@ import {
   type ConfiguredWorkspace,
   type DefaultWorkspaceIdSource
 } from "./workspaces.js";
+import {
+  assertWorkspaceWritePolicy,
+  defaultArtifactWriteRootsForPolicy,
+  normalizeArtifactWriteRoots,
+  type WorkspaceWritePolicy
+} from "./workspaceWritePolicy.js";
 
 export interface AppConfig {
   repoRoot: string;
@@ -28,6 +34,7 @@ export interface AppConfig {
   workspaces?: ConfiguredWorkspace[];
   defaultWorkspaceId?: string;
   defaultWorkspaceIdSource?: DefaultWorkspaceIdSource;
+  configWarnings?: string[];
   auditLogPath: string;
   requireGitRoot: boolean;
   allowedCommands: string[];
@@ -66,6 +73,8 @@ interface LocalWorkspaceConfig {
   label?: string;
   root: string;
   remote?: string;
+  writePolicy?: WorkspaceWritePolicy;
+  artifactWriteRoots?: string[];
 }
 
 export interface LoadConfigOptions {
@@ -147,6 +156,14 @@ function assertLocalWorkspaces(value: unknown, label: string): LocalWorkspaceCon
 
     if (workspace.remote !== undefined) {
       parsed.remote = assertNonEmptyString(workspace.remote, `${label}[${index}].remote`);
+    }
+
+    if (workspace.writePolicy !== undefined) {
+      parsed.writePolicy = assertWorkspaceWritePolicy(workspace.writePolicy, `${label}[${index}].writePolicy`);
+    }
+
+    if (workspace.artifactWriteRoots !== undefined) {
+      parsed.artifactWriteRoots = assertStringArray(workspace.artifactWriteRoots, `${label}[${index}].artifactWriteRoots`);
     }
 
     return parsed;
@@ -239,11 +256,20 @@ function normalizeConfiguredWorkspaces(workspaces: LocalWorkspaceConfig[] | unde
     }
     seenRoots.add(comparisonRoot);
 
+    const writePolicy = workspace.writePolicy ?? "git_required";
+    const artifactRootConfig = workspace.artifactWriteRoots ?? defaultArtifactWriteRootsForPolicy(writePolicy);
+    const artifactRoots = artifactRootConfig.length > 0
+      ? normalizeArtifactWriteRoots(artifactRootConfig, root, `workspace ${workspaceId} artifactWriteRoots`)
+      : { roots: [], warnings: [] };
+
     return {
       workspaceId,
       label: workspace.label ?? path.basename(root) ?? workspaceId,
       root,
       ...(workspace.remote ? { remote: workspace.remote } : {}),
+      writePolicy,
+      artifactWriteRoots: artifactRoots.roots,
+      artifactRootWarnings: artifactRoots.warnings,
       source: "configured" as const
     };
   });
@@ -343,6 +369,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   );
 
   const requireGitRoot = parseBoolean(env.CHAMPCITY_GPT_REQUIRE_GIT_ROOT, localConfig.requireGitRoot ?? true);
+  const configWarnings = requireGitRoot
+    ? []
+    : ["requireGitRoot:false is deprecated and only supports bounded legacy Markdown/JSON artifact persistence; Git-backed mutations still require Git."];
   const allowedCommands = splitSemicolonList(env.CHAMPCITY_GPT_ALLOWED_COMMANDS);
   const defaultWriteMode = options.defaultWriteMode ?? (options.defaultWriteToolsEnabled === true ? "docs" : "off");
   const writeMode = getWriteMode(repoRoot, env, defaultWriteMode);
@@ -355,6 +384,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     ...(configuredWorkspaces.length > 0 ? { workspaces: configuredWorkspaces } : {}),
     ...(defaultWorkspaceId ? { defaultWorkspaceId } : {}),
     ...(defaultWorkspaceIdSource ? { defaultWorkspaceIdSource } : {}),
+    ...(configWarnings.length > 0 ? { configWarnings } : {}),
     auditLogPath,
     requireGitRoot,
     allowedCommands: allowedCommands.length > 0 ? allowedCommands : localConfig.allowedCommands && localConfig.allowedCommands.length > 0 ? localConfig.allowedCommands : DEFAULT_ALLOWED_COMMANDS,

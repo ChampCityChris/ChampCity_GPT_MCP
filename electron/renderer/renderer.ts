@@ -3,6 +3,15 @@ interface LocalLauncherConfig {
   requireGitRoot: boolean;
   auditLog: string;
   allowedCommands: string[];
+  workspaces?: Array<{
+    workspaceId: string;
+    label: string;
+    root: string;
+    remote?: string;
+    writePolicy: "git_required" | "artifact_only";
+    artifactWriteRoots: string[];
+  }>;
+  defaultWorkspaceId?: string;
 }
 
 interface DoctorCheck {

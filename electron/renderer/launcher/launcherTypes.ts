@@ -157,6 +157,11 @@ export interface McpDiscovery {
 
 export interface AllowedRoot {
   path: string;
+  workspaceId?: string;
+  label?: string;
+  writePolicy?: "git_required" | "artifact_only";
+  artifactWriteRoots?: string[];
+  warnings?: string[];
 }
 
 export interface RuntimeInfo {
@@ -234,6 +239,8 @@ export interface LauncherHandlers {
   onSaveConfig?: () => void;
   onResetRoots?: () => void;
   onSaveRequireGitRoot?: (value: boolean) => void;
+  onUpdateWorkspacePolicy?: (workspaceId: string, value: "git_required" | "artifact_only") => void;
+  onUpdateWorkspaceArtifactRoots?: (workspaceId: string, value: string[]) => void;
   onSaveAuditLogPath?: (value: string) => void;
   onSaveAllowedCommands?: (value: string) => void;
   onOpenSetupWizard?: () => void;

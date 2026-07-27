@@ -37,6 +37,13 @@ import {
 import { clearPendingPatchProposals, getPendingPatchProposalCount } from "../src/pendingPatches.js";
 import { type McpDiscoveryTrace } from "../src/server/discoveryTrace.js";
 import { getRuntimeConfigFilePath, getRuntimeGeneratedDir, getRuntimeLogDir, getRuntimeServerEntrypoint } from "../src/runtimePaths.js";
+import { deriveWorkspaceId } from "../src/workspaces.js";
+import {
+  assertWorkspaceWritePolicy,
+  defaultArtifactWriteRootsForPolicy,
+  normalizeArtifactWriteRoots,
+  type WorkspaceWritePolicy
+} from "../src/workspaceWritePolicy.js";
 
 export const DEFAULT_REPO_ROOT = path.resolve(process.cwd());
 export const PROJECTS_ROOT = path.dirname(DEFAULT_REPO_ROOT);
@@ -66,10 +73,23 @@ export const DEFAULT_ALLOWED_COMMANDS = [
 ];
 
 export interface LocalLauncherConfig {
+  [key: string]: unknown;
   allowedRoots: string[];
   requireGitRoot: boolean;
   auditLog: string;
   allowedCommands: string[];
+  workspaces?: LocalLauncherWorkspaceConfig[];
+  defaultWorkspaceId?: string;
+}
+
+export interface LocalLauncherWorkspaceConfig {
+  [key: string]: unknown;
+  workspaceId: string;
+  label: string;
+  root: string;
+  remote?: string;
+  writePolicy: WorkspaceWritePolicy;
+  artifactWriteRoots: string[];
 }
 
 export interface SetupState {
@@ -336,11 +356,21 @@ export function isUnderProjectsRoot(value: string): boolean {
 }
 
 export function createDefaultLocalConfig(repoRoot: string): LocalLauncherConfig {
+  const root = normalizeWindowsPathForConfig(repoRoot);
   return {
-    allowedRoots: DEFAULT_ALLOWED_ROOTS.map(normalizeWindowsPathForConfig),
+    allowedRoots: [root],
     requireGitRoot: true,
     auditLog: getAuditLogPath(repoRoot),
-    allowedCommands: [...DEFAULT_ALLOWED_COMMANDS]
+    allowedCommands: [...DEFAULT_ALLOWED_COMMANDS],
+    workspaces: [
+      {
+        workspaceId: deriveWorkspaceId(path.basename(root), "workspace_1"),
+        label: path.basename(root),
+        root,
+        writePolicy: "git_required",
+        artifactWriteRoots: []
+      }
+    ]
   };
 }
 
@@ -352,12 +382,112 @@ function assertStringArray(value: unknown, label: string): string[] {
   return value;
 }
 
+function assertOptionalString(value: unknown, label: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${label} must be a non-empty string.`);
+  }
+  return value;
+}
+
+function uniqueWorkspaceId(baseId: string, usedIds: Set<string>): string {
+  let candidate = baseId;
+  let suffix = 2;
+  while (usedIds.has(candidate)) {
+    candidate = `${baseId.slice(0, 64 - String(suffix).length - 1)}_${suffix}`;
+    suffix += 1;
+  }
+  usedIds.add(candidate);
+  return candidate;
+}
+
+function derivedWorkspaceConfigs(allowedRoots: readonly string[]): LocalLauncherWorkspaceConfig[] {
+  const usedIds = new Set<string>();
+  return allowedRoots.map((root, index) => {
+    const fallback = `workspace_${index + 1}`;
+    const workspaceId = uniqueWorkspaceId(deriveWorkspaceId(path.basename(root), fallback), usedIds);
+    return {
+      workspaceId,
+      label: path.basename(root) || workspaceId,
+      root,
+      writePolicy: "git_required",
+      artifactWriteRoots: []
+    };
+  });
+}
+
+function validateWorkspaceConfigs(rawWorkspaces: unknown, allowedRoots: readonly string[]): LocalLauncherWorkspaceConfig[] {
+  if (rawWorkspaces === undefined) {
+    return derivedWorkspaceConfigs(allowedRoots);
+  }
+
+  if (!Array.isArray(rawWorkspaces)) {
+    throw new Error("workspaces must be an array.");
+  }
+
+  const usedIds = new Set<string>();
+  return rawWorkspaces.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`workspaces[${index}] must be an object.`);
+    }
+
+    const workspace = entry as Record<string, unknown>;
+    const workspaceId = assertOptionalString(workspace.workspaceId, `workspaces[${index}].workspaceId`);
+    if (!workspaceId) {
+      throw new Error(`workspaces[${index}].workspaceId must be a non-empty string.`);
+    }
+    if (usedIds.has(workspaceId)) {
+      throw new Error(`Duplicate workspaceId: ${workspaceId}`);
+    }
+    usedIds.add(workspaceId);
+
+    const rootValue = assertOptionalString(workspace.root, `workspaces[${index}].root`);
+    if (!rootValue || !path.isAbsolute(rootValue)) {
+      throw new Error(`workspaces[${index}].root must be an absolute path.`);
+    }
+    const root = normalizeWindowsPathForConfig(rootValue);
+    if (!allowedRoots.includes(root)) {
+      throw new Error(`workspaces[${index}].root must be present in allowedRoots.`);
+    }
+
+    const writePolicy = workspace.writePolicy === undefined
+      ? "git_required"
+      : assertWorkspaceWritePolicy(workspace.writePolicy, `workspaces[${index}].writePolicy`);
+    const artifactWriteRootsInput = workspace.artifactWriteRoots ?? defaultArtifactWriteRootsForPolicy(writePolicy);
+    if (!Array.isArray(artifactWriteRootsInput)) {
+      throw new Error(`workspaces[${index}].artifactWriteRoots must be an array.`);
+    }
+    const artifactRoots = artifactWriteRootsInput.length > 0
+      ? normalizeArtifactWriteRoots(artifactWriteRootsInput, root, `workspaces[${index}].artifactWriteRoots`).roots
+      : [];
+
+    const passthrough = Object.fromEntries(
+      Object.entries(workspace).filter(([key]) => !["workspaceId", "label", "root", "remote", "writePolicy", "artifactWriteRoots"].includes(key))
+    );
+
+    return {
+      ...passthrough,
+      workspaceId,
+      label: assertOptionalString(workspace.label, `workspaces[${index}].label`) ?? path.basename(root) ?? workspaceId,
+      root,
+      ...(assertOptionalString(workspace.remote, `workspaces[${index}].remote`) ? { remote: assertOptionalString(workspace.remote, `workspaces[${index}].remote`) } : {}),
+      writePolicy,
+      artifactWriteRoots: artifactRoots
+    };
+  });
+}
+
 export function validateLocalConfig(rawConfig: unknown, repoRoot: string): ConfigWriteValidation {
   if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
     throw new Error("Local config must be a JSON object.");
   }
 
   const input = rawConfig as Record<string, unknown>;
+  const passthrough = Object.fromEntries(
+    Object.entries(input).filter(([key]) => !["allowedRoots", "requireGitRoot", "auditLog", "allowedCommands", "workspaces", "defaultWorkspaceId"].includes(key))
+  );
   const allowedRoots = assertStringArray(input.allowedRoots, "allowedRoots").map((root) => {
     if (!path.isAbsolute(root)) {
       throw new Error(`Allowed root must be absolute: ${root}`);
@@ -375,6 +505,11 @@ export function validateLocalConfig(rawConfig: unknown, repoRoot: string): Confi
   }
 
   const allowedCommands = assertStringArray(input.allowedCommands, "allowedCommands");
+  const workspaces = validateWorkspaceConfigs(input.workspaces, allowedRoots);
+  const defaultWorkspaceId = assertOptionalString(input.defaultWorkspaceId, "defaultWorkspaceId");
+  if (defaultWorkspaceId && !workspaces.some((workspace) => workspace.workspaceId === defaultWorkspaceId)) {
+    throw new Error("defaultWorkspaceId must match a configured workspace.");
+  }
   const outsideProjectsRoots = allowedRoots.filter((root) => !isUnderProjectsRoot(root));
   const warnings = [
     ...outsideProjectsRoots.map((root) => `Allowed root is outside ${PROJECTS_ROOT}: ${root}`),
@@ -383,10 +518,13 @@ export function validateLocalConfig(rawConfig: unknown, repoRoot: string): Confi
 
   return {
     config: {
+      ...passthrough,
       allowedRoots,
       requireGitRoot: input.requireGitRoot,
       auditLog: normalizeWindowsPathForConfig(input.auditLog),
-      allowedCommands: [...allowedCommands]
+      allowedCommands: [...allowedCommands],
+      workspaces,
+      ...(defaultWorkspaceId ? { defaultWorkspaceId } : {})
     },
     warnings,
     outsideProjectsRoots
@@ -412,15 +550,10 @@ export function writeLocalConfig(repoRoot: string, rawConfig: unknown): ConfigWr
 }
 
 function configObject(repoRoot: string): Record<string, unknown> {
-  const localConfig = readLocalConfig(repoRoot);
   return {
     command: "node",
     args: [getEntrypointPath(repoRoot)],
-    cwd: repoRoot,
-    env: {
-      CHAMPCITY_GPT_ALLOWED_ROOTS: localConfig.allowedRoots.join(";"),
-      CHAMPCITY_GPT_REQUIRE_GIT_ROOT: String(localConfig.requireGitRoot)
-    }
+    cwd: repoRoot
   };
 }
 
@@ -1041,7 +1174,8 @@ export function createChatGptSetupNotes(repoRoot: string, env: NodeJS.ProcessEnv
 - Write mode off for first ChatGPT test: ${writeMode === "off" ? "yes" : "no - set off before first test"}
 - Write mode defaults to off: yes
 - Audit log path: not included in generated notes.
-- Require git root: ${localConfig.requireGitRoot ? "yes" : "no"}
+- Workspace write policy: per workspace in allowed-roots.local.json
+- Legacy requireGitRoot: ${localConfig.requireGitRoot ? "true" : "false"} (${localConfig.requireGitRoot ? "Git-backed default" : "deprecated; does not bypass Git mutations"})
 - Legacy direct Figma tools removed: yes
 - Figma broker status: ${getLauncherFigmaStatus(repoRoot, env).figmaMcp.connectionStatus}
 - Figma arbitrary upstream MCP passthrough: no

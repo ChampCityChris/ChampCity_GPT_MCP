@@ -35,6 +35,38 @@ function operationOutput(result: unknown): string | null {
   return null;
 }
 
+function deriveWorkspaceId(value: string, fallback: string): string {
+  const derived = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "_")
+    .replace(/^_+|_+$/gu, "")
+    .slice(0, 64);
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/u.test(derived) && derived !== "default" && derived !== "all_allowed" ? derived : fallback;
+}
+
+function workspaceForRoot(root: string, index: number) {
+  const label = root.split(/[\\/]+/u).filter(Boolean).at(-1) ?? `Workspace ${index + 1}`;
+  return {
+    workspaceId: deriveWorkspaceId(label, `workspace_${index + 1}`),
+    label,
+    root,
+    writePolicy: "git_required" as const,
+    artifactWriteRoots: [] as string[]
+  };
+}
+
+function ensureWorkspaceRows(config: LocalLauncherConfig): LocalLauncherConfig {
+  if (Array.isArray(config.workspaces) && config.workspaces.length > 0) {
+    return config;
+  }
+
+  return {
+    ...config,
+    workspaces: config.allowedRoots.map(workspaceForRoot)
+  };
+}
+
 export function RendererApp(): React.JSX.Element {
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [localConfig, setLocalConfig] = useState<LocalLauncherConfig | null>(null);
@@ -222,13 +254,28 @@ export function RendererApp(): React.JSX.Element {
           if (!current || current.allowedRoots.includes(selected)) {
             return current;
           }
-          return { ...current, allowedRoots: [...current.allowedRoots, selected] };
+          const next = ensureWorkspaceRows(current);
+          return {
+            ...next,
+            allowedRoots: [...next.allowedRoots, selected],
+            workspaces: [...(next.workspaces ?? []), workspaceForRoot(selected, next.allowedRoots.length)]
+          };
         });
         return { ok: true, output: `Added allowed root ${selected}. Save Config to persist.` };
       }, { refresh: false });
     },
     onRemoveRoot: (path) => {
-      setLocalConfig((current) => current ? { ...current, allowedRoots: current.allowedRoots.filter((root) => root !== path) } : current);
+      setLocalConfig((current) => {
+        if (!current) {
+          return current;
+        }
+        const next = ensureWorkspaceRows(current);
+        return {
+          ...next,
+          allowedRoots: next.allowedRoots.filter((root) => root !== path),
+          workspaces: (next.workspaces ?? []).filter((workspace) => workspace.root !== path)
+        };
+      });
       appendLog(`Removed allowed root ${path}. Save Config to persist.`);
     },
     onSaveConfig: saveConfig,
@@ -241,12 +288,47 @@ export function RendererApp(): React.JSX.Element {
         allowedRoots: [status.repoRoot],
         requireGitRoot: true,
         auditLog: `${status.repoRoot}\\logs\\audit.log`,
-        allowedCommands: [...DEFAULT_ALLOWED_COMMANDS]
+        allowedCommands: [...DEFAULT_ALLOWED_COMMANDS],
+        workspaces: [workspaceForRoot(status.repoRoot, 0)]
       });
       appendLog("Reset allowed roots to defaults. Save Config to persist.");
     },
     onSaveRequireGitRoot: (value) => {
       setLocalConfig((current) => current ? { ...current, requireGitRoot: value } : current);
+    },
+    onUpdateWorkspacePolicy: (workspaceId, value) => {
+      setLocalConfig((current) => {
+        if (!current) {
+          return current;
+        }
+        const next = ensureWorkspaceRows(current);
+        return {
+          ...next,
+          workspaces: (next.workspaces ?? []).map((workspace) =>
+            workspace.workspaceId === workspaceId
+              ? {
+                  ...workspace,
+                  writePolicy: value,
+                  artifactWriteRoots: value === "artifact_only" && workspace.artifactWriteRoots.length === 0 ? ["planning"] : workspace.artifactWriteRoots
+                }
+              : workspace
+          )
+        };
+      });
+    },
+    onUpdateWorkspaceArtifactRoots: (workspaceId, value) => {
+      setLocalConfig((current) => {
+        if (!current) {
+          return current;
+        }
+        const next = ensureWorkspaceRows(current);
+        return {
+          ...next,
+          workspaces: (next.workspaces ?? []).map((workspace) =>
+            workspace.workspaceId === workspaceId ? { ...workspace, artifactWriteRoots: value } : workspace
+          )
+        };
+      });
     },
     onSaveAuditLogPath: (value) => {
       setLocalConfig((current) => current ? { ...current, auditLog: value } : current);

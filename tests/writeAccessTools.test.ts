@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { type AppConfig } from "../src/config.js";
@@ -25,9 +26,21 @@ afterEach(() => {
 
 function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const writeMode = overrides.writeMode ?? "docs";
+  const workspaces = overrides.workspaces ?? [
+    {
+      workspaceId: "fixture_planning",
+      label: "Fixture Planning",
+      root: tempRoot,
+      source: "configured" as const,
+      writePolicy: "artifact_only" as const,
+      artifactWriteRoots: ["."],
+      artifactRootWarnings: ["Artifact root '.' permits Markdown/JSON artifact-extension writes throughout this workspace."]
+    }
+  ];
   return {
     repoRoot: tempRoot,
     allowedRoots: [tempRoot],
+    workspaces,
     auditLogPath: path.join(tempRoot, "logs", "audit.log"),
     requireGitRoot: false,
     allowedCommands: [],
@@ -43,6 +56,23 @@ function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       tokenHash: hashWriteApprovalToken("correct-write-token")
     },
     ...overrides
+  };
+}
+
+function initGitFixture(): Partial<AppConfig> {
+  execFileSync("git", ["init"], { cwd: tempRoot, stdio: "ignore" });
+  return {
+    workspaces: [
+      {
+        workspaceId: "fixture_repo",
+        label: "Fixture Repo",
+        root: tempRoot,
+        source: "configured" as const,
+        writePolicy: "git_required" as const,
+        artifactWriteRoots: [],
+        artifactRootWarnings: []
+      }
+    ]
   };
 }
 
@@ -188,6 +218,139 @@ describe("write approval token enforcement", () => {
     }
   });
 
+  it("artifact_only creates Markdown and normalized JSON under configured planning roots without Git", async () => {
+    const originalPath = process.env.PATH;
+    process.env.PATH = "";
+    try {
+      const config = testConfig({
+        workspaces: [
+          {
+            workspaceId: "fixture_planning",
+            label: "Fixture Planning",
+            root: tempRoot,
+            source: "configured",
+            writePolicy: "artifact_only",
+            artifactWriteRoots: ["planning"],
+            artifactRootWarnings: []
+          }
+        ],
+        writeApprovalToken: { source: "none" }
+      });
+
+      const markdown = await writeMarkdownArtifact(
+        {
+          root: tempRoot,
+          relativePath: "planning/note.md",
+          content: "# Note\n"
+        },
+        config
+      );
+      const json = await writeJsonArtifact(
+        {
+          root: tempRoot,
+          relativePath: "planning/data.json",
+          content: "{\"b\":2,\"a\":1}"
+        },
+        config
+      );
+
+      assert.equal(markdown.writePolicy, "artifact_only");
+      assert.equal(json.writePolicy, "artifact_only");
+      assert.equal(fs.readFileSync(path.join(tempRoot, "planning", "data.json"), "utf8"), "{\n  \"b\": 2,\n  \"a\": 1\n}\n");
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("artifact_only denies artifact writes outside configured roots", async () => {
+    const config = testConfig({
+      workspaces: [
+        {
+          workspaceId: "fixture_planning",
+          label: "Fixture Planning",
+          root: tempRoot,
+          source: "configured",
+          writePolicy: "artifact_only",
+          artifactWriteRoots: ["planning"],
+          artifactRootWarnings: []
+        }
+      ]
+    });
+
+    await assert.rejects(
+      () =>
+        writeMarkdownArtifact(
+          {
+            root: tempRoot,
+            relativePath: "docs/note.md",
+            content: "# Note\n"
+          },
+          config
+        ),
+      (error: unknown) => (error as { code?: string }).code === "TARGET_OUTSIDE_ARTIFACT_ROOTS"
+    );
+  });
+
+  it("non-Git git_required workspaces deny artifact and patch writes even when legacy requireGitRoot is false", async () => {
+    const config = testConfig({
+      requireGitRoot: false,
+      workspaces: [
+        {
+          workspaceId: "fixture_repo",
+          label: "Fixture Repo",
+          root: tempRoot,
+          source: "configured",
+          writePolicy: "git_required",
+          artifactWriteRoots: [],
+          artifactRootWarnings: []
+        }
+      ],
+      writeMode: "patch",
+      patchWritesAllowed: true
+    });
+
+    await assert.rejects(
+      () => writeMarkdownArtifact({ root: tempRoot, relativePath: "planning/note.md", content: "# Note\n" }, config),
+      (error: unknown) => (error as { code?: string }).code === "GIT_REQUIRED"
+    );
+    await assert.rejects(
+      () => writeJsonArtifact({ root: tempRoot, relativePath: "planning/data.json", content: "{}" }, config),
+      (error: unknown) => (error as { code?: string }).code === "GIT_REQUIRED"
+    );
+    await assert.rejects(
+      () => applyApprovedPatch({ root: tempRoot, patch: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n" }, config),
+      (error: unknown) => (error as { code?: string }).code === "GIT_REQUIRED"
+    );
+  });
+
+  it("artifact_only denies patch proposal and application with structured policy evidence", async () => {
+    fs.writeFileSync(path.join(tempRoot, "note.txt"), "hello\n", "utf8");
+    const config = testConfig({ writeMode: "patch", patchWritesAllowed: true });
+
+    await assert.rejects(
+      () =>
+        proposePatch(
+          {
+            root: tempRoot,
+            changes: [{ relativePath: "note.txt", originalText: "hello", replacementText: "hello patched" }]
+          },
+          config
+        ),
+      (error: unknown) => (error as { code?: string }).code === "WORKSPACE_POLICY_DENIED"
+    );
+    await assert.rejects(
+      () =>
+        applyApprovedPatch(
+          {
+            root: tempRoot,
+            patch: "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n@@ -1 +1 @@\n-hello\n+hello patched\n"
+          },
+          config
+        ),
+      (error: unknown) => (error as { code?: string }).code === "WORKSPACE_POLICY_DENIED"
+    );
+  });
+
   it("apply_approved_patch refuses in docs mode", async () => {
     await assert.rejects(
       () =>
@@ -204,12 +367,13 @@ describe("write approval token enforcement", () => {
 
   it("apply_approved_patch allows a matching pending proposal in patch mode without approvalToken", async () => {
     fs.writeFileSync(path.join(tempRoot, "note.txt"), "hello\n", "utf8");
+    const config = testConfig({ writeMode: "patch", ...initGitFixture() });
     const proposal = await proposePatch(
       {
         root: tempRoot,
         changes: [{ relativePath: "note.txt", originalText: "hello", replacementText: "hello patched" }]
       },
-      testConfig({ writeMode: "patch" })
+      config
     );
 
     await applyApprovedPatch(
@@ -219,7 +383,7 @@ describe("write approval token enforcement", () => {
         proposalId: proposal.proposalId,
         patchHash: proposal.patchHash
       },
-      testConfig({ writeMode: "patch" })
+      config
     );
 
     assert.equal(fs.readFileSync(path.join(tempRoot, "note.txt"), "utf8").replace(/\r\n/gu, "\n"), "hello patched\n");
@@ -227,12 +391,13 @@ describe("write approval token enforcement", () => {
 
   it("apply_approved_patch reports proposal failures in elevated mode instead of requesting an approval token", async () => {
     fs.writeFileSync(path.join(tempRoot, "note.txt"), "hello\n", "utf8");
+    const config = testConfig({ writeMode: "elevated", elevatedOperationsAllowed: true, writeApprovalToken: { source: "none" }, ...initGitFixture() });
     const proposal = await proposePatch(
       {
         root: tempRoot,
         changes: [{ relativePath: "note.txt", originalText: "hello", replacementText: "hello patched" }]
       },
-      testConfig({ writeMode: "elevated", elevatedOperationsAllowed: true, writeApprovalToken: { source: "none" } })
+      config
     );
 
     await assert.rejects(
@@ -244,7 +409,7 @@ describe("write approval token enforcement", () => {
             proposalId: proposal.proposalId,
             patchHash: proposal.patchHash
           },
-          testConfig({ writeMode: "elevated", elevatedOperationsAllowed: true, writeApprovalToken: { source: "none" } })
+          config
         ),
       /Patch hash does not match/i
     );
@@ -252,12 +417,13 @@ describe("write approval token enforcement", () => {
 
   it("apply_approved_patch refuses when patch differs from the proposal", async () => {
     fs.writeFileSync(path.join(tempRoot, "note.txt"), "hello\n", "utf8");
+    const config = testConfig({ writeMode: "patch", ...initGitFixture() });
     const proposal = await proposePatch(
       {
         root: tempRoot,
         changes: [{ relativePath: "note.txt", originalText: "hello", replacementText: "hello patched" }]
       },
-      testConfig({ writeMode: "patch" })
+      config
     );
 
     await assert.rejects(
@@ -269,7 +435,7 @@ describe("write approval token enforcement", () => {
             proposalId: proposal.proposalId,
             patchHash: proposal.patchHash
           },
-          testConfig({ writeMode: "patch" })
+          config
         ),
       /Patch hash does not match/i
     );
@@ -277,12 +443,13 @@ describe("write approval token enforcement", () => {
 
   it("apply_approved_patch refuses expired proposals", async () => {
     fs.writeFileSync(path.join(tempRoot, "note.txt"), "hello\n", "utf8");
+    const config = testConfig({ writeMode: "patch", ...initGitFixture() });
     const proposal = await proposePatch(
       {
         root: tempRoot,
         changes: [{ relativePath: "note.txt", originalText: "hello", replacementText: "hello patched" }]
       },
-      testConfig({ writeMode: "patch" })
+      config
     );
     const storePath = path.join(tempRoot, "config", "pending-patches.local.json");
     const store = JSON.parse(fs.readFileSync(storePath, "utf8")) as { proposals: Array<Record<string, unknown>> };
@@ -298,7 +465,7 @@ describe("write approval token enforcement", () => {
             proposalId: proposal.proposalId,
             patchHash: proposal.patchHash
           },
-          testConfig({ writeMode: "patch" })
+          config
         ),
       /expired/i
     );
@@ -306,12 +473,13 @@ describe("write approval token enforcement", () => {
 
   it("apply_approved_patch marks a proposal used and refuses reuse", async () => {
     fs.writeFileSync(path.join(tempRoot, "note.txt"), "hello\n", "utf8");
+    const config = testConfig({ writeMode: "patch", ...initGitFixture() });
     const proposal = await proposePatch(
       {
         root: tempRoot,
         changes: [{ relativePath: "note.txt", originalText: "hello", replacementText: "hello patched" }]
       },
-      testConfig({ writeMode: "patch" })
+      config
     );
 
     await applyApprovedPatch(
@@ -321,7 +489,7 @@ describe("write approval token enforcement", () => {
         proposalId: proposal.proposalId,
         patchHash: proposal.patchHash
       },
-      testConfig({ writeMode: "patch" })
+      config
     );
 
     await assert.rejects(
@@ -333,7 +501,7 @@ describe("write approval token enforcement", () => {
             proposalId: proposal.proposalId,
             patchHash: proposal.patchHash
           },
-          testConfig({ writeMode: "patch" })
+          config
         ),
       /already been used/i
     );

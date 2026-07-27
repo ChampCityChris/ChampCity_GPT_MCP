@@ -175,6 +175,12 @@ Configured roots can come from `config/allowed-roots.local.json` or `CHAMPCITY_G
 
 Named workspaces are also configured in `allowed-roots.local.json`. A workspace root must be inside the configured allowed roots; when only `workspaces` are configured, their roots become the allowed roots. ChatGPT-facing toolbox calls receive only workspace IDs, not arbitrary root paths. The legacy absolute-root helpers are retained as internal implementations for toolbox routers, but they are not registered as public MCP tools.
 
+Workspace write authority is per workspace and per operation. `writePolicy: "git_required"` is the default for explicit workspaces, derived allowed roots, first-run setup, reset defaults, and newly added ordinary roots. It requires a confirmed Git repository for Markdown/JSON artifact persistence, patch workflow, and Git workflows. `writePolicy: "artifact_only"` is an explicit planning policy that allows only `repo_toolbox.write_markdown_artifact` and `repo_toolbox.write_json_artifact` under configured `artifactWriteRoots`; it denies patch proposal/application and Git mutation with structured policy errors.
+
+`artifactWriteRoots` are server-configured workspace-relative directory prefixes. They reject absolute paths, drive/UNC paths, traversal, URLs, wildcards, shell metacharacters, empty values, blocked directory segments, and normalized paths that escape the workspace. `artifact_only` defaults to `["planning"]` when no roots are configured. The root `.` is allowed only when explicitly configured and is reported with a warning because it grants Markdown/JSON artifact-extension writes throughout that workspace.
+
+Legacy `requireGitRoot` remains readable for compatibility, but it is deprecated as an operational gate. `requireGitRoot:false` does not disable Git requirements for `propose_patch`, `apply_approved_patch`, branch preparation, stage, pre-commit scan, commit, push, integration, tag, release, or future Git mutation paths. No existing Git repository silently becomes `artifact_only`.
+
 Installed mode reads local config from Electron `userData\config`; portable mode reads from `data\config` beside the executable. Packaged runtime must not depend on repo-local `config/*.local.json` files or a hardcoded source checkout path.
 
 ## Blocked File Policy
@@ -247,7 +253,7 @@ Source corrections to patch approval are not active for ChatGPT until the curren
 
 `apply_approved_patch` rejects git patches that declare symlink, submodule, or other non-regular file modes. Only regular text file modes are allowed; symlink mode `120000` and submodule/gitlink mode `160000` are denied before `git apply` runs. After a patch applies, the tool also checks changed paths with `lstat` and rejects the operation if any changed path is a symbolic link.
 
-When `CHAMPCITY_GPT_REQUIRE_GIT_ROOT=true`, write tools verify that targets belong to a git repository.
+Git-backed patch and mutation workflows always require a confirmed Git repository regardless of workspace policy or legacy `CHAMPCITY_GPT_REQUIRE_GIT_ROOT`.
 
 `run_allowed_script` requires OAuth `files.write`, write mode `elevated`, an exact allowlisted command, and a valid elevated approval token. Scripts are not available in `docs` or `patch` mode.
 

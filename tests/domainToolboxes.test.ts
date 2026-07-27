@@ -662,6 +662,32 @@ describe("stable domain toolbox tools", () => {
     assert.match(result.error?.message ?? "", /files\.write/u);
   });
 
+  it("git_toolbox mutations are denied for artifact-only workspaces", async () => {
+    fs.mkdirSync(path.join(tempRoot, ".git"), { recursive: true });
+    const config = testConfig("elevated");
+    config.workspaces = [
+      {
+        workspaceId: "planning_workspace",
+        label: "Planning Workspace",
+        root: tempRoot,
+        source: "configured",
+        writePolicy: "artifact_only",
+        artifactWriteRoots: ["planning"],
+        artifactRootWarnings: []
+      }
+    ];
+    config.defaultWorkspaceId = "planning_workspace";
+
+    const result = await gitToolbox(
+      { action: "stage_paths", workspaceId: "planning_workspace", params: { paths: ["README.md"] } },
+      config,
+      context(config, "files.read files.write")
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "WORKSPACE_POLICY_DENIED");
+  });
+
   it("repo_toolbox writes Markdown and JSON artifacts while rejecting unsafe JSON params", async () => {
     initRepo();
     const config = testConfig("docs");

@@ -82,6 +82,7 @@ describe("config loading", () => {
     assert.deepEqual(config.allowedRoots, [path.resolve(tempRoot)]);
     assert.equal(config.auditLogPath, path.join(path.resolve(tempRoot), "logs", "audit.log"));
     assert.equal(config.requireGitRoot, true);
+    assert.equal(config.configWarnings, undefined);
     assert.deepEqual(config.allowedCommands, DEFAULT_ALLOWED_COMMANDS);
     assert.equal(config.writeMode, "off");
     assert.equal(config.writeToolsEnabled, false);
@@ -105,6 +106,7 @@ describe("config loading", () => {
     assert.equal(config.defaultWorkspaceRootSource, "local-file");
     assert.equal(config.auditLogPath, auditLog);
     assert.equal(config.requireGitRoot, false);
+    assert.ok(config.configWarnings?.some((warning) => /deprecated/i.test(warning)));
     assert.deepEqual(config.allowedCommands, ["git status"]);
     assert.equal(config.writeMode, "off");
     assert.equal(config.writeToolsEnabled, false);
@@ -142,8 +144,61 @@ describe("config loading", () => {
     assert.equal(config.defaultWorkspaceRoot, path.resolve(localRoot));
     assert.equal(config.workspaces?.[0]?.workspaceId, "champcity_gpt");
     assert.equal(config.workspaces?.[0]?.remote, "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git");
+    assert.equal(config.workspaces?.[0]?.writePolicy, "git_required");
+    assert.deepEqual(config.workspaces?.[0]?.artifactWriteRoots, []);
     assert.deepEqual(registry.availableWorkspaceIds, ["champcity_ai", "champcity_gpt"]);
     assert.equal(registry.defaultWorkspaceId, "champcity_gpt");
+  });
+
+  it("loads explicit artifact-only workspace policy with default planning root", () => {
+    writeLocalConfig({
+      workspaces: [
+        {
+          workspaceId: "planning_workspace",
+          label: "Planning Workspace",
+          root: localRoot,
+          writePolicy: "artifact_only"
+        }
+      ],
+      defaultWorkspaceId: "planning_workspace"
+    });
+
+    const config = loadConfig({}, tempRoot);
+
+    assert.equal(config.workspaces?.[0]?.writePolicy, "artifact_only");
+    assert.deepEqual(config.workspaces?.[0]?.artifactWriteRoots, ["planning"]);
+  });
+
+  it("rejects unsafe artifact write root configuration and warns for explicit dot", () => {
+    for (const artifactWriteRoots of [[".."], ["/tmp"], ["C:\\temp"], ["https://example.com/path"], ["plan*"], ["config"]]) {
+      writeLocalConfig({
+        workspaces: [
+          {
+            workspaceId: "planning_workspace",
+            label: "Planning Workspace",
+            root: localRoot,
+            writePolicy: "artifact_only",
+            artifactWriteRoots
+          }
+        ]
+      });
+      assert.throws(() => loadConfig({}, tempRoot), /artifactWriteRoots|workspace-relative|blocked|wildcard|URL|traversal/i);
+    }
+
+    writeLocalConfig({
+      workspaces: [
+        {
+          workspaceId: "planning_workspace",
+          label: "Planning Workspace",
+          root: localRoot,
+          writePolicy: "artifact_only",
+          artifactWriteRoots: ["."]
+        }
+      ]
+    });
+    const config = loadConfig({}, tempRoot);
+    assert.deepEqual(config.workspaces?.[0]?.artifactWriteRoots, ["."]);
+    assert.ok(config.workspaces?.[0]?.artifactRootWarnings?.some((warning) => warning.includes("throughout this workspace")));
   });
 
   it("derives stable workspace IDs from legacy allowedRoots-only config", () => {

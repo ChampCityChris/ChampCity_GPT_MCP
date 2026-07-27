@@ -9,6 +9,7 @@ import { resolveAllowedRoot } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
 import { assertInsideGitRepo, getGitDiffSummary, runGit } from "../utils/git.js";
 import { assertChangedPathsAreNotSymlinks, collectPatchTargetPaths, validatePatchTargets } from "../utils/patch.js";
+import { assertWorkspaceAuthorityAllowed, resolveWorkspaceAuthorityForRoot } from "../workspaceAuthority.js";
 import { withAudit } from "./common.js";
 import { MAX_PATCH_LENGTH, MAX_ROOT_LENGTH } from "./inputLimits.js";
 
@@ -159,6 +160,7 @@ export async function applyApprovedPatch(rawInput: unknown, config: AppConfig): 
       throw new AppError("APPROVAL_REQUIRED", "apply_approved_patch requires writeMode patch or elevated.");
     }
 
+    assertWorkspaceAuthorityAllowed(resolveWorkspaceAuthorityForRoot(input.root, config, "patch_workflow"));
     const root = resolveAllowedRoot(input.root, config.allowedRoots);
     const proposal = assertPatchMatchesPendingProposal(
       config.repoRoot,
@@ -174,10 +176,8 @@ export async function applyApprovedPatch(rawInput: unknown, config: AppConfig): 
     const pathsToVerify = [...new Set([...changedFiles, ...patchTargetPaths])].sort();
     const preApplyStates = pathsToVerify.map((relativePath) => capturePreApplyPathState(root.rootRealPath, relativePath));
 
-    if (config.requireGitRoot) {
-      for (const changedFile of changedFiles) {
-        assertInsideGitRepo(`${root.rootRealPath}/${changedFile}`);
-      }
+    for (const changedFile of changedFiles) {
+      assertInsideGitRepo(`${root.rootRealPath}/${changedFile}`);
     }
 
     updateAudit({

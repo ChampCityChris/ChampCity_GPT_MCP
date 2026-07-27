@@ -109,8 +109,39 @@ describe("workspace registry", () => {
     assert.deepEqual(catalog.workspaces.map((workspace) => workspace.workspaceId), ["workspace_a", "workspace_b"]);
     assert.equal(catalog.workspaces[0]?.isDefault, true);
     assert.equal(catalog.workspaces[0]?.remoteMatchesExpected, "unknown");
+    assert.equal(catalog.workspaces[0]?.writePolicy, "git_required");
+    assert.equal(catalog.workspaces[0]?.gitDetected, false);
+    assert.equal(catalog.workspaces[0]?.artifactPersistenceAvailable, false);
+    assert.equal(catalog.workspaces[0]?.artifactPersistenceReason, "GIT_REQUIRED");
+    assert.equal(catalog.workspaces[0]?.gitMutationAvailable, false);
+    assert.equal(catalog.workspaces[0]?.gitMutationReason, "GIT_REQUIRED");
     assert.equal(catalog.diagnostics.defaultWorkspaceId, "workspace_a");
     assert.equal(diagnostics.defaultWorkspaceIsExplicit, true);
     assert.doesNotMatch(serialized, new RegExp(tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+  });
+
+  it("maps legacy requireGitRoot false only to bounded non-Git derived planning workspaces", async () => {
+    const workspaceA = path.join(tempRoot, "Workspace_A");
+    fs.mkdirSync(workspaceA, { recursive: true });
+    const config = testConfig([workspaceA], { requireGitRoot: false });
+
+    const resolved = resolveWorkspace("default", config);
+    const catalog = await listWorkspaceCatalog(config);
+
+    assert.equal(resolved.writePolicy, "artifact_only");
+    assert.deepEqual(resolved.artifactWriteRoots, ["planning"]);
+    assert.equal(resolved.legacyRequireGitRootDeprecated, true);
+    assert.equal(catalog.workspaces[0]?.artifactPersistenceAvailable, true);
+    assert.equal(catalog.workspaces[0]?.gitMutationAvailable, false);
+    assert.ok(catalog.workspaces[0]?.warnings.some((warning) => /deprecated/i.test(warning)));
+  });
+
+  it("keeps legacy requireGitRoot false Git repositories git_required", () => {
+    const workspaceA = path.join(tempRoot, "Workspace_A");
+    fs.mkdirSync(path.join(workspaceA, ".git"), { recursive: true });
+    const resolved = resolveWorkspace("default", testConfig([workspaceA], { requireGitRoot: false }));
+
+    assert.equal(resolved.writePolicy, "git_required");
+    assert.equal(resolved.legacyRequireGitRootDeprecated, false);
   });
 });

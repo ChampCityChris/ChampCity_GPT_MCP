@@ -5,6 +5,11 @@ import { type AppConfig } from "./config.js";
 import { resolveAllowedRoot } from "./security/pathPolicy.js";
 import { AppError } from "./utils/errors.js";
 import { runGit } from "./utils/git.js";
+import {
+  DEFAULT_ARTIFACT_WRITE_ROOTS,
+  detectGitRepository,
+  type WorkspaceWritePolicy
+} from "./workspaceWritePolicy.js";
 
 export const DEFAULT_WORKSPACE_ID = "default";
 export const ALL_ALLOWED_WORKSPACE_ID = "all_allowed";
@@ -19,6 +24,9 @@ export interface ConfiguredWorkspace {
   label: string;
   root: string;
   remote?: string;
+  writePolicy?: WorkspaceWritePolicy;
+  artifactWriteRoots?: string[];
+  artifactRootWarnings?: string[];
   source: WorkspaceSource;
 }
 
@@ -35,6 +43,11 @@ export interface ResolvedWorkspace {
   label: string;
   root: string;
   remote?: string;
+  writePolicy: WorkspaceWritePolicy;
+  artifactWriteRoots: string[];
+  artifactRootWarnings: string[];
+  gitDetected: boolean;
+  legacyRequireGitRootDeprecated: boolean;
   source: WorkspaceSource;
   isDefault: boolean;
 }
@@ -55,6 +68,14 @@ export interface WorkspaceCatalogEntry {
   branch: string | "unknown";
   isDefault: boolean;
   remoteMatchesExpected: boolean | "unknown";
+  writePolicy: WorkspaceWritePolicy;
+  gitDetected: boolean | "unknown";
+  artifactWriteRoots: string[];
+  artifactPersistenceAvailable: boolean;
+  artifactPersistenceReason: string;
+  gitMutationAvailable: boolean;
+  gitMutationReason: string;
+  warnings: string[];
 }
 
 function normalizeForComparison(value: string): string {
@@ -131,10 +152,17 @@ function derivedWorkspacesFromAllowedRoots(config: AppConfig): ConfiguredWorkspa
     const fallback = `workspace_${index + 1}`;
     const workspaceId = uniqueWorkspaceId(deriveWorkspaceId(path.basename(root), fallback), usedIds);
 
+    const gitDetected = detectGitRepository(root);
+    const legacyRequireGitRootDeprecated = config.requireGitRoot === false && !gitDetected;
     return {
       workspaceId,
       label: path.basename(root) || workspaceId,
       root,
+      writePolicy: legacyRequireGitRootDeprecated ? "artifact_only" : "git_required",
+      artifactWriteRoots: legacyRequireGitRootDeprecated ? [...DEFAULT_ARTIFACT_WRITE_ROOTS] : [],
+      artifactRootWarnings: legacyRequireGitRootDeprecated
+        ? ["Legacy requireGitRoot:false is deprecated; configure workspace writePolicy explicitly."]
+        : [],
       source: "derived"
     };
   });
@@ -147,6 +175,9 @@ function configuredWorkspaces(config: AppConfig): ConfiguredWorkspace[] {
       workspaceId: assertConfiguredWorkspaceId(workspace.workspaceId),
       root: path.resolve(workspace.root),
       label: workspace.label || path.basename(workspace.root) || workspace.workspaceId,
+      writePolicy: workspace.writePolicy ?? "git_required",
+      artifactWriteRoots: workspace.artifactWriteRoots ?? [],
+      artifactRootWarnings: workspace.artifactRootWarnings ?? [],
       source: workspace.source ?? "configured"
     }));
   }
@@ -251,11 +282,18 @@ export function resolveWorkspace(workspaceId: string | undefined, config: AppCon
   }
 
   const root = resolveAllowedRoot(workspace.root, config.allowedRoots).rootRealPath;
+  const gitDetected = detectGitRepository(root);
+  const legacyRequireGitRootDeprecated = config.requireGitRoot === false && workspace.source === "derived" && workspace.writePolicy === "artifact_only";
   return {
     workspaceId: workspace.workspaceId,
     label: workspace.label,
     root,
     remote: workspace.remote,
+    writePolicy: workspace.writePolicy ?? "git_required",
+    artifactWriteRoots: workspace.artifactWriteRoots ?? [],
+    artifactRootWarnings: workspace.artifactRootWarnings ?? [],
+    gitDetected,
+    legacyRequireGitRootDeprecated,
     source: workspace.source,
     isDefault: registry.defaultWorkspaceId === workspace.workspaceId
   };
@@ -324,6 +362,32 @@ async function gitOutputOptional(root: string, args: string[]): Promise<string |
   }
 }
 
+function artifactPersistenceCapability(workspace: ConfiguredWorkspace, gitDetected: boolean): { available: boolean; reason: string } {
+  if (workspace.writePolicy === "artifact_only") {
+    return {
+      available: true,
+      reason: "artifact_only permits bounded Markdown/JSON artifact persistence inside configured artifact roots"
+    };
+  }
+
+  return gitDetected
+    ? { available: true, reason: "git_required workspace has a detected Git repository" }
+    : { available: false, reason: "GIT_REQUIRED" };
+}
+
+function gitMutationCapability(workspace: ConfiguredWorkspace, gitDetected: boolean): { available: boolean; reason: string } {
+  if (workspace.writePolicy === "artifact_only") {
+    return {
+      available: false,
+      reason: "WORKSPACE_POLICY_DENIED"
+    };
+  }
+
+  return gitDetected
+    ? { available: true, reason: "git_required workspace has a detected Git repository" }
+    : { available: false, reason: "GIT_REQUIRED" };
+}
+
 export async function listWorkspaceCatalog(config: AppConfig): Promise<{
   workspaces: WorkspaceCatalogEntry[];
   diagnostics: WorkspaceDiagnostics;
@@ -332,6 +396,7 @@ export async function listWorkspaceCatalog(config: AppConfig): Promise<{
   const workspaces = await Promise.all(
     registry.workspaces.map(async (workspace): Promise<WorkspaceCatalogEntry> => {
       const root = resolveAllowedRoot(workspace.root, config.allowedRoots).rootRealPath;
+      const gitDetected = detectGitRepository(root);
       const [branch, remote] = await Promise.all([
         gitOutputOptional(root, ["branch", "--show-current"]),
         gitOutputOptional(root, ["remote", "get-url", "origin"])
@@ -342,6 +407,8 @@ export async function listWorkspaceCatalog(config: AppConfig): Promise<{
           ? "unknown"
           : normalizeRemote(remote) === normalizeRemote(workspace.remote)
         : "unknown";
+      const artifactPersistence = artifactPersistenceCapability(workspace, gitDetected);
+      const gitMutation = gitMutationCapability(workspace, gitDetected);
 
       return {
         workspaceId: workspace.workspaceId,
@@ -349,7 +416,15 @@ export async function listWorkspaceCatalog(config: AppConfig): Promise<{
         repositoryName,
         branch,
         isDefault: registry.defaultWorkspaceId === workspace.workspaceId,
-        remoteMatchesExpected
+        remoteMatchesExpected,
+        writePolicy: workspace.writePolicy ?? "git_required",
+        gitDetected,
+        artifactWriteRoots: workspace.artifactWriteRoots ?? [],
+        artifactPersistenceAvailable: artifactPersistence.available,
+        artifactPersistenceReason: artifactPersistence.reason,
+        gitMutationAvailable: gitMutation.available,
+        gitMutationReason: gitMutation.reason,
+        warnings: workspace.artifactRootWarnings ?? []
       };
     })
   );

@@ -8,7 +8,7 @@ import { type AppConfig } from "../config.js";
 import { assertFilePolicyAllowsPath } from "../security/filePolicy.js";
 import { resolveProjectPath, toRootRelativePath } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
-import { assertInsideGitRepo } from "../utils/git.js";
+import { assertWorkspaceAuthorityAllowed, resolveWorkspaceAuthorityForRoot } from "../workspaceAuthority.js";
 import { forbiddenFinding, isIgnored, normalizeGitPath } from "./gitWorkflow/safety.js";
 import { MAX_JSON_ARTIFACT_CONTENT_LENGTH, MAX_RELATIVE_PATH_LENGTH, MAX_ROOT_LENGTH } from "./inputLimits.js";
 import { withAudit } from "./common.js";
@@ -29,6 +29,8 @@ export interface WriteJsonArtifactOutput {
   sizeBytes: number;
   modifiedTime: string;
   sha256: string;
+  workspaceId: string;
+  writePolicy: "git_required" | "artifact_only";
 }
 
 function normalizeJsonContent(content: string): string {
@@ -44,7 +46,7 @@ function normalizeJsonContent(content: string): string {
   return `${JSON.stringify(parsed, null, 2)}\n`;
 }
 
-async function assertJsonArtifactPathAllowed(root: string, resolvedPath: string, relativePath: string): Promise<void> {
+async function assertJsonArtifactPathAllowed(root: string, resolvedPath: string, relativePath: string, includeGitIgnoreCheck: boolean): Promise<void> {
   assertFilePolicyAllowsPath(resolvedPath, relativePath);
 
   if (path.extname(resolvedPath).toLowerCase() !== ".json") {
@@ -62,10 +64,27 @@ async function assertJsonArtifactPathAllowed(root: string, resolvedPath: string,
     });
   }
 
-  if (await isIgnored(root, normalizedRelativePath)) {
+  if (includeGitIgnoreCheck && await isIgnored(root, normalizedRelativePath)) {
     throw new AppError("FILE_DENIED", "Ignored files must not be written through JSON artifacts.", {
       relativePath: normalizedRelativePath
     });
+  }
+}
+
+async function assertExistingTargetIsRegularFile(resolvedPath: string, relativePath: string): Promise<boolean> {
+  try {
+    const stats = await fs.lstat(resolvedPath);
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      throw new AppError("FILE_DENIED", "Existing artifact target must be a regular file.", {
+        relativePath
+      });
+    }
+    return true;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
 }
 
@@ -81,16 +100,11 @@ export async function writeJsonArtifact(rawInput: unknown, config: AppConfig): P
     const normalizedContent = normalizeJsonContent(input.content);
     const resolved = resolveProjectPath(input.root, input.relativePath, config.allowedRoots);
     const relativePath = toRootRelativePath(resolved.rootRealPath, resolved.resolvedPath);
-    await assertJsonArtifactPathAllowed(resolved.rootRealPath, resolved.resolvedPath, relativePath);
+    const authority = resolveWorkspaceAuthorityForRoot(resolved.rootRealPath, config, "artifact_persistence", relativePath);
+    assertWorkspaceAuthorityAllowed(authority);
+    await assertJsonArtifactPathAllowed(resolved.rootRealPath, resolved.resolvedPath, relativePath, authority.policy === "git_required");
 
-    if (config.requireGitRoot) {
-      assertInsideGitRepo(resolved.resolvedPath);
-    }
-
-    const exists = await fs
-      .stat(resolved.resolvedPath)
-      .then(() => true)
-      .catch(() => false);
+    const exists = await assertExistingTargetIsRegularFile(resolved.resolvedPath, relativePath);
 
     if (exists && !input.overwrite) {
       throw new AppError("APPROVAL_REQUIRED", "Refusing to overwrite an existing JSON artifact unless overwrite is true.", {
@@ -109,14 +123,17 @@ export async function writeJsonArtifact(rawInput: unknown, config: AppConfig): P
     updateAudit({
       requestedPath: input.relativePath,
       resolvedPath: resolved.resolvedPath,
-      byteCount: sizeBytes
+      byteCount: sizeBytes,
+      workspaceId: authority.workspaceId
     });
 
     return {
       relativePath,
       sizeBytes,
       modifiedTime: stats.mtime.toISOString(),
-      sha256
+      sha256,
+      workspaceId: authority.workspaceId,
+      writePolicy: authority.policy
     };
   });
 }

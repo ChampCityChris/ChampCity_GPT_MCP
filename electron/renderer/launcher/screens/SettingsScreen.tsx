@@ -9,17 +9,15 @@ interface Props {
 }
 
 export function SettingsScreen({ state, handlers }: Props) {
-  const { roots, requireGitRoot, auditLogPath, allowedCommands, runtime } = state;
+  const { roots, auditLogPath, allowedCommands, runtime } = state;
 
-  const [localRequireGit, setLocalRequireGit] = useState(requireGitRoot);
   const [localAuditPath,  setLocalAuditPath]  = useState(auditLogPath);
   const [localCommands,   setLocalCommands]   = useState(allowedCommands);
 
   useEffect(() => {
-    setLocalRequireGit(requireGitRoot);
     setLocalAuditPath(auditLogPath);
     setLocalCommands(allowedCommands);
-  }, [allowedCommands, auditLogPath, requireGitRoot]);
+  }, [allowedCommands, auditLogPath]);
 
   return (
     <div>
@@ -46,18 +44,59 @@ export function SettingsScreen({ state, handlers }: Props) {
             </AlertBanner>
 
             {roots.map((root, i) => (
-              <div key={i} className="lc-root-row">
-                <input
-                  className="lc-root-input"
-                  type="text"
-                  value={root.path}
-                  readOnly
-                  aria-label={`Allowed root ${i + 1}`}
-                />
-                <button className="lc-btn lc-btn--danger"
-                  onClick={() => handlers.onRemoveRoot?.(root.path)}>
-                  Remove
-                </button>
+              <div key={root.workspaceId ?? root.path} className="lc-root-row lc-root-row--workspace">
+                <div className="lc-workspace-policy-main">
+                  <strong>{root.label ?? `Workspace ${i + 1}`}</strong>
+                  <span>{root.workspaceId ?? "workspace"}</span>
+                  <input
+                    className="lc-root-input"
+                    type="text"
+                    value={root.path}
+                    readOnly
+                    aria-label={`Allowed root ${i + 1}`}
+                  />
+                </div>
+                <div className="lc-workspace-policy-controls">
+                  <select
+                    className="lc-text-input"
+                    value={root.writePolicy ?? "git_required"}
+                    aria-label={`Write policy for ${root.label ?? root.workspaceId ?? root.path}`}
+                    onChange={(event) => handlers.onUpdateWorkspacePolicy?.(
+                      root.workspaceId ?? "",
+                      event.target.value === "artifact_only" ? "artifact_only" : "git_required"
+                    )}
+                    disabled={!root.workspaceId}
+                  >
+                    <option value="git_required">Git-backed repository</option>
+                    <option value="artifact_only">Planning artifacts only</option>
+                  </select>
+                  {root.writePolicy === "artifact_only" && (
+                    <input
+                      className="lc-text-input"
+                      type="text"
+                      value={(root.artifactWriteRoots && root.artifactWriteRoots.length > 0 ? root.artifactWriteRoots : ["planning"]).join(", ")}
+                      aria-label={`Artifact write roots for ${root.label ?? root.workspaceId ?? root.path}`}
+                      onChange={(event) => handlers.onUpdateWorkspaceArtifactRoots?.(
+                        root.workspaceId ?? "",
+                        event.target.value.split(",").map((entry) => entry.trim()).filter(Boolean)
+                      )}
+                    />
+                  )}
+                  <button className="lc-btn lc-btn--danger"
+                    onClick={() => handlers.onRemoveRoot?.(root.path)}>
+                    Remove
+                  </button>
+                </div>
+                {root.writePolicy === "artifact_only" && (
+                  <p className="lc-help-text">
+                    Planning mode allows only bounded Markdown/JSON artifact persistence. Patch and Git workflows remain unavailable, and ChampCity MCP will not run git init.
+                  </p>
+                )}
+                {(root.artifactWriteRoots ?? []).includes(".") && (
+                  <AlertBanner type="warn">
+                    Artifact root "." permits Markdown/JSON artifact-extension writes throughout this workspace.
+                  </AlertBanner>
+                )}
               </div>
             ))}
 
@@ -66,18 +105,6 @@ export function SettingsScreen({ state, handlers }: Props) {
               <button className="lc-btn" onClick={handlers.onResetRoots}>Reset Defaults</button>
               <button className="lc-btn lc-btn--primary" onClick={handlers.onSaveConfig}>Save Config</button>
             </div>
-
-            <label className="lc-toggle" style={{ marginTop: 14 }}>
-              <input
-                type="checkbox"
-                checked={localRequireGit}
-                onChange={e => {
-                  setLocalRequireGit(e.target.checked);
-                  handlers.onSaveRequireGitRoot?.(e.target.checked);
-                }}
-              />
-              <span>Require allowed roots to be git repositories</span>
-            </label>
 
             <label className="lc-field-label" htmlFor="auditLogPath">Audit log path</label>
             <input

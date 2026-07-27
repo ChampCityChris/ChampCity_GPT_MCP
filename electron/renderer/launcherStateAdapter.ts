@@ -27,6 +27,46 @@ export const DEFAULT_ALLOWED_COMMANDS = [
   "git diff"
 ] as const;
 
+function deriveWorkspaceId(value: string, fallback: string): string {
+  const derived = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "_")
+    .replace(/^_+|_+$/gu, "")
+    .slice(0, 64);
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/u.test(derived) && derived !== "default" && derived !== "all_allowed" ? derived : fallback;
+}
+
+function workspaceRows(localConfig: LocalLauncherConfig | null): LauncherState["roots"] {
+  if (!localConfig) {
+    return [];
+  }
+
+  if (Array.isArray(localConfig.workspaces) && localConfig.workspaces.length > 0) {
+    return localConfig.workspaces.map((workspace) => ({
+      path: workspace.root,
+      workspaceId: workspace.workspaceId,
+      label: workspace.label,
+      writePolicy: workspace.writePolicy,
+      artifactWriteRoots: workspace.artifactWriteRoots,
+      warnings: workspace.artifactWriteRoots?.includes(".")
+        ? ["Artifact root '.' permits Markdown/JSON artifact-extension writes throughout this workspace."]
+        : []
+    }));
+  }
+
+  return localConfig.allowedRoots.map((root, index) => {
+    const workspaceId = deriveWorkspaceId(root.split(/[\\/]+/u).filter(Boolean).at(-1) ?? "", `workspace_${index + 1}`);
+    return {
+      path: root,
+      workspaceId,
+      label: root.split(/[\\/]+/u).filter(Boolean).at(-1) ?? workspaceId,
+      writePolicy: "git_required",
+      artifactWriteRoots: []
+    };
+  });
+}
+
 export function createEmptyLauncherState(logs: LogEntry[] = []): LauncherState {
   return {
     server: {
@@ -213,7 +253,7 @@ export function adaptLauncherState(
     issues: mapIssues(status),
     doctorChecks: mapDoctorChecks(status),
     discovery: mapDiscovery(status),
-    roots: (localConfig?.allowedRoots ?? []).map((path) => ({ path })),
+    roots: workspaceRows(localConfig),
     runtime: {
       mode: status.runtime.mode,
       configDir: status.runtime.configDir,

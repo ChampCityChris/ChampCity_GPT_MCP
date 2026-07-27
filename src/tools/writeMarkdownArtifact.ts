@@ -8,7 +8,7 @@ import { AppConfig } from "../config.js";
 import { assertMarkdownArtifactPath } from "../security/filePolicy.js";
 import { resolveProjectPath, toRootRelativePath } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
-import { assertInsideGitRepo } from "../utils/git.js";
+import { assertWorkspaceAuthorityAllowed, resolveWorkspaceAuthorityForRoot } from "../workspaceAuthority.js";
 import { withAudit } from "./common.js";
 import { MAX_APPROVAL_TOKEN_LENGTH, MAX_MARKDOWN_ARTIFACT_CONTENT_LENGTH, MAX_RELATIVE_PATH_LENGTH, MAX_ROOT_LENGTH } from "./inputLimits.js";
 
@@ -26,6 +26,25 @@ export interface WriteMarkdownArtifactOutput {
   relativePath: string;
   sizeBytes: number;
   sha256: string;
+  workspaceId: string;
+  writePolicy: "git_required" | "artifact_only";
+}
+
+async function assertExistingTargetIsRegularFile(resolvedPath: string, relativePath: string): Promise<boolean> {
+  try {
+    const stats = await fs.lstat(resolvedPath);
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      throw new AppError("FILE_DENIED", "Existing artifact target must be a regular file.", {
+        relativePath
+      });
+    }
+    return true;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 export async function writeMarkdownArtifact(rawInput: unknown, config: AppConfig): Promise<WriteMarkdownArtifactOutput> {
@@ -40,15 +59,10 @@ export async function writeMarkdownArtifact(rawInput: unknown, config: AppConfig
     const resolved = resolveProjectPath(input.root, input.relativePath, config.allowedRoots);
     const relativePath = toRootRelativePath(resolved.rootRealPath, resolved.resolvedPath);
     assertMarkdownArtifactPath(resolved.resolvedPath, relativePath);
+    const authority = resolveWorkspaceAuthorityForRoot(resolved.rootRealPath, config, "artifact_persistence", relativePath);
+    assertWorkspaceAuthorityAllowed(authority);
 
-    if (config.requireGitRoot) {
-      assertInsideGitRepo(resolved.resolvedPath);
-    }
-
-    const exists = await fs
-      .stat(resolved.resolvedPath)
-      .then(() => true)
-      .catch(() => false);
+    const exists = await assertExistingTargetIsRegularFile(resolved.resolvedPath, relativePath);
 
     if (exists && !input.overwrite) {
       throw new AppError("APPROVAL_REQUIRED", "Refusing to overwrite an existing Markdown artifact unless overwrite is true.", {
@@ -65,13 +79,16 @@ export async function writeMarkdownArtifact(rawInput: unknown, config: AppConfig
     updateAudit({
       requestedPath: input.relativePath,
       resolvedPath: resolved.resolvedPath,
-      byteCount: Buffer.byteLength(input.content, "utf8")
+      byteCount: Buffer.byteLength(input.content, "utf8"),
+      workspaceId: authority.workspaceId
     });
 
     return {
       relativePath,
       sizeBytes: Buffer.byteLength(input.content, "utf8"),
-      sha256
+      sha256,
+      workspaceId: authority.workspaceId,
+      writePolicy: authority.policy
     };
   });
 }

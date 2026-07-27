@@ -1,0 +1,17 @@
+{
+  "artifactType": "project-intake",
+  "artifactRevision": 1,
+  "participationRole": "gatingReview",
+  "projectArtifactKey": "champcity_mcp",
+  "projectName": "ChampCity MCP",
+  "projectPurpose": "ChampCity is a MCP server with a desktop application dashboard and engine. It is designed specifically to provide tools to ChatGPT.com so the website ai chat can access the tools needed to read and write local repositories. It allows ChatGPT.com to be come a architect, and code reviewer for software development projects.   ",
+  "desiredOutcome": "ChampCity MCP should allow the user to operate a fully functional MCP server for Chatgpt.com or other browser based LLMs. ",
+  "projectType": "Desktop application",
+  "projectRepository": "<PROJECT_REPO>",
+  "hasExistingSourceOrPlanning": true,
+  "knownConstraints": "OpenAI's safety layer causes issues with certain MCP tools if written to broadly.",
+  "repositoryReviewContext": "The foundation for this application has been built and the base set of tools have been built utilizing a toolbox approach to prevent the need to recreate the application in ChatGPT settings every time a new tool is created.",
+  "documentDisposition": {
+    "status": "Approved"
+  }
+}

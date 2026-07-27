@@ -2,6 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { type AppConfig } from "../config.js";
+import {
+  sanitizeDiagnosticEndpoint,
+  sanitizeDiagnosticJsonRpcId,
+  sanitizeDiagnosticRoute,
+  sanitizeDiagnosticText
+} from "../security/diagnosticRedaction.js";
 
 export interface McpDiscoveryTraceRequest {
   httpMethod: string;
@@ -96,7 +102,7 @@ function readRecentHistory(historyPath: string, subject: string, windowSeconds: 
   const entries: McpDiscoverySequenceEntry[] = [];
   for (const line of lines) {
     try {
-      const trace = JSON.parse(line) as McpDiscoveryTrace;
+      const trace = sanitizeDiscoveryTrace(JSON.parse(line) as McpDiscoveryTrace);
       if (trace.auth.subject !== subject || Date.parse(trace.timestamp) < cutoff) {
         continue;
       }
@@ -115,21 +121,108 @@ function readRecentHistory(historyPath: string, subject: string, windowSeconds: 
   return entries;
 }
 
+function safeText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? sanitizeDiagnosticText(value) : undefined;
+}
+
+function safeTextArray(values: unknown): string[] {
+  return Array.isArray(values) ? values.map(safeText).filter((value): value is string => Boolean(value)) : [];
+}
+
+function sanitizeDiscoveryTrace(trace: Omit<McpDiscoveryTrace, "recentDiscoverySequence"> | McpDiscoveryTrace): McpDiscoveryTrace {
+  const request = trace.request;
+  const response = trace.response;
+  return {
+    ...trace,
+    request: {
+      httpMethod: safeText(request.httpMethod) ?? "UNKNOWN",
+      path: sanitizeDiagnosticRoute(request.path) ?? "/mcp",
+      publicBaseUrl: sanitizeDiagnosticEndpoint(request.publicBaseUrl) ?? "<REDACTED_ENDPOINT>",
+      host: sanitizeDiagnosticEndpoint(request.host),
+      forwardedHost: sanitizeDiagnosticEndpoint(request.forwardedHost),
+      forwardedProto: safeText(request.forwardedProto),
+      cfRay: safeText(request.cfRay),
+      userAgent: safeText(request.userAgent),
+      accept: safeText(request.accept),
+      normalizedAccept: safeText(request.normalizedAccept),
+      contentType: safeText(request.contentType),
+      mcpSessionIdPresent: Boolean(request.mcpSessionIdPresent)
+    },
+    jsonRpc: {
+      ...trace.jsonRpc,
+      methods: safeTextArray(trace.jsonRpc.methods),
+      ids: trace.jsonRpc.ids
+        .map((id) => sanitizeDiagnosticJsonRpcId(id))
+        .map((id) => id === undefined ? null : id)
+    },
+    auth: {
+      kind: trace.auth.kind,
+      subject: safeText(trace.auth.subject) ?? "unknown",
+      clientId: safeText(trace.auth.clientId),
+      scope: safeText(trace.auth.scope) ?? "",
+      scopes: safeTextArray(trace.auth.scopes)
+    },
+    tools: {
+      ...trace.tools,
+      finalToolNamesReturned: safeTextArray(trace.tools.finalToolNamesReturned),
+      invalidToolSchemas: trace.tools.invalidToolSchemas.map((entry) => ({
+        name: safeText(entry.name) ?? "unknown",
+        reason: safeText(entry.reason) ?? ""
+      })),
+      invalidChatGptToolSchemas: trace.tools.invalidChatGptToolSchemas.map((entry) => ({
+        name: safeText(entry.name) ?? "unknown",
+        reason: safeText(entry.reason) ?? ""
+      })),
+      scopeFilteredTools: trace.tools.scopeFilteredTools.map((entry) => ({
+        name: safeText(entry.name) ?? "unknown",
+        reason: safeText(entry.reason) ?? ""
+      })),
+      sanitizedToolSchemas: trace.tools.sanitizedToolSchemas.map((entry) => ({
+        name: safeText(entry.name) ?? "unknown",
+        removedKeywords: safeTextArray(entry.removedKeywords)
+      }))
+    },
+    response: {
+      ...response,
+      contentType: safeText(response.contentType) ?? "",
+      transportRoute: sanitizeDiagnosticRoute(response.transportRoute) as McpDiscoveryTraceResponse["transportRoute"] ?? "server-error",
+      error: safeText(response.error)
+    },
+    recentDiscoverySequence: "recentDiscoverySequence" in trace
+      ? {
+          ...trace.recentDiscoverySequence,
+          entries: trace.recentDiscoverySequence.entries.map((entry) => ({
+            timestamp: entry.timestamp,
+            methods: safeTextArray(entry.methods),
+            responseStatusCode: entry.responseStatusCode,
+            responseKind: entry.responseKind
+          })),
+          methodsObserved: safeTextArray(trace.recentDiscoverySequence.methodsObserved)
+        }
+      : {
+          windowSeconds: 600,
+          entries: [],
+          methodsObserved: []
+        }
+  };
+}
+
 export function writeMcpDiscoveryTrace(config: AppConfig, trace: Omit<McpDiscoveryTrace, "recentDiscoverySequence">): void {
   const paths = getMcpDiscoveryTracePaths(config);
   const windowSeconds = 600;
+  const sanitizedTrace = sanitizeDiscoveryTrace(trace);
   const recentEntries = [
-    ...readRecentHistory(paths.historyPath, trace.auth.subject, windowSeconds),
+    ...readRecentHistory(paths.historyPath, sanitizedTrace.auth.subject, windowSeconds),
     {
-      timestamp: trace.timestamp,
-      methods: trace.jsonRpc.methods,
-      responseStatusCode: trace.response.statusCode,
-      responseKind: trace.response.kind
+      timestamp: sanitizedTrace.timestamp,
+      methods: sanitizedTrace.jsonRpc.methods,
+      responseStatusCode: sanitizedTrace.response.statusCode,
+      responseKind: sanitizedTrace.response.kind
     }
   ];
   const methodsObserved = [...new Set(recentEntries.flatMap((entry) => entry.methods))];
   const traceWithSequence: McpDiscoveryTrace = {
-    ...trace,
+    ...sanitizedTrace,
     recentDiscoverySequence: {
       windowSeconds,
       entries: recentEntries,
@@ -148,5 +241,5 @@ export function readLastMcpDiscoveryTrace(config: AppConfig): McpDiscoveryTrace 
     return null;
   }
 
-  return JSON.parse(fs.readFileSync(lastTracePath, "utf8")) as McpDiscoveryTrace;
+  return sanitizeDiscoveryTrace(JSON.parse(fs.readFileSync(lastTracePath, "utf8")) as McpDiscoveryTrace);
 }

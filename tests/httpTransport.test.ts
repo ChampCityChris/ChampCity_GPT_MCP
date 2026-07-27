@@ -4,6 +4,8 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { LATEST_PROTOCOL_VERSION, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { type AppConfig, loadConfig } from "../src/config.js";
@@ -21,6 +23,18 @@ import {
 import { createMcpServer } from "../src/server/createMcpServer.js";
 import { readLastMcpDiscoveryTrace } from "../src/server/discoveryTrace.js";
 import { assertWriteToolEnabled, getToolExposureDiagnostics, PUBLIC_TOOL_NAMES } from "../src/server/registerTools.js";
+import { writeAuditLog } from "../src/security/auditLog.js";
+import { sanitizeDiagnosticText } from "../src/security/diagnosticRedaction.js";
+import {
+  getCurrentToolCallTraceContext,
+  getToolCallTracePaths,
+  isToolCallTraceIdentityMismatchError,
+  readRecentToolCalls,
+  recordToolCallTrace,
+  runWithToolCallTraceGroupContext,
+  toolCallTraceRequestIdKey,
+  runWithToolCallTraceRequestId
+} from "../src/server/toolCallTrace.js";
 import { runHttpTransport, validateHttpBinding } from "../src/transports/httpTransport.js";
 
 let tempRoot: string;
@@ -75,6 +89,98 @@ function createScopedMcpServerFactory(config: AppConfig) {
   return (auth?: { scope: string }) => createMcpServer(config, "0.1.0-test", { scope: auth?.scope });
 }
 
+function toolboxActionFromArguments(args: unknown): string | undefined {
+  return args && typeof args === "object" && !Array.isArray(args) && typeof (args as { action?: unknown }).action === "string"
+    ? (args as { action: string }).action
+    : undefined;
+}
+
+function createTraceEchoServerFactory(
+  config: AppConfig,
+  options: { waitForRelease?: (requestId: string | number) => Promise<void>; onDispatch?: (context: ReturnType<typeof getCurrentToolCallTraceContext>) => void } = {}
+) {
+  return () => {
+    const server = new Server(
+      { name: "champcity-trace-fixture", version: "0.1.0-test" },
+      { capabilities: { tools: {} } }
+    );
+
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
+      runWithToolCallTraceRequestId(extra.requestId, async () => {
+        const action = toolboxActionFromArguments(request.params.arguments);
+        recordToolCallTrace(config, {
+          stage: "dispatch_started",
+          publicTool: request.params.name,
+          action,
+          result: "allow"
+        });
+        const context = getCurrentToolCallTraceContext();
+        options.onDispatch?.(context);
+        if (options.waitForRelease) {
+          await options.waitForRelease(extra.requestId);
+        }
+        recordToolCallTrace(config, {
+          stage: "tool_result_returned",
+          publicTool: request.params.name,
+          action,
+          result: "allow"
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                sdkRequestId: extra.requestId,
+                selectedCorrelationId: context?.correlationId,
+                selectedJsonRpcId: context?.jsonRpcId
+              })
+            }
+          ]
+        };
+      })
+    );
+
+    return server;
+  };
+}
+
+function createTraceIdentityMismatchServerFactory(config: AppConfig) {
+  return () => {
+    const server = new Server(
+      { name: "champcity-trace-mismatch-fixture", version: "0.1.0-test" },
+      { capabilities: { tools: {} } }
+    );
+
+    server.setRequestHandler(CallToolRequestSchema, async () => {
+      try {
+        return await runWithToolCallTraceRequestId("unknown https://evil.example/mcp?access_token=secret C:\\Private\\file.md /etc/secret", async () => ({
+          content: [{ type: "text" as const, text: "unreachable" }]
+        }));
+      } catch (error) {
+        if (isToolCallTraceIdentityMismatchError(error)) {
+          await writeAuditLog(config.auditLogPath, {
+            toolName: "http_mcp_trace_identity",
+            requestedPath: "tools/call",
+            result: "deny",
+            reason: sanitizeDiagnosticText(error.message)
+          });
+        }
+        throw error;
+      }
+    });
+
+    return server;
+  };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((innerResolve) => {
+    resolve = innerResolve;
+  });
+  return { promise, resolve };
+}
+
 interface McpPostResult {
   response: Response;
   messages: Array<Record<string, unknown>>;
@@ -109,7 +215,8 @@ async function parseMcpMessages(response: Response): Promise<Array<Record<string
 
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
-    return [JSON.parse(text) as Record<string, unknown>];
+    const parsed = JSON.parse(text) as unknown;
+    return (Array.isArray(parsed) ? parsed : [parsed]) as Array<Record<string, unknown>>;
   }
 
   return text
@@ -120,7 +227,7 @@ async function parseMcpMessages(response: Response): Promise<Array<Record<string
     .map((data) => JSON.parse(data) as Record<string, unknown>);
 }
 
-async function postMcp(url: string, body: Record<string, unknown>, headers: Record<string, string> = {}): Promise<McpPostResult> {
+async function postMcp(url: string, body: unknown, headers: Record<string, string> = {}): Promise<McpPostResult> {
   const response = await fetch(url, {
     method: "POST",
     headers: mcpHeaders(headers),
@@ -201,12 +308,23 @@ async function issueTestAccessToken(handleUrl: string, scope: string): Promise<s
   return (await issueTestTokenPair(handleUrl, scope)).accessToken;
 }
 
-function firstResult(messages: Array<Record<string, unknown>>, id: number): Record<string, unknown> {
+function firstResult(messages: Array<Record<string, unknown>>, id: string | number): Record<string, unknown> {
   const message = messages.find((entry) => entry.id === id);
   assert.ok(message, `Expected MCP response for id ${id}`);
   assert.ok(!("error" in message), `Expected MCP result for id ${id}, received error ${JSON.stringify(message)}`);
   assert.ok(message.result && typeof message.result === "object");
   return message.result as Record<string, unknown>;
+}
+
+function textResultPayload(messages: Array<Record<string, unknown>>, id: string | number): Record<string, unknown> {
+  const result = firstResult(messages, id);
+  const content = result.content;
+  assert.ok(Array.isArray(content));
+  const textContent = content.find((entry): entry is { type: string; text: string } =>
+    Boolean(entry && typeof entry === "object" && (entry as { type?: unknown }).type === "text" && typeof (entry as { text?: unknown }).text === "string")
+  );
+  assert.ok(textContent);
+  return JSON.parse(textContent.text) as Record<string, unknown>;
 }
 
 async function initializeOAuthMcpSession(handleUrl: string, scope: string): Promise<Record<string, string>> {
@@ -1247,7 +1365,7 @@ describe("HTTP MCP transport safety", () => {
     }
   });
 
-  it("rejects direct legacy public tool calls after toolbox consolidation", async () => {
+  it("preserves pre-pass direct legacy call rejection behavior", async () => {
     fs.writeFileSync(path.join(tempRoot, "alpha.md"), "# Alpha\n", "utf8");
     const config = testConfig({ writeMode: "docs" });
     const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
@@ -1293,11 +1411,47 @@ describe("HTTP MCP transport safety", () => {
         },
         sessionHeaders
       );
+      const legacyDiff = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "tools/call",
+          params: {
+            name: "git_diff",
+            arguments: {
+              root: tempRoot
+            }
+          }
+        },
+        sessionHeaders
+      );
+      const unknown = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 5,
+          method: "tools/call",
+          params: {
+            name: "not_a_real_tool",
+            arguments: {}
+          }
+        },
+        sessionHeaders
+      );
 
       assert.equal(legacyRead.response.status, 200);
       assert.match(JSON.stringify(legacyRead.messages), /not exposed on the public toolbox surface/u);
+      assert.doesNotMatch(JSON.stringify(legacyRead.messages), /LEGACY_TOOL_REMOVED/u);
       assert.equal(legacyScript.response.status, 200);
-      assert.match(JSON.stringify(legacyScript.messages), /not exposed on the public toolbox surface|writeMode elevated/u);
+      assert.match(JSON.stringify(legacyScript.messages), /not exposed on the public toolbox surface/u);
+      assert.doesNotMatch(JSON.stringify(legacyScript.messages), /LEGACY_TOOL_REMOVED/u);
+      assert.equal(legacyDiff.response.status, 200);
+      assert.match(JSON.stringify(legacyDiff.messages), /not exposed on the public toolbox surface/u);
+      assert.doesNotMatch(JSON.stringify(legacyDiff.messages), /LEGACY_TOOL_REMOVED/u);
+      assert.equal(unknown.response.status, 200);
+      assert.match(JSON.stringify(unknown.messages), /not exposed on the public toolbox surface/u);
+      assert.doesNotMatch(JSON.stringify(unknown.messages), /LEGACY_TOOL_REMOVED/u);
     } finally {
       await handle.close();
     }
@@ -1335,6 +1489,1344 @@ describe("HTTP MCP transport safety", () => {
       assert.equal((toolNames as string[]).includes("run_figma_make_file_handoff"), false);
       assert.equal((toolNames as string[]).includes("safe_stage_changes"), false);
     } finally {
+      await handle.close();
+    }
+  });
+
+  it("records correlated successful repo_toolbox.read_file lifecycle and helper audit events", async () => {
+    fs.writeFileSync(path.join(tempRoot, "alpha.md"), "# Alpha\nsecret access_token=should-not-appear\n", "utf8");
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read");
+      const read = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "repo_toolbox",
+            arguments: {
+              action: "read_file",
+              params: {
+                relativePath: "alpha.md"
+              }
+            }
+          }
+        },
+        sessionHeaders
+      );
+
+      assert.equal(read.response.status, 200);
+      firstResult(read.messages, 2);
+      const calls = readRecentToolCalls(config, { publicToolName: "repo_toolbox" }).calls;
+      assert.equal(calls.length, 1);
+      const call = calls[0];
+      assert.equal(call.classification, "RESPONSE_COMPLETED");
+      assert.deepEqual(new Set(call.stages), new Set([
+        "http_received",
+        "dispatch_started",
+        "toolbox_entered",
+        "helper_started",
+        "helper_allowed",
+        "tool_result_returned",
+        "http_response_completed"
+      ]));
+      assert.equal(new Set(call.events.map((event) => event.correlationId)).size, 1);
+      const serializedTrace = JSON.stringify(call);
+      assert.doesNotMatch(serializedTrace, /# Alpha|should-not-appear/u);
+      assert.doesNotMatch(serializedTrace, new RegExp(tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+      assert.doesNotMatch(serializedTrace, /access_token=should-not-appear/u);
+
+      const auditEntries = fs.readFileSync(config.auditLogPath, "utf8").trim().split(/\r?\n/u).map((line) => JSON.parse(line) as { toolName?: string; correlationId?: string; result?: string });
+      assert.ok(auditEntries.some((entry) => entry.toolName === "read_project_file" && entry.correlationId === call.correlationId && entry.result === "allow"));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("traces every tools/call in a mixed JSON-RPC batch independently", async () => {
+    fs.writeFileSync(path.join(tempRoot, "alpha.md"), "# Alpha\n", "utf8");
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read");
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const batch = await postMcp(
+        handle.url,
+        [
+          {
+            jsonrpc: "2.0",
+            id: 11,
+            method: "tools/list"
+          },
+          {
+            jsonrpc: "2.0",
+            method: "notifications/initialized"
+          },
+          {
+            jsonrpc: "2.0",
+            id: 12,
+            method: "tools/call",
+            params: {
+              name: "repo_toolbox",
+              arguments: {
+                action: "read_file",
+                params: {
+                  relativePath: "alpha.md"
+                }
+              }
+            }
+          },
+          {
+            jsonrpc: "2.0",
+            id: 13,
+            method: "tools/call",
+            params: {
+              name: "browser_toolbox",
+              arguments: {
+                action: "get_browser_capabilities"
+              }
+            }
+          }
+        ],
+        sessionHeaders
+      );
+
+      assert.equal(batch.response.status, 200);
+      firstResult(batch.messages, 12);
+      firstResult(batch.messages, 13);
+
+      const calls = readRecentToolCalls(config, { since }).calls.filter((call) => call.publicTool !== "diagnostics_toolbox");
+      assert.equal(calls.length, 2);
+      assert.equal(new Set(calls.map((call) => call.correlationId)).size, 2);
+      assert.deepEqual(new Set(calls.map((call) => call.publicTool)), new Set(["repo_toolbox", "browser_toolbox"]));
+      assert.deepEqual(
+        new Set(calls.flatMap((call) => call.events.map((event) => event.jsonRpcId)).filter((id) => id !== undefined)),
+        new Set([12, 13])
+      );
+      assert.ok(calls.every((call) => call.classification === "RESPONSE_COMPLETED"));
+      assert.ok(calls.every((call) => call.stages.includes("http_received")));
+      assert.ok(calls.every((call) => call.stages.includes("dispatch_started")));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("records http_received evidence for malformed tools/call variants before SDK rejection", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: true
+    });
+
+    try {
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const malformed = [
+        { jsonrpc: "2.0", id: "missing-params", method: "tools/call" },
+        { jsonrpc: "2.0", id: "null-params", method: "tools/call", params: null },
+        { jsonrpc: "2.0", id: "scalar-params", method: "tools/call", params: "nope" },
+        { jsonrpc: "2.0", id: "array-params", method: "tools/call", params: [] },
+        { jsonrpc: "2.0", id: "missing-name", method: "tools/call", params: { arguments: { action: "status" } } },
+        { jsonrpc: "2.0", id: "non-string-name", method: "tools/call", params: { name: 123, arguments: { action: "status" } } },
+        { jsonrpc: "2.0", id: "missing-arguments", method: "tools/call", params: { name: "repo_toolbox" } },
+        { jsonrpc: "2.0", id: "null-arguments", method: "tools/call", params: { name: "repo_toolbox", arguments: null } },
+        { jsonrpc: "2.0", id: "scalar-arguments", method: "tools/call", params: { name: "repo_toolbox", arguments: "nope" } },
+        { jsonrpc: "2.0", id: "array-arguments", method: "tools/call", params: { name: "repo_toolbox", arguments: [] } }
+      ];
+
+      await postMcp(handle.url, malformed);
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls;
+      const byId = new Map(calls.map((call) => [call.events[0]?.jsonRpcId, call]));
+      for (const request of malformed) {
+        const call = byId.get(request.id);
+        assert.ok(call, `Expected trace evidence for ${request.id}`);
+        assert.ok(call.stages.includes("http_received"), `Expected http_received for ${request.id}`);
+      }
+      assert.equal(new Set(calls.map((call) => call.correlationId)).size, malformed.length);
+      assert.equal(byId.get("missing-params")?.publicTool, undefined);
+      assert.equal(byId.get("array-params")?.publicTool, undefined);
+      assert.equal(byId.get("missing-arguments")?.publicTool, "repo_toolbox");
+      const schemaRejected = byId.get("scalar-arguments");
+      assert.ok(schemaRejected);
+      assert.equal(schemaRejected.classification, "RECEIVED_NOT_DISPATCHED");
+      assert.equal(schemaRejected.stages.includes("dispatch_started"), false);
+      assert.equal(schemaRejected.stages.includes("toolbox_entered"), false);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("redacts denied absolute requestedPath values in recent_tool_calls", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: true
+    });
+
+    try {
+      const denied = await postMcp(handle.url, {
+        jsonrpc: "2.0",
+        id: "absolute-path-denied",
+        method: "tools/call",
+        params: {
+          name: "repo_toolbox",
+          arguments: {
+            action: "read_file",
+            params: { relativePath: "/etc/passwd" }
+          }
+        }
+      });
+      assert.equal(denied.response.status, 200);
+
+      const call = readRecentToolCalls(config, { publicToolName: "repo_toolbox" }).calls.find((entry) => entry.events.some((event) => event.jsonRpcId === "absolute-path-denied"));
+      assert.ok(call);
+      assert.equal(call.classification, "APP_POLICY_DENIED");
+      const serialized = JSON.stringify(call);
+      assert.doesNotMatch(serialized, /\/etc\/passwd/u);
+      assert.match(serialized, /<REDACTED_PATH>/u);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("classifies missing files.read HTTP scope denial as APP_POLICY_DENIED without dispatch stages", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const accessToken = await issueTestAccessToken(handle.url, "files.write");
+      const denied = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: "missing-read-scope",
+          method: "tools/call",
+          params: {
+            name: "repo_toolbox",
+            arguments: {
+              action: "read_file",
+              params: { relativePath: "README.md" }
+            }
+          }
+        },
+        { authorization: `Bearer ${accessToken}` }
+      );
+      assert.equal(denied.response.status, 403);
+
+      const call = readRecentToolCalls(config, { publicToolName: "repo_toolbox" }).calls[0];
+      assert.equal(call.classification, "APP_POLICY_DENIED");
+      assert.deepEqual(new Set(call.stages), new Set(["http_received", "http_response_completed"]));
+      assert.ok(call.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED" && event.result === "deny"));
+      assert.equal(call.stages.includes("dispatch_started"), false);
+      assert.equal(call.stages.includes("toolbox_entered"), false);
+      assert.equal(call.stages.includes("tool_result_returned"), false);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("classifies missing files.write HTTP scope denial for workspace_write_attached_image", async () => {
+    const config = testConfig({ writeMode: "docs" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const accessToken = await issueTestAccessToken(handle.url, "files.read");
+      const denied = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: "missing-write-scope-image",
+          method: "tools/call",
+          params: {
+            name: "workspace_write_attached_image",
+            arguments: {
+              workspaceId: "default",
+              relativePath: "images/out.png",
+              image: {
+                download_url: "https://example.com/file.png",
+                file_id: "file-test"
+              }
+            }
+          }
+        },
+        { authorization: `Bearer ${accessToken}` }
+      );
+      assert.equal(denied.response.status, 403);
+
+      const call = readRecentToolCalls(config, { publicToolName: "workspace_write_attached_image" }).calls[0];
+      assert.equal(call.classification, "APP_POLICY_DENIED");
+      assert.deepEqual(new Set(call.stages), new Set(["http_received", "http_response_completed"]));
+      assert.ok(call.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED"));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("denies repo, git, and integration toolbox write actions before dispatch with files.read only", async () => {
+    const config = testConfig({ writeMode: "elevated" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const accessToken = await issueTestAccessToken(handle.url, "files.read");
+      const cases = [
+        {
+          id: "repo-write-scope",
+          name: "repo_toolbox",
+          arguments: {
+            action: "write_markdown_artifact",
+            params: { relativePath: "new.md", content: "# New\n" }
+          }
+        },
+        {
+          id: "git-write-scope",
+          name: "git_toolbox",
+          arguments: {
+            action: "stage_paths",
+            params: { paths: ["README.md"] }
+          }
+        },
+        {
+          id: "integration-write-scope",
+          name: "integration_toolbox",
+          arguments: {
+            action: "prepare_external_handoff",
+            params: { serviceId: "github", targetFile: "docs/handoffs/GITHUB_HANDOFF.md" }
+          }
+        }
+      ];
+
+      for (const testCase of cases) {
+        const denied = await postMcp(
+          handle.url,
+          {
+            jsonrpc: "2.0",
+            id: testCase.id,
+            method: "tools/call",
+            params: {
+              name: testCase.name,
+              arguments: testCase.arguments
+            }
+          },
+          { authorization: `Bearer ${accessToken}` }
+        );
+        assert.equal(denied.response.status, 403);
+
+        const call = readRecentToolCalls(config, { publicToolName: testCase.name }).calls.find((entry) => entry.events.some((event) => event.jsonRpcId === testCase.id));
+        assert.ok(call);
+        assert.equal(call.classification, "APP_POLICY_DENIED");
+        assert.deepEqual(new Set(call.stages), new Set(["http_received", "http_response_completed"]));
+        assert.ok(call.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED" && /files\.write/u.test(String(event.errorMessage))));
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("records truthful mixed-batch evidence for an authorized read sibling and denied write sibling", async () => {
+    const config = testConfig({ writeMode: "docs" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const accessToken = await issueTestAccessToken(handle.url, "files.read");
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const denied = await postMcp(
+        handle.url,
+        [
+          {
+            jsonrpc: "2.0",
+            id: "batch-read-authorized",
+            method: "tools/call",
+            params: {
+              name: "repo_toolbox",
+              arguments: {
+                action: "read_file",
+                params: { relativePath: "README.md" }
+              }
+            }
+          },
+          {
+            jsonrpc: "2.0",
+            id: "batch-write-denied",
+            method: "tools/call",
+            params: {
+              name: "repo_toolbox",
+              arguments: {
+                action: "write_markdown_artifact",
+                params: { relativePath: "one.md", content: "# One\n" }
+              }
+            }
+          }
+        ],
+        { authorization: `Bearer ${accessToken}` }
+      );
+      assert.equal(denied.response.status, 403);
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls.filter((call) => call.publicTool === "repo_toolbox");
+      assert.equal(calls.length, 2);
+      assert.equal(new Set(calls.map((call) => call.correlationId)).size, 2);
+      const readCall = calls.find((call) => call.events.some((event) => event.jsonRpcId === "batch-read-authorized"));
+      const writeCall = calls.find((call) => call.events.some((event) => event.jsonRpcId === "batch-write-denied"));
+      assert.ok(readCall);
+      assert.ok(writeCall);
+      assert.equal(readCall.classification, "RECEIVED_NOT_DISPATCHED");
+      assert.equal(writeCall.classification, "APP_POLICY_DENIED");
+      assert.equal(readCall.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED" || /files\.write/u.test(String(event.errorMessage))), false);
+      assert.ok(writeCall.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED" && /repo_toolbox\.write_markdown_artifact/u.test(String(event.errorMessage))));
+      assert.ok(calls.every((call) => !call.stages.includes("dispatch_started")));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("keeps call-specific scope messages for two separately denied calls", async () => {
+    const config = testConfig({ writeMode: "docs" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const accessToken = await issueTestAccessToken(handle.url, "files.read");
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const denied = await postMcp(
+        handle.url,
+        [
+          {
+            jsonrpc: "2.0",
+            id: "repo-write-denied-message",
+            method: "tools/call",
+            params: {
+              name: "repo_toolbox",
+              arguments: {
+                action: "write_markdown_artifact",
+                params: { relativePath: "one.md", content: "# One\n" }
+              }
+            }
+          },
+          {
+            jsonrpc: "2.0",
+            id: "image-write-denied-message",
+            method: "tools/call",
+            params: {
+              name: "workspace_write_attached_image",
+              arguments: {
+                workspaceId: "default",
+                relativePath: "images/one.png",
+                image: { download_url: "https://example.com/one.png", file_id: "file-one" }
+              }
+            }
+          }
+        ],
+        { authorization: `Bearer ${accessToken}` }
+      );
+      assert.equal(denied.response.status, 403);
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls;
+      const repoCall = calls.find((call) => call.events.some((event) => event.jsonRpcId === "repo-write-denied-message"));
+      const imageCall = calls.find((call) => call.events.some((event) => event.jsonRpcId === "image-write-denied-message"));
+      assert.ok(repoCall);
+      assert.ok(imageCall);
+      const repoMessage = String(repoCall.events.find((event) => event.errorCode === "OAUTH_SCOPE_DENIED")?.errorMessage);
+      const imageMessage = String(imageCall.events.find((event) => event.errorCode === "OAUTH_SCOPE_DENIED")?.errorMessage);
+      assert.match(repoMessage, /repo_toolbox\.write_markdown_artifact/u);
+      assert.match(imageMessage, /workspace_write_attached_image/u);
+      assert.notEqual(repoMessage, imageMessage);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("rejects duplicate string request IDs before dispatch with per-call invalid-input evidence", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: true
+    });
+
+    try {
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const result = await postMcp(handle.url, [
+        {
+          jsonrpc: "2.0",
+          id: "duplicate-string-id",
+          method: "tools/call",
+          params: { name: "browser_toolbox", arguments: { action: "get_browser_capabilities" } }
+        },
+        {
+          jsonrpc: "2.0",
+          id: "duplicate-string-id",
+          method: "tools/call",
+          params: { name: "knowledge_toolbox", arguments: { action: "list_supported_sources" } }
+        }
+      ]);
+      assert.equal(result.response.status, 400);
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls.filter((call) => call.events.some((event) => event.jsonRpcId === "duplicate-string-id"));
+      assert.equal(calls.length, 2);
+      assert.ok(calls.every((call) => call.classification === "APP_POLICY_DENIED"));
+      assert.ok(calls.every((call) => call.stages.includes("http_received")));
+      assert.ok(calls.every((call) => call.stages.includes("http_response_completed")));
+      assert.ok(calls.every((call) => call.events.some((event) => event.errorCode === "INVALID_INPUT" && event.errorMessage === "Duplicate JSON-RPC request ID in batch.")));
+      assert.ok(calls.every((call) => !call.stages.includes("dispatch_started") && !call.stages.includes("toolbox_entered") && !call.stages.includes("tool_result_returned")));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("rejects duplicate numeric request IDs before dispatch", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: true
+    });
+
+    try {
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const result = await postMcp(handle.url, [
+        {
+          jsonrpc: "2.0",
+          id: 77,
+          method: "tools/call",
+          params: { name: "browser_toolbox", arguments: { action: "get_browser_capabilities" } }
+        },
+        {
+          jsonrpc: "2.0",
+          id: 77,
+          method: "tools/call",
+          params: { name: "knowledge_toolbox", arguments: { action: "list_supported_sources" } }
+        }
+      ]);
+      assert.equal(result.response.status, 400);
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls.filter((call) => call.events.some((event) => event.jsonRpcId === 77));
+      assert.equal(calls.length, 2);
+      assert.ok(calls.every((call) => call.classification === "APP_POLICY_DENIED"));
+      assert.ok(calls.every((call) => call.events.some((event) => event.errorCode === "INVALID_INPUT" && event.errorMessage === "Duplicate JSON-RPC request ID in batch.")));
+      assert.ok(calls.every((call) => !call.stages.includes("dispatch_started") && !call.stages.includes("toolbox_entered") && !call.stages.includes("tool_result_returned")));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("keeps a unique authorized sibling receipt-only when duplicate IDs reject a batch", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: true
+    });
+
+    try {
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const result = await postMcp(handle.url, [
+        {
+          jsonrpc: "2.0",
+          id: "duplicate-with-sibling",
+          method: "tools/call",
+          params: { name: "browser_toolbox", arguments: { action: "get_browser_capabilities" } }
+        },
+        {
+          jsonrpc: "2.0",
+          id: "duplicate-with-sibling",
+          method: "tools/call",
+          params: { name: "knowledge_toolbox", arguments: { action: "list_supported_sources" } }
+        },
+        {
+          jsonrpc: "2.0",
+          id: "unique-authorized-sibling",
+          method: "tools/call",
+          params: { name: "repo_toolbox", arguments: { action: "status" } }
+        }
+      ]);
+      assert.equal(result.response.status, 400);
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls;
+      const duplicateCalls = calls.filter((call) => call.events.some((event) => event.jsonRpcId === "duplicate-with-sibling"));
+      const uniqueCall = calls.find((call) => call.events.some((event) => event.jsonRpcId === "unique-authorized-sibling"));
+      assert.equal(duplicateCalls.length, 2);
+      assert.ok(uniqueCall);
+      assert.ok(duplicateCalls.every((call) => call.classification === "APP_POLICY_DENIED"));
+      assert.equal(uniqueCall.classification, "RECEIVED_NOT_DISPATCHED");
+      assert.equal(uniqueCall.events.some((event) => event.errorCode === "INVALID_INPUT" || /Duplicate JSON-RPC request ID/u.test(String(event.errorMessage))), false);
+      assert.ok(calls.every((call) => !call.stages.includes("dispatch_started") && !call.stages.includes("toolbox_entered") && !call.stages.includes("tool_result_returned")));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("preserves separate scope-denial evidence for a nonduplicate sibling in a duplicate-ID batch", async () => {
+    const config = testConfig({ writeMode: "docs" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const accessToken = await issueTestAccessToken(handle.url, "files.read");
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const result = await postMcp(
+        handle.url,
+        [
+          {
+            jsonrpc: "2.0",
+            id: "duplicate-plus-denied",
+            method: "tools/call",
+            params: { name: "browser_toolbox", arguments: { action: "get_browser_capabilities" } }
+          },
+          {
+            jsonrpc: "2.0",
+            id: "duplicate-plus-denied",
+            method: "tools/call",
+            params: { name: "knowledge_toolbox", arguments: { action: "list_supported_sources" } }
+          },
+          {
+            jsonrpc: "2.0",
+            id: "scope-denied-sibling",
+            method: "tools/call",
+            params: {
+              name: "repo_toolbox",
+              arguments: { action: "write_markdown_artifact", params: { relativePath: "new.md", content: "# New\n" } }
+            }
+          }
+        ],
+        { authorization: `Bearer ${accessToken}` }
+      );
+      assert.equal(result.response.status, 400);
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls;
+      const duplicateCalls = calls.filter((call) => call.events.some((event) => event.jsonRpcId === "duplicate-plus-denied"));
+      const scopeCall = calls.find((call) => call.events.some((event) => event.jsonRpcId === "scope-denied-sibling"));
+      assert.equal(duplicateCalls.length, 2);
+      assert.ok(scopeCall);
+      assert.ok(duplicateCalls.every((call) => call.events.some((event) => event.errorCode === "INVALID_INPUT" && event.errorMessage === "Duplicate JSON-RPC request ID in batch.")));
+      assert.ok(scopeCall.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED" && /repo_toolbox\.write_markdown_artifact/u.test(String(event.errorMessage))));
+      assert.equal(scopeCall.events.some((event) => event.errorCode === "INVALID_INPUT" || /Duplicate JSON-RPC request ID/u.test(String(event.errorMessage))), false);
+      assert.ok(calls.every((call) => !call.stages.includes("dispatch_started") && !call.stages.includes("toolbox_entered") && !call.stages.includes("tool_result_returned")));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("redacts malicious duplicate string IDs from trace and discovery persistence", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: true
+    });
+
+    try {
+      const maliciousId = "dup https://evil.example/mcp?access_token=secret C:\\Private\\file.md /etc/shadow prompt=PRIVATE";
+      const result = await postMcp(handle.url, [
+        { jsonrpc: "2.0", id: maliciousId, method: "tools/call", params: { name: "browser_toolbox", arguments: { action: "get_browser_capabilities" } } },
+        { jsonrpc: "2.0", id: maliciousId, method: "tools/call", params: { name: "knowledge_toolbox", arguments: { action: "list_supported_sources" } } },
+        { jsonrpc: "2.0", id: "discovery-sibling", method: "tools/list" }
+      ]);
+      assert.equal(result.response.status, 400);
+
+      const serializedTrace = JSON.stringify(readRecentToolCalls(config, { limit: 50 }).calls);
+      const serializedDiscovery = JSON.stringify(readLastMcpDiscoveryTrace(config));
+      const auditLog = fs.readFileSync(config.auditLogPath, "utf8");
+      for (const serialized of [serializedTrace, serializedDiscovery, auditLog, JSON.stringify(result.messages)]) {
+        assert.doesNotMatch(serialized, /evil\.example|access_token=secret|C:\\Private|\/etc\/shadow|PRIVATE/u);
+      }
+      assert.match(serializedTrace, /Duplicate JSON-RPC request ID in batch/u);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("keeps correct JSON-RPC IDs for two identical valid batch calls", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read");
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const request = (id: string) => ({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name: "browser_toolbox",
+          arguments: {
+            action: "get_browser_capabilities"
+          }
+        }
+      });
+      const batch = await postMcp(handle.url, [request("duplicate-two-a"), request("duplicate-two-b")], sessionHeaders);
+      assert.equal(batch.response.status, 200);
+      firstResult(batch.messages, "duplicate-two-a");
+      firstResult(batch.messages, "duplicate-two-b");
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls.filter((call) => call.publicTool === "browser_toolbox");
+      assert.equal(calls.length, 2);
+      assert.equal(new Set(calls.map((call) => call.correlationId)).size, 2);
+      for (const id of ["duplicate-two-a", "duplicate-two-b"]) {
+        const call = calls.find((entry) => entry.events.some((event) => event.jsonRpcId === id));
+        assert.ok(call, `Expected call for ${id}`);
+        assert.ok(call.events.every((event) => event.jsonRpcId === id));
+        assert.equal(call.classification, "RESPONSE_COMPLETED");
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("keeps correct JSON-RPC IDs for three identical valid batch calls", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read");
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const batch = ["triplicate-a", "triplicate-b", "triplicate-c"].map((id) => ({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name: "knowledge_toolbox",
+          arguments: {
+            action: "list_supported_sources"
+          }
+        }
+      }));
+      const result = await postMcp(handle.url, batch, sessionHeaders);
+      assert.equal(result.response.status, 200);
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls.filter((call) => call.publicTool === "knowledge_toolbox");
+      assert.equal(calls.length, 3);
+      assert.equal(new Set(calls.map((call) => call.correlationId)).size, 3);
+      for (const id of ["triplicate-a", "triplicate-b", "triplicate-c"]) {
+        const call = calls.find((entry) => entry.events.some((event) => event.jsonRpcId === id));
+        assert.ok(call, `Expected call for ${id}`);
+        assert.ok(call.events.every((event) => event.jsonRpcId === id));
+        assert.equal(call.classification, "RESPONSE_COMPLETED");
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("binds two identical calls to the correlation matching the SDK request and response IDs", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createTraceEchoServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: true
+    });
+
+    try {
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const request = (id: string) => ({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name: "trace_echo",
+          arguments: { action: "same", params: { relativePath: "same.md" } }
+        }
+      });
+      const batch = await postMcp(handle.url, [request("cross-two-a"), request("cross-two-b")]);
+      assert.equal(batch.response.status, 200);
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls.filter((call) => call.publicTool === "trace_echo");
+      for (const id of ["cross-two-a", "cross-two-b"]) {
+        const payload = textResultPayload(batch.messages, id);
+        assert.equal(payload.sdkRequestId, id);
+        assert.equal(payload.selectedJsonRpcId, id);
+        const call = calls.find((entry) => entry.correlationId === payload.selectedCorrelationId);
+        assert.ok(call, `Expected persisted trace for ${id}`);
+        assert.ok(call.events.every((event) => event.jsonRpcId === id));
+        assert.equal(call.classification, "RESPONSE_COMPLETED");
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("binds three identical calls correctly even when completion order is varied", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const releases = new Map<string, ReturnType<typeof deferred>>();
+    const handle = await runHttpTransport(
+      createTraceEchoServerFactory(config, {
+        waitForRelease: async (requestId) => {
+          const gate = deferred();
+          releases.set(String(requestId), gate);
+          await gate.promise;
+        }
+      }),
+      config,
+      {
+        host: "127.0.0.1",
+        port: 0,
+        version: "0.1.0-test",
+        allowNonlocalHttp: false,
+        allowUnauthLocalHttp: true
+      }
+    );
+
+    try {
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const ids = ["cross-three-a", "cross-three-b", "cross-three-c"];
+      const pending = postMcp(handle.url, ids.map((id) => ({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name: "trace_echo",
+          arguments: { action: "same", params: { relativePath: "same.md" } }
+        }
+      })));
+
+      while (releases.size < ids.length) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      releases.get("cross-three-c")?.resolve();
+      releases.get("cross-three-b")?.resolve();
+      releases.get("cross-three-a")?.resolve();
+
+      const batch = await pending;
+      assert.equal(batch.response.status, 200);
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls.filter((call) => call.publicTool === "trace_echo");
+      assert.equal(calls.length, 3);
+      assert.equal(new Set(calls.map((call) => call.correlationId)).size, 3);
+      for (const id of ids) {
+        const payload = textResultPayload(batch.messages, id);
+        assert.equal(payload.sdkRequestId, id);
+        assert.equal(payload.selectedJsonRpcId, id);
+        const call = calls.find((entry) => entry.correlationId === payload.selectedCorrelationId);
+        assert.ok(call, `Expected persisted trace for ${id}`);
+        assert.ok(call.events.every((event) => event.jsonRpcId === id));
+        assert.equal(call.classification, "RESPONSE_COMPLETED");
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("does not let an unknown SDK request ID steal an existing context", () => {
+    assert.throws(
+      () =>
+        runWithToolCallTraceGroupContext(
+          {
+            requestGroupId: "group",
+            toolCalls: [
+              {
+                correlationId: "known-correlation",
+                startedAt: Date.now(),
+                jsonRpcId: "known-request-id",
+                requestIdKey: toolCallTraceRequestIdKey("known-request-id")
+              }
+            ]
+          },
+          () => runWithToolCallTraceRequestId("unknown-request-id", () => "unreachable")
+        ),
+      /HTTP tool-call trace identity mismatch/u
+    );
+  });
+
+  it("isolates an HTTP SDK request-ID mismatch without marking siblings as transport errors", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createTraceIdentityMismatchServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: true
+    });
+
+    try {
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const result = await postMcp(handle.url, [
+        {
+          jsonrpc: "2.0",
+          id: "mismatch-request",
+          method: "tools/call",
+          params: { name: "trace_echo", arguments: { action: "mismatch" } }
+        },
+        {
+          jsonrpc: "2.0",
+          id: "mismatch-sibling",
+          method: "tools/call",
+          params: { name: "trace_echo", arguments: { action: "mismatch" } }
+        }
+      ]);
+      assert.equal(result.response.status, 200);
+      assert.ok(result.messages.some((message) => "error" in message));
+
+      const calls = readRecentToolCalls(config, { since, limit: 50 }).calls.filter((call) => call.publicTool === "trace_echo");
+      assert.equal(calls.length, 2);
+      assert.ok(calls.every((call) => call.classification === "RECEIVED_NOT_DISPATCHED"));
+      assert.ok(calls.every((call) => call.stages.includes("http_received")));
+      assert.ok(calls.every((call) => call.stages.includes("http_response_completed")));
+      assert.ok(calls.every((call) => !call.stages.includes("transport_error")));
+      assert.ok(calls.every((call) => !call.stages.includes("dispatch_started") && !call.stages.includes("tool_result_returned")));
+
+      const serializedTrace = JSON.stringify(calls);
+      const auditLog = fs.readFileSync(config.auditLogPath, "utf8");
+      assert.match(auditLog, /http_mcp_trace_identity/u);
+      for (const serialized of [serializedTrace, auditLog, JSON.stringify(result.messages)]) {
+        assert.doesNotMatch(serialized, /evil\.example|access_token=secret|C:\\Private|\/etc\/secret|PRIVATE/u);
+        assert.doesNotMatch(serialized, /unknown https:\/\/evil/u);
+        assert.doesNotMatch(serialized, /ToolCallTraceIdentityMismatchError|at .*toolCallTrace/u);
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("observes an actual in-flight HTTP call as DISPATCHED_NOT_EXECUTED", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const release = deferred();
+    let dispatchedCorrelationId: string | undefined;
+    const handle = await runHttpTransport(
+      createTraceEchoServerFactory(config, {
+        onDispatch: (context) => {
+          dispatchedCorrelationId = context?.correlationId;
+        },
+        waitForRelease: async () => release.promise
+      }),
+      config,
+      {
+        host: "127.0.0.1",
+        port: 0,
+        version: "0.1.0-test",
+        allowNonlocalHttp: false,
+        allowUnauthLocalHttp: true
+      }
+    );
+
+    try {
+      const pending = postMcp(handle.url, {
+        jsonrpc: "2.0",
+        id: "in-flight-dispatched",
+        method: "tools/call",
+        params: {
+          name: "trace_echo",
+          arguments: { action: "pause" }
+        }
+      });
+
+      while (!dispatchedCorrelationId) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const call = readRecentToolCalls(config, { correlationId: dispatchedCorrelationId }).calls[0];
+      assert.equal(call.classification, "DISPATCHED_NOT_EXECUTED");
+      assert.deepEqual(call.stages, ["http_received", "dispatch_started"]);
+      assert.equal(call.events[0].jsonRpcId, "in-flight-dispatched");
+
+      release.resolve();
+      const completed = await pending;
+      assert.equal(completed.response.status, 200);
+    } finally {
+      release.resolve();
+      await handle.close();
+    }
+  });
+
+  it("assigns distinct correlation IDs to concurrent tool calls", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read");
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const [first, second] = await Promise.all([
+        postMcp(
+          handle.url,
+          {
+            jsonrpc: "2.0",
+            id: 21,
+            method: "tools/call",
+            params: {
+              name: "browser_toolbox",
+              arguments: {
+                action: "get_browser_capabilities"
+              }
+            }
+          },
+          sessionHeaders
+        ),
+        postMcp(
+          handle.url,
+          {
+            jsonrpc: "2.0",
+            id: 22,
+            method: "tools/call",
+            params: {
+              name: "knowledge_toolbox",
+              arguments: {
+                action: "list_supported_sources"
+              }
+            }
+          },
+          sessionHeaders
+        )
+      ]);
+
+      assert.equal(first.response.status, 200);
+      assert.equal(second.response.status, 200);
+      const calls = readRecentToolCalls(config, { since }).calls;
+      const concurrentCalls = calls.filter((call) => call.publicTool === "browser_toolbox" || call.publicTool === "knowledge_toolbox");
+      assert.equal(concurrentCalls.length, 2);
+      assert.equal(new Set(concurrentCalls.map((call) => call.correlationId)).size, 2);
+      assert.ok(concurrentCalls.every((call) => call.classification === "RESPONSE_COMPLETED"));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("classifies validation denials and enforces diagnostic filters", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read");
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const invalid = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "repo_toolbox",
+            arguments: {
+              action: "does_not_exist",
+              params: {}
+            }
+          }
+        },
+        sessionHeaders
+      );
+      assert.equal(invalid.response.status, 200);
+      assert.match(JSON.stringify(invalid.messages), /Unsupported toolbox action/u);
+
+      const invalidCall = readRecentToolCalls(config, { publicToolName: "repo_toolbox", since }).calls[0];
+      assert.equal(invalidCall.classification, "APP_POLICY_DENIED");
+
+      const diagnostic = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: {
+            name: "diagnostics_toolbox",
+            arguments: {
+              action: "recent_tool_calls",
+              params: {
+                correlationId: invalidCall.correlationId,
+                publicToolName: "repo_toolbox",
+                since,
+                limit: 50
+              }
+            }
+          }
+        },
+        sessionHeaders
+      );
+      const diagnosticResult = firstResult(diagnostic.messages, 3);
+      const diagnosticText = JSON.parse((diagnosticResult.content as Array<{ text: string }>)[0].text) as { result: { calls: Array<{ classification: string; correlationId: string }> } };
+      assert.deepEqual(diagnosticText.result.calls.map((call) => call.correlationId), [invalidCall.correlationId]);
+      assert.equal(diagnosticText.result.calls[0].classification, "APP_POLICY_DENIED");
+
+      const invalidQuery = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "tools/call",
+          params: {
+            name: "diagnostics_toolbox",
+            arguments: {
+              action: "recent_tool_calls",
+              params: {
+                publicTool: "repo_toolbox"
+              }
+            }
+          }
+        },
+        sessionHeaders
+      );
+      assert.match(JSON.stringify(invalidQuery.messages), /Toolbox action parameters failed validation/u);
+
+      const missing = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 5,
+          method: "tools/call",
+          params: {
+            name: "diagnostics_toolbox",
+            arguments: {
+              action: "recent_tool_calls",
+              params: {
+                correlationId: "missing-correlation-id"
+              }
+            }
+          }
+        },
+        sessionHeaders
+      );
+      const missingResult = firstResult(missing.messages, 5);
+      const missingText = JSON.parse((missingResult.content as Array<{ text: string }>)[0].text) as { result: { calls: Array<{ classification: string; explanation: string }> } };
+      assert.equal(missingText.result.calls[0].classification, "NO_SERVER_RECEIPT_EVIDENCE");
+      assert.match(missingText.result.calls[0].explanation, /no matching server receipt evidence/i);
+      assert.doesNotMatch(missingText.result.calls[0].explanation, /blocked by ChatGPT|OpenAI blocked/iu);
+
+      const aboveLimit = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 6,
+          method: "tools/call",
+          params: {
+            name: "diagnostics_toolbox",
+            arguments: {
+              action: "recent_tool_calls",
+              params: {
+                limit: 51
+              }
+            }
+          }
+        },
+        sessionHeaders
+      );
+      assert.match(JSON.stringify(aboveLimit.messages), /Toolbox action parameters failed validation/u);
+
+      const invalidSince = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 7,
+          method: "tools/call",
+          params: {
+            name: "diagnostics_toolbox",
+            arguments: {
+              action: "recent_tool_calls",
+              params: {
+                since: "July 26 2026"
+              }
+            }
+          }
+        },
+        sessionHeaders
+      );
+      assert.match(JSON.stringify(invalidSince.messages), /strict ISO-8601 timestamp/u);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("classifies transport exceptions with sanitized trace output", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(
+      () => {
+        throw new Error(
+          [
+            `forced transport failure access_token=secret-value ${path.join(tempRoot, "private")}`,
+            "D:\\ProgramData\\Private\\file.md",
+            "\\\\server\\share\\private\\file.md",
+            "/etc/private/config"
+          ].join(" ")
+        );
+      },
+      config,
+      {
+        host: "127.0.0.1",
+        port: 0,
+        version: "0.1.0-test",
+        allowNonlocalHttp: false,
+        allowUnauthLocalHttp: true
+      }
+    );
+
+    try {
+      const response = await postMcp(handle.url, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "repo_toolbox",
+          arguments: {
+            action: "status"
+          }
+        }
+      });
+      assert.equal(response.response.status, 500);
+      const call = readRecentToolCalls(config, { publicToolName: "repo_toolbox" }).calls[0];
+      assert.equal(call.classification, "TRANSPORT_ERROR");
+      const serialized = JSON.stringify(call);
+      assert.doesNotMatch(serialized, /secret-value/u);
+      assert.doesNotMatch(serialized, new RegExp(tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+      assert.doesNotMatch(serialized, /ProgramData|server\\share|\/etc\/private/u);
+      const auditLog = fs.readFileSync(config.auditLogPath, "utf8");
+      assert.doesNotMatch(auditLog, /secret-value|ProgramData|server\\share|\/etc\/private/u);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("does not fail a successful tool call when trace writing fails", async () => {
+    const logParentFile = path.join(tempRoot, "log-parent-is-file");
+    fs.writeFileSync(logParentFile, "not a directory", "utf8");
+    const config = testConfig({ writeMode: "off", auditLogPath: path.join(logParentFile, "audit.log") });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: true
+    });
+
+    try {
+      const result = await postMcp(handle.url, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "browser_toolbox",
+          arguments: {
+            action: "get_browser_capabilities"
+          }
+        }
+      });
+      assert.equal(result.response.status, 200);
+      firstResult(result.messages, 2);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("does not fail a successful HTTP tool call when post-append trace compaction fails", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const { tracePath } = getToolCallTracePaths(config);
+    fs.mkdirSync(path.dirname(tracePath), { recursive: true });
+    for (let index = 0; index < 2_000; index += 1) {
+      recordToolCallTrace(config, {
+        correlationId: `prefill-${index}`,
+        stage: "http_received"
+      });
+    }
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: true
+    });
+
+    const originalRenameSync = fs.renameSync;
+    fs.renameSync = (() => {
+      throw new Error("forced compaction replacement failure");
+    }) as typeof fs.renameSync;
+    try {
+      const result = await postMcp(handle.url, {
+        jsonrpc: "2.0",
+        id: "compaction-failure-call",
+        method: "tools/call",
+        params: {
+          name: "browser_toolbox",
+          arguments: {
+            action: "get_browser_capabilities"
+          }
+        }
+      });
+      assert.equal(result.response.status, 200);
+      firstResult(result.messages, "compaction-failure-call");
+    } finally {
+      fs.renameSync = originalRenameSync;
       await handle.close();
     }
   });
@@ -1490,6 +2982,49 @@ describe("HTTP MCP transport safety", () => {
     }
   });
 
+  it("redacts malicious string IDs in both discovery and tool-call traces for mixed batches", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    try {
+      const accessToken = await issueTestAccessToken(handle.url, "files.read");
+      const maliciousId = "id /etc/private/config https://example.com/mcp?access_token=secret";
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const mixed = await postMcp(
+        handle.url,
+        [
+          { jsonrpc: "2.0", id: "discover-ok", method: "tools/list" },
+          {
+            jsonrpc: "2.0",
+            id: maliciousId,
+            method: "tools/call",
+            params: {
+              name: "browser_toolbox",
+              arguments: { action: "get_browser_capabilities" }
+            }
+          }
+        ],
+        { authorization: `Bearer ${accessToken}` }
+      );
+      assert.equal(mixed.response.status, 200);
+
+      const discoveryTrace = readLastMcpDiscoveryTrace(config);
+      assert.ok(discoveryTrace);
+      const toolCall = readRecentToolCalls(config, { since, publicToolName: "browser_toolbox" }).calls[0];
+      const serialized = JSON.stringify({ discoveryTrace, toolCall });
+      assert.doesNotMatch(serialized, /\/etc\/private|example\.com|access_token=secret/u);
+      assert.match(serialized, /<REDACTED_PATH>|<REDACTED_URL>|<REDACTED_ENDPOINT>/u);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("refuses write tool calls without files.write scope", async () => {
     const config = testConfig({ writeToolsEnabled: true });
     const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
@@ -1542,8 +3077,12 @@ describe("HTTP MCP transport safety", () => {
           "mcp-session-id": sessionId
         }
       );
-      assert.equal(write.response.status, 200);
+      assert.equal(write.response.status, 403);
       assert.match(JSON.stringify(write.messages), /files\.write/u);
+      const call = readRecentToolCalls(config, { publicToolName: "repo_toolbox" }).calls.find((entry) => entry.events.some((event) => event.jsonRpcId === 2));
+      assert.ok(call);
+      assert.equal(call.classification, "APP_POLICY_DENIED");
+      assert.equal(call.stages.includes("dispatch_started"), false);
     } finally {
       await handle.close();
     }
@@ -1849,7 +3388,7 @@ describe("HTTP MCP transport safety", () => {
       const text = (toolResult.content[0] as { text: string }).text;
       const parsedToolText = JSON.parse(text) as { ok: boolean; result: { files: string[]; truncated: boolean } };
       assert.equal(parsedToolText.ok, true);
-      assert.deepEqual(parsedToolText.result.files, ["alpha.md"]);
+      assert.deepEqual(parsedToolText.result.files.filter((entry) => !entry.startsWith("logs/")), ["alpha.md"]);
       assert.equal(parsedToolText.result.truncated, false);
     } finally {
       await handle.close();

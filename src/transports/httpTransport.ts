@@ -23,8 +23,18 @@ import {
   writeLastOAuthAuthorizeError
 } from "../oauth.js";
 import { writeAuditLog } from "../security/auditLog.js";
+import { sanitizeDiagnosticText } from "../security/diagnosticRedaction.js";
 import { writeMcpDiscoveryTrace, type McpDiscoveryTrace, type McpDiscoveryTraceAuth, type McpDiscoveryTraceResponse } from "../server/discoveryTrace.js";
 import { getToolExposureDiagnostics, isReadToolName, isWriteToolName } from "../server/registerTools.js";
+import {
+  createToolCallCorrelationId,
+  isToolCallTraceIdentityMismatchError,
+  recordToolCallTrace,
+  runWithToolCallTraceGroupContext,
+  toolCallTraceRequestIdKey,
+  type ToolCallTraceContext
+} from "../server/toolCallTrace.js";
+import { requiredScopeForPublicToolCall } from "../tools/toolboxActionPolicy.js";
 
 export interface HttpTransportOptions {
   host: string;
@@ -117,19 +127,7 @@ function writeHtml(res: ServerResponse, statusCode: number, html: string): void 
 
 function safeOAuthErrorDescription(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
-  return raw
-    .replace(/[A-Z]:[\\/]+Users[\\/]+[^\\/ \r\n"'`]+/giu, "%USERPROFILE%")
-    .replace(/[A-Z]:[\\/]+Windows[\\/]+Temp[\\/]+[^ \r\n"'`]+/giu, "%TEMP%")
-    .replace(/[A-Z]:[\\/]+Temp[\\/]+[^ \r\n"'`]+/giu, "%TEMP%")
-    .replace(/\/Users\/[^/ \r\n"'`]+/gu, "%USERPROFILE%")
-    .replace(/\/home\/[^/ \r\n"'`]+/gu, "%USERPROFILE%")
-    .replace(/\/tmp\/[^ \r\n"'`]+/gu, "%TEMP%")
-    .replace(
-      /\b(?<key>access[_-]?token|refresh[_-]?token|authorization[_-]?code|code[_-]?verifier|code[_-]?challenge|client[_-]?secret|password|secret)\b\s*[:=]\s*["']?[^"'\s\r\n]+["']?/giu,
-      "$<key>=<REDACTED_SECRET>"
-    )
-    .replace(/\s+/gu, " ")
-    .slice(0, 240);
+  return sanitizeDiagnosticText(raw);
 }
 
 function redirect(res: ServerResponse, location: string): void {
@@ -278,6 +276,48 @@ function jsonRpcMethodNames(body: unknown): string[] {
     .filter((method): method is string => typeof method === "string");
 }
 
+interface ParsedToolCallRequest {
+  id?: string | number | null;
+  name?: string;
+  action?: string;
+  workspaceId?: string;
+  relativePath?: string;
+}
+
+function toolCallRequests(body: unknown): ParsedToolCallRequest[] {
+  const requests = Array.isArray(body) ? body : [body];
+  const toolCalls: ParsedToolCallRequest[] = [];
+  for (const request of requests) {
+    if (!request || typeof request !== "object" || Array.isArray(request)) {
+      continue;
+    }
+
+    const rpc = request as { id?: unknown; method?: unknown; params?: unknown };
+    if (rpc.method !== "tools/call") {
+      continue;
+    }
+
+    const params = rpc.params && typeof rpc.params === "object" && !Array.isArray(rpc.params)
+      ? rpc.params as { name?: unknown; arguments?: unknown }
+      : undefined;
+    const args = params?.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments)
+      ? params.arguments as { action?: unknown; workspaceId?: unknown; relativePath?: unknown; params?: unknown }
+      : undefined;
+    const nestedParams = args?.params && typeof args.params === "object" && !Array.isArray(args.params)
+      ? args.params as { relativePath?: unknown }
+      : undefined;
+    toolCalls.push({
+      id: "id" in rpc && (typeof rpc.id === "string" || typeof rpc.id === "number" || rpc.id === null) ? rpc.id : undefined,
+      name: typeof params?.name === "string" ? params.name : undefined,
+      action: typeof args?.action === "string" ? args.action : undefined,
+      workspaceId: typeof args?.workspaceId === "string" ? args.workspaceId : undefined,
+      relativePath: typeof args?.relativePath === "string" ? args.relativePath : typeof nestedParams?.relativePath === "string" ? nestedParams.relativePath : undefined
+    });
+  }
+
+  return toolCalls;
+}
+
 const DISCOVERY_METHODS = new Set(["initialize", "notifications/initialized", "tools/list", "resources/list", "prompts/list"]);
 
 function isDiscoveryTraceBody(body: unknown): boolean {
@@ -348,6 +388,53 @@ function responseKind(statusCode: number, contentType: string): McpDiscoveryTrac
   }
 
   return "wrong-content-type";
+}
+
+function recordToolCallHttpResponse(
+  config: AppConfig,
+  context: ToolCallTraceContext | undefined,
+  res: ServerResponse,
+  transportRoute: string,
+  result?: Pick<Parameters<typeof recordToolCallTrace>[1], "result" | "errorCode" | "errorMessage">
+): void {
+  if (!context) {
+    return;
+  }
+
+  recordToolCallTrace(config, {
+    correlationId: context.correlationId,
+    stage: "http_response_completed",
+    jsonRpcId: context.jsonRpcId,
+    publicTool: context.publicTool,
+    action: context.action,
+    workspaceId: context.workspaceId,
+    requestedPath: context.requestedPath,
+    httpStatus: res.statusCode,
+    durationMs: Date.now() - context.startedAt,
+    responseRoute: transportRoute,
+    responseKind: responseKind(res.statusCode, responseContentType(res)),
+    ...result
+  });
+}
+
+function recordToolCallHttpResponses(
+  config: AppConfig,
+  contexts: readonly ToolCallTraceContext[],
+  res: ServerResponse,
+  transportRoute: string,
+  result?: Pick<Parameters<typeof recordToolCallTrace>[1], "result" | "errorCode" | "errorMessage">
+): void {
+  for (const context of contexts) {
+    recordToolCallHttpResponse(config, context, res, transportRoute, result);
+  }
+}
+
+function runWithToolCallContexts<T>(contexts: readonly ToolCallTraceContext[], handler: () => T): T {
+  if (contexts.length === 0) {
+    return handler();
+  }
+
+  return runWithToolCallTraceGroupContext({ requestGroupId: randomUUID(), toolCalls: [...contexts] }, handler);
 }
 
 function discoveryAuth(auth: AuthContext | undefined): McpDiscoveryTraceAuth {
@@ -445,7 +532,73 @@ function recordMcpDiscovery(
   }
 }
 
-function mcpScopeDenial(body: unknown, auth: AuthContext): string | undefined {
+interface ToolCallScopeEvaluation {
+  context: ToolCallTraceContext;
+  requiredScope?: "files.read" | "files.write";
+  allowed: boolean;
+  denialMessage?: string;
+}
+
+function requiredScopeForParsedToolCall(toolCall: ParsedToolCallRequest): "files.read" | "files.write" | undefined {
+  const toolName = toolCall.name;
+  if (!toolName) {
+    return undefined;
+  }
+
+  if (toolName === "workspace_write_attached_image") {
+    return "files.write";
+  }
+
+  const toolboxRequiredScope = requiredScopeForPublicToolCall(toolName, toolCall.action);
+  if (toolboxRequiredScope) {
+    return toolboxRequiredScope;
+  }
+
+  if (isWriteToolName(toolName)) {
+    return "files.write";
+  }
+
+  if (isReadToolName(toolName)) {
+    return "files.read";
+  }
+
+  return undefined;
+}
+
+function evaluateToolCallScopes(toolCalls: readonly ParsedToolCallRequest[], contexts: readonly ToolCallTraceContext[], auth: AuthContext): ToolCallScopeEvaluation[] {
+  return toolCalls.map((toolCall, index) => {
+    const requiredScope = requiredScopeForParsedToolCall(toolCall);
+    const allowed = requiredScope ? scopeIncludes(auth.scope, requiredScope) : true;
+    return {
+      context: contexts[index],
+      requiredScope,
+      allowed,
+      denialMessage: requiredScope && !allowed && toolCall.name ? `OAuth scope ${requiredScope} is required to call ${toolCall.name}${toolCall.action ? `.${toolCall.action}` : ""}.` : undefined
+    };
+  });
+}
+
+function duplicateRepresentableRequestIdContexts(contexts: readonly ToolCallTraceContext[]): Set<string> {
+  const counts = new Map<string, number>();
+  for (const context of contexts) {
+    if ((typeof context.jsonRpcId !== "string" && typeof context.jsonRpcId !== "number") || !context.requestIdKey) {
+      continue;
+    }
+
+    counts.set(context.requestIdKey, (counts.get(context.requestIdKey) ?? 0) + 1);
+  }
+
+  const duplicateCorrelationIds = new Set<string>();
+  for (const context of contexts) {
+    if (context.requestIdKey && (counts.get(context.requestIdKey) ?? 0) > 1) {
+      duplicateCorrelationIds.add(context.correlationId);
+    }
+  }
+
+  return duplicateCorrelationIds;
+}
+
+function mcpBodyScopeDenial(body: unknown, auth: AuthContext): string | undefined {
   const requests = Array.isArray(body) ? body : [body];
   for (const request of requests) {
     if (!request || typeof request !== "object") {
@@ -455,19 +608,6 @@ function mcpScopeDenial(body: unknown, auth: AuthContext): string | undefined {
     const rpc = request as { method?: unknown; params?: { name?: unknown } };
     if (rpc.method === "tools/list" && !scopeIncludes(auth.scope, "files.read")) {
       return "OAuth scope files.read is required to list MCP tools.";
-    }
-
-    if (rpc.method !== "tools/call" || !rpc.params || typeof rpc.params.name !== "string") {
-      continue;
-    }
-
-    const toolName = rpc.params.name;
-    if (isWriteToolName(toolName) && !scopeIncludes(auth.scope, "files.write")) {
-      return `OAuth scope files.write is required to call ${toolName}.`;
-    }
-
-    if (isReadToolName(toolName) && !scopeIncludes(auth.scope, "files.read")) {
-      return `OAuth scope files.read is required to call ${toolName}.`;
     }
   }
 
@@ -811,10 +951,11 @@ function errorDetails(error: unknown): { message: string; stack?: string } {
 async function logHttpTransportError(config: AppConfig, req: IncomingMessage, requestPath: string, error: unknown): Promise<void> {
   const details = errorDetails(error);
   const method = req.method ?? "UNKNOWN";
-  const sanitizedMessage = details.message.replace(/\s+/gu, " ").slice(0, 500);
+  const sanitizedMessage = safeOAuthErrorDescription(details.message);
+  const sanitizedStack = details.stack ? safeOAuthErrorDescription(details.stack) : sanitizedMessage;
   const stderrMessage = [
     `HTTP MCP transport error: ${method} ${requestPath}: ${sanitizedMessage}`,
-    details.stack ?? sanitizedMessage
+    sanitizedStack
   ].join("\n");
 
   console.error(stderrMessage);
@@ -829,6 +970,25 @@ async function logHttpTransportError(config: AppConfig, req: IncomingMessage, re
   } catch (logError) {
     const logDetails = errorDetails(logError);
     console.error(`Failed to write HTTP MCP error to app log: ${logDetails.message}`);
+  }
+}
+
+async function logToolCallTraceIdentityMismatch(config: AppConfig, req: IncomingMessage, requestPath: string, error: unknown): Promise<void> {
+  const method = req.method ?? "UNKNOWN";
+  const message = error instanceof Error ? error.message : "HTTP tool-call trace identity mismatch.";
+  const sanitizedMessage = safeOAuthErrorDescription(message);
+  console.error(`HTTP MCP trace identity mismatch: ${method} ${requestPath}: ${sanitizedMessage}`);
+
+  try {
+    await writeAuditLog(config.auditLogPath, {
+      toolName: "http_mcp_trace_identity",
+      requestedPath: `${method} ${requestPath}`,
+      result: "deny",
+      reason: sanitizedMessage
+    });
+  } catch (logError) {
+    const logDetails = errorDetails(logError);
+    console.error(`Failed to write HTTP MCP trace identity diagnostic to app log: ${safeOAuthErrorDescription(logDetails.message)}`);
   }
 }
 
@@ -897,6 +1057,7 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
   const httpServer = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url ?? "/", getOAuthPublicBaseUrl());
     const requestPath = requestUrl.pathname;
+    let activeToolCallContexts: ToolCallTraceContext[] = [];
 
     try {
       if (requestPath === "/health") {
@@ -960,10 +1121,33 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
             return;
           }
         }
+        const receivedToolCalls = toolCallRequests(parsedBody);
+        const toolCallContexts = receivedToolCalls.map((toolCall) => ({
+          correlationId: createToolCallCorrelationId(),
+          startedAt: Date.now(),
+          httpMethod: req.method ?? "UNKNOWN",
+          mcpRoute: requestPath,
+          jsonRpcMethod: "tools/call",
+          jsonRpcId: toolCall.id,
+          publicTool: toolCall.name,
+          action: toolCall.action,
+          workspaceId: toolCall.workspaceId,
+          requestedPath: toolCall.relativePath,
+          requestIdKey: toolCallTraceRequestIdKey(toolCall.id)
+        } satisfies ToolCallTraceContext));
+        activeToolCallContexts = toolCallContexts;
+        for (const toolCallContext of toolCallContexts) {
+          recordToolCallTrace(config, {
+            ...toolCallContext,
+            stage: "http_received",
+            result: "allow"
+          });
+        }
 
         const auth = authenticateMcpRequest(req, config, options);
         if (!auth) {
           unauthorized(res);
+          recordToolCallHttpResponses(config, toolCallContexts, res, "auth-denied");
           recordMcpDiscovery(
             config,
             req,
@@ -982,15 +1166,48 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
         }
 
         if (methodAllowsMcpBody(req.method)) {
-          const denial = mcpScopeDenial(parsedBody, auth);
-          if (denial) {
+          const bodyDenial = mcpBodyScopeDenial(parsedBody, auth);
+          const scopeEvaluations = evaluateToolCallScopes(receivedToolCalls, toolCallContexts, auth);
+          const deniedEvaluations = scopeEvaluations.filter((evaluation) => !evaluation.allowed);
+          const duplicateCorrelationIds = duplicateRepresentableRequestIdContexts(toolCallContexts);
+          if (bodyDenial || deniedEvaluations.length > 0 || duplicateCorrelationIds.size > 0) {
+            const duplicateMessage = "Duplicate JSON-RPC request ID in batch.";
+            const denial = duplicateCorrelationIds.size > 0 ? duplicateMessage : bodyDenial ?? deniedEvaluations[0].denialMessage ?? "OAuth scope is required to call this MCP tool.";
+            const transportRoute = duplicateCorrelationIds.size > 0 ? "bad-request" : toolCallContexts.length > 1 ? "batch-scope-denied" : "scope-denied";
+            const discoveryTransportRoute = duplicateCorrelationIds.size > 0 ? "bad-request" : "scope-denied";
             await writeAuditLog(config.auditLogPath, {
-              toolName: "http_mcp_scope",
+              toolName: duplicateCorrelationIds.size > 0 ? "http_mcp_request" : "http_mcp_scope",
               requestedPath: `${req.method ?? "UNKNOWN"} ${requestPath}`,
               result: "deny",
               reason: denial
             });
-            forbidden(res, denial);
+            if (duplicateCorrelationIds.size > 0) {
+              jsonRpcErrorResponse(res, 400, duplicateMessage);
+            } else {
+              forbidden(res, denial);
+            }
+            for (const evaluation of scopeEvaluations) {
+              const isDuplicate = duplicateCorrelationIds.has(evaluation.context.correlationId);
+              recordToolCallHttpResponse(
+                config,
+                evaluation.context,
+                res,
+                transportRoute,
+                isDuplicate
+                  ? {
+                      result: "deny",
+                      errorCode: "INVALID_INPUT",
+                      errorMessage: duplicateMessage
+                    }
+                  : evaluation.allowed
+                    ? undefined
+                    : {
+                        result: "deny",
+                        errorCode: "OAUTH_SCOPE_DENIED",
+                        errorMessage: evaluation.denialMessage ?? denial
+                      }
+              );
+            }
             recordMcpDiscovery(
               config,
               req,
@@ -1001,7 +1218,7 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
                 statusCode: res.statusCode,
                 contentType: responseContentType(res),
                 kind: responseKind(res.statusCode, responseContentType(res)),
-                transportRoute: "scope-denied",
+                transportRoute: discoveryTransportRoute,
                 error: denial
               },
               accept,
@@ -1018,7 +1235,8 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
         const existingSession = normalizedSessionId ? sessions.get(normalizedSessionId) : undefined;
 
         if (existingSession) {
-          await existingSession.transport.handleRequest(req, res, parsedBody);
+          await runWithToolCallContexts(toolCallContexts, () => existingSession.transport.handleRequest(req, res, parsedBody));
+          recordToolCallHttpResponses(config, toolCallContexts, res, "stateful-session");
           recordMcpDiscovery(
             config,
             req,
@@ -1039,7 +1257,8 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
         if (!normalizedSessionId && includesInitializeRequest(parsedBody)) {
           const session = createSession(auth);
           await session.server.connect(session.transport);
-          await session.transport.handleRequest(req, res, parsedBody);
+          await runWithToolCallContexts(toolCallContexts, () => session.transport.handleRequest(req, res, parsedBody));
+          recordToolCallHttpResponses(config, toolCallContexts, res, "stateful-session");
           const initializedSessionId = session.transport.sessionId;
           if (initializedSessionId) {
             sessions.set(initializedSessionId, session);
@@ -1080,7 +1299,8 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
           return;
         }
 
-        await handleStatelessCompatRequest(auth, req, res, parsedBody);
+        await runWithToolCallContexts(toolCallContexts, () => handleStatelessCompatRequest(auth, req, res, parsedBody));
+        recordToolCallHttpResponses(config, toolCallContexts, res, "stateless-compat");
         recordMcpDiscovery(
           config,
           req,
@@ -1100,8 +1320,33 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
 
       writeJson(res, 404, { error: "Not found" });
     } catch (error) {
+      if (isToolCallTraceIdentityMismatchError(error)) {
+        await logToolCallTraceIdentityMismatch(config, req, requestPath, error);
+        jsonRpcErrorResponse(res, 500, "Internal server error");
+        recordToolCallHttpResponses(config, activeToolCallContexts, res, "server-error");
+        return;
+      }
+
+      for (const activeToolCallContext of activeToolCallContexts) {
+        const details = errorDetails(error);
+        recordToolCallTrace(config, {
+          correlationId: activeToolCallContext.correlationId,
+          stage: "transport_error",
+          jsonRpcId: activeToolCallContext.jsonRpcId,
+          publicTool: activeToolCallContext.publicTool,
+          action: activeToolCallContext.action,
+          workspaceId: activeToolCallContext.workspaceId,
+          requestedPath: activeToolCallContext.requestedPath,
+          result: "error",
+          errorCode: "TRANSPORT_ERROR",
+          errorMessage: details.message,
+          httpStatus: res.statusCode,
+          durationMs: Date.now() - activeToolCallContext.startedAt
+        });
+      }
       await logHttpTransportError(config, req, requestPath, error);
       jsonRpcErrorResponse(res, 500, "Internal server error");
+      recordToolCallHttpResponses(config, activeToolCallContexts, res, "server-error");
     }
   });
 

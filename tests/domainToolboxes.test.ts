@@ -152,6 +152,105 @@ describe("stable domain toolbox tools", () => {
     assert.ok((exposure.result as { registeredToolboxNames?: string[] }).registeredToolboxNames?.includes("repo_toolbox"));
   });
 
+  it("diagnostics_toolbox.runtime_status reports matching runtime and workspace package versions", async () => {
+    initRepo();
+    const config = testConfig("off");
+    const result = await diagnosticsToolbox({ action: "runtime_status" }, config, context(config, "files.read"));
+    const runtime = result.result as {
+      packageVersion?: unknown;
+      runtimePackageVersion?: unknown;
+      selectedWorkspacePackageVersion?: unknown;
+      packageVersionMatch?: unknown;
+      runtimeDriftDetected?: unknown;
+      warnings?: unknown;
+    };
+
+    assert.equal(result.ok, true);
+    assert.equal(runtime.packageVersion, "0.1.2");
+    assert.equal(runtime.runtimePackageVersion, "0.1.2");
+    assert.equal(runtime.selectedWorkspacePackageVersion, "0.1.2");
+    assert.equal(runtime.packageVersionMatch, true);
+    assert.equal(runtime.runtimeDriftDetected, false);
+    assert.deepEqual(runtime.warnings, []);
+  });
+
+  it("diagnostics_toolbox.runtime_status warns when runtime and selected workspace package versions differ", async () => {
+    initRepo();
+    const workspaceRoot = path.join(auditRoot, "workspace");
+    initRepoAt(workspaceRoot, "dev", "workspace-fixture");
+    writeFileIn(workspaceRoot, "package.json", `${JSON.stringify({ name: "workspace-fixture", version: "9.9.9" }, null, 2)}\n`);
+    const config: AppConfig = {
+      ...testConfig("off", tempRoot, [workspaceRoot], workspaceRoot, "local-file"),
+      workspaces: [{ workspaceId: "selected_workspace", label: "Selected Workspace", root: workspaceRoot, source: "configured" }],
+      defaultWorkspaceId: "selected_workspace",
+      defaultWorkspaceIdSource: "local-file"
+    };
+    const result = await diagnosticsToolbox(
+      { action: "runtime_status", workspaceId: "selected_workspace" },
+      config,
+      context(config, "files.read")
+    );
+    const runtime = result.result as {
+      runtimePackageVersion?: unknown;
+      selectedWorkspacePackageVersion?: unknown;
+      packageVersionMatch?: unknown;
+      runtimeDriftDetected?: unknown;
+      warnings?: string[];
+      runtimeSourceCommit?: unknown;
+      selectedWorkspaceHead?: unknown;
+    };
+    const serialized = JSON.stringify(result);
+
+    assert.equal(result.ok, true);
+    assert.equal(runtime.runtimePackageVersion, "0.1.2");
+    assert.equal(runtime.selectedWorkspacePackageVersion, "9.9.9");
+    assert.equal(runtime.packageVersionMatch, false);
+    assert.equal(runtime.runtimeDriftDetected, true);
+    assert.ok(runtime.warnings?.some((warning) => /Package, promote, restart, and reconnect/u.test(warning)));
+    assert.equal(result.warnings?.length, 1);
+    assert.match(String(runtime.runtimeSourceCommit), /^[a-f0-9]{7,40}$|^unknown$/u);
+    assert.match(String(runtime.selectedWorkspaceHead), /^[a-f0-9]{7,40}$|^unknown$/u);
+    assert.doesNotMatch(serialized, new RegExp(tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+    assert.doesNotMatch(serialized, new RegExp(workspaceRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+    assert.doesNotMatch(serialized, /access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization[_-]?code/iu);
+  });
+
+  it("diagnostics_toolbox.runtime_status reports unknown package match when workspace package metadata is missing", async () => {
+    initRepo();
+    const workspaceRoot = path.join(auditRoot, "workspace-no-package");
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    gitIn(workspaceRoot, ["init"]);
+    gitIn(workspaceRoot, ["config", "user.email", "test@example.com"]);
+    gitIn(workspaceRoot, ["config", "user.name", "Test User"]);
+    gitIn(workspaceRoot, ["checkout", "-b", "dev"]);
+    writeFileIn(workspaceRoot, "README.md", "# No package metadata\n");
+    gitIn(workspaceRoot, ["add", "README.md"]);
+    gitIn(workspaceRoot, ["commit", "-m", "Initial commit"]);
+    const config: AppConfig = {
+      ...testConfig("off", tempRoot, [workspaceRoot], workspaceRoot, "local-file"),
+      workspaces: [{ workspaceId: "workspace_no_package", label: "Workspace Without Package", root: workspaceRoot, source: "configured" }],
+      defaultWorkspaceId: "workspace_no_package",
+      defaultWorkspaceIdSource: "local-file"
+    };
+    const result = await diagnosticsToolbox(
+      { action: "runtime_status", workspaceId: "workspace_no_package" },
+      config,
+      context(config, "files.read")
+    );
+    const runtime = result.result as {
+      selectedWorkspacePackageVersion?: unknown;
+      packageVersionMatch?: unknown;
+      runtimeDriftDetected?: unknown;
+      warnings?: unknown;
+    };
+
+    assert.equal(result.ok, true);
+    assert.equal(runtime.selectedWorkspacePackageVersion, "unknown");
+    assert.equal(runtime.packageVersionMatch, "unknown");
+    assert.equal(runtime.runtimeDriftDetected, false);
+    assert.deepEqual(runtime.warnings, []);
+  });
+
   it("diagnostics_toolbox.oauth_scope_status and get_write_access_status do not expose tokens", async () => {
     initRepo();
     const config = testConfig("docs");

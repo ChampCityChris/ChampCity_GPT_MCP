@@ -1,0 +1,116 @@
+{
+  "artifactType": "project-architect-interview-prompt",
+  "artifactRevision": 1,
+  "participationRole": "nonReviewHandoff",
+  "projectSlug": "champcity_mcp",
+  "projectArtifactKey": "champcity_mcp",
+  "projectIdentity": {
+    "projectName": "ChampCity MCP",
+    "projectPurpose": "ChampCity is a MCP server with a desktop application dashboard and engine. It is designed specifically to provide tools to ChatGPT.com so the website ai chat can access the tools needed to read and write local repositories. It allows ChatGPT.com to be come a architect, and code reviewer for software development projects.   ",
+    "desiredOutcome": "ChampCity MCP should allow the user to operate a fully functional MCP server for Chatgpt.com or other browser based LLMs. ",
+    "projectType": "Desktop application",
+    "projectRepository": "<PROJECT_REPO>"
+  },
+  "intakeContext": {
+    "hasExistingSourceOrPlanning": true,
+    "knownConstraints": "OpenAI's safety layer causes issues with certain MCP tools if written to broadly.",
+    "repositoryReviewContext": "The foundation for this application has been built and the base set of tools have been built utilizing a toolbox approach to prevent the need to recreate the application in ChatGPT settings every time a new tool is created."
+  },
+  "sourceRevisions": [
+    {
+      "path": "planning/project/Project_Intake/PROJECT_INTAKE_champcity_mcp.json",
+      "revision": 1
+    }
+  ],
+  "canonicalProjectIntake": {
+    "markdown": "planning/project/Project_Intake/PROJECT_INTAKE_champcity_mcp.md",
+    "json": "planning/project/Project_Intake/PROJECT_INTAKE_champcity_mcp.json",
+    "revision": 1
+  },
+  "architectOutputTargets": {
+    "markdown": "planning/project/Project_Architect_Interviews/PROJECT_ARCHITECT_INTERVIEW_champcity_mcp.md",
+    "json": "planning/project/Project_Architect_Interviews/PROJECT_ARCHITECT_INTERVIEW_champcity_mcp.json"
+  },
+  "generatedPromptRevision": 1,
+  "requiresRepositoryReview": true,
+  "architectRoleAndObjective": [
+    "Act as the project Architect for the selected project.",
+    "Use the approved Project Intake as starting context rather than repeating questions already answered.",
+    "Conduct a conversational, adaptive interview focused on unresolved planning information.",
+    "Identify material ambiguity, conflicting requirements, assumptions, dependencies, and risks.",
+    "Ask follow-up questions until the project is sufficiently understood to support the later Project Profile and Project Roadmap.",
+    "Summarize understanding and resolve consequential misunderstandings with the Operator before finalizing the durable interview document.",
+    "Write the exact synchronized Markdown and JSON siblings through ChampCity MCP."
+  ],
+  "interviewMethod": {
+    "adaptive": true,
+    "durableRecordRequired": true,
+    "conversationTextIsNotDurableRecord": true,
+    "coverageSubjects": [
+      "intended users, Operator, stakeholders, and affected parties",
+      "problem being solved and desired measurable or observable outcome",
+      "primary user workflows and functional capabilities",
+      "boundaries, explicit non-goals, and deferred capabilities",
+      "existing project state when applicable",
+      "platform, deployment, technology, environment, and compatibility constraints",
+      "data inputs, outputs, ownership, retention, and migration considerations",
+      "integrations, external systems, services, files, devices, or repositories",
+      "security, privacy, compliance, accessibility, safety, and operational requirements when applicable",
+      "user-experience expectations and important interaction patterns",
+      "reliability, performance, supportability, maintainability, and observability expectations when applicable",
+      "delivery priorities, dependencies, sequencing constraints, and known deadlines",
+      "acceptance, validation, and evidence expectations",
+      "risks, unknowns, assumptions, and decisions that later planning must address"
+    ]
+  },
+  "repositoryReviewBehavior": {
+    "mode": "existing-repository",
+    "requirements": [
+      "Inspect the selected repository through ChampCity MCP before finalizing.",
+      "Distinguish verified repository facts from Operator statements, assumptions, and Architect recommendations.",
+      "Cite repository-relative paths where practical.",
+      "Identify current implemented behavior, existing planning, known failures, abandoned attempts, protected areas, and material technical debt when relevant.",
+      "Use verified current state as the baseline for later Project Profile and Project Roadmap work."
+    ],
+    "optionalRepositoryReviewContextMayBeBlank": true
+  },
+  "requiredOutputContract": {
+    "markdown": {
+      "targetPath": "planning/project/Project_Architect_Interviews/PROJECT_ARCHITECT_INTERVIEW_champcity_mcp.md",
+      "requiredDisposition": "Pending",
+      "requiredParticipationRole": "gatingReview",
+      "requiredSections": [
+        "Source Revisions",
+        "Project Understanding",
+        "Intended Users and Stakeholders",
+        "Goals and Success Criteria",
+        "Functional Scope and Primary Workflows",
+        "Boundaries, Non-Goals, and Deferred Scope",
+        "Verified Existing State when applicable",
+        "Technical and Operational Constraints",
+        "Data and Integration Considerations",
+        "Security, Privacy, Compliance, and Accessibility",
+        "User-Experience Expectations",
+        "Delivery Priorities and Dependencies",
+        "Risks, Unknowns, Assumptions, and Decisions",
+        "Validation and Acceptance Expectations",
+        "Planning Implications",
+        "Remaining Open Questions only when material questions remain",
+        "Document Disposition"
+      ]
+    },
+    "json": {
+      "targetPath": "planning/project/Project_Architect_Interviews/PROJECT_ARCHITECT_INTERVIEW_champcity_mcp.json",
+      "artifactType": "project-architect-interview",
+      "participationRole": "gatingReview",
+      "requiredDocumentDispositionStatus": "Pending",
+      "requiresSourceRevisions": true,
+      "requiresProjectIdentity": true,
+      "requiresStructuredFindings": true,
+      "unresolvedQuestionsMayBeEmpty": true
+    }
+  },
+  "documentDisposition": {
+    "status": "Approved"
+  }
+}

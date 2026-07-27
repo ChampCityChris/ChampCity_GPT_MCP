@@ -26,7 +26,7 @@ Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=of
 - `patch`: docs plus application of matching pending patch proposals.
 - `elevated`: internal/elevated exception tasks, legacy approval-gated fallback operations, and safe git branch/stage/commit/push tools.
 
-ChatGPT-facing status and release checks should use the stable toolbox actions. `workspace_write_attached_image` is the only current top-level public exception because ChatGPT attachment file parameters must be top-level tool inputs. The legacy top-level tools remain internal implementation functions where toolbox routers need them, but they are not exposed through public ChatGPT `tools/list` and direct public calls are denied.
+ChatGPT-facing status and release checks should use the stable toolbox actions. `workspace_write_attached_image` is the only current top-level public exception because ChatGPT attachment file parameters must be top-level tool inputs. The internal MCP registry remains at the restored 31-schema baseline; legacy top-level implementation functions remain registered internally where toolbox routers and local maintenance checks need them, but they are not exposed in public ChatGPT `tools/list`.
 
 These facade tools are part of the WC-V1-0102 remediation path for `CAV-011`, `CAV-012`, `CAV-013`, `CAV-021`, `CAV-023`, and `CAV-030`. Live ChatGPT validation is still required before claiming full remediation.
 
@@ -34,7 +34,7 @@ Builder Report discovery should use `artifact_toolbox.builder_report_index`. Spe
 
 ## Stable Domain Toolbox Tools
 
-WC-V1-FIX05 reduced the public ChatGPT-facing surface to the stable toolbox tools. `workspace_write_attached_image` is a later bounded top-level exception for ChatGPT attachment import because nested file parameters are not supported. Future capability expansion should still prefer internal allowlisted actions over new top-level MCP tool names when file-parameter constraints do not require a top-level tool. ChatGPT may bind tool schemas for the connector or chat lifecycle, so adding new top-level tools can require connector rediscovery, app reauthorization, or a new chat.
+The public ChatGPT-facing surface is the stable toolbox tools plus `workspace_write_attached_image`. Future capability expansion should still prefer internal allowlisted actions over new top-level MCP tool names when file-parameter constraints do not require a top-level tool. ChatGPT may bind tool schemas for the connector or chat lifecycle, so adding new top-level tools can require connector rediscovery, app reauthorization, or a new chat.
 
 The stable domain toolbox tools are:
 
@@ -49,6 +49,8 @@ The stable domain toolbox tools are:
 The current additional public write tool is:
 
 - `workspace_write_attached_image`
+
+Other top-level legacy helper schemas remain registered internally for compatibility and local maintenance. Legacy helper names such as `read_project_file`, `git_diff`, `write_markdown_artifact`, and `safe_stage_changes` are exposure-filtered from public ChatGPT `tools/list`, and direct non-public calls receive the existing safe public-surface rejection.
 
 Each toolbox accepts:
 
@@ -276,6 +278,7 @@ Initial actions:
 - `tool_exposure_status`
 - `oauth_scope_status`
 - `chatgpt_discovery_status`
+- `recent_tool_calls`
 - `list_workspaces`
 - `public_safety_status`
 - `project_validation`
@@ -285,7 +288,9 @@ Initial actions:
 - `electron_development_startup`
 - `electron_packaged_startup`
 
-Diagnostics are redacted and include runtime package version, commit, branch, runtime start time where available, registered tool count, registered tool-name hash, registered toolbox names, workspace-routing summary, observed OAuth scope booleans, local write mode, local write-mode booleans, and latest discovery counts when a discovery trace is available. `list_workspaces` returns safe catalog metadata only: workspace IDs, labels, repository name when available, branch when safely readable, default marker, and expected-remote match status. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, raw credential stores, or unnecessary absolute roots are returned.
+Diagnostics are redacted and include runtime package version, selected workspace package version, package-version match status, runtime/source commit hints when safely available, branch, runtime start time where available, registered tool count, registered tool-name hash, registered toolbox names, workspace-routing summary, observed OAuth scope booleans, local write mode, local write-mode booleans, latest discovery counts when a discovery trace is available, and recent correlated MCP tool-call trace summaries. `runtime_status` warns when the running MCP package version differs from the selected workspace package version; package, promote, restart, and reconnect the runtime before relying on current source behavior. `list_workspaces` returns safe catalog metadata only: workspace IDs, labels, repository name when available, branch when safely readable, default marker, and expected-remote match status. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, raw credential stores, or unnecessary absolute roots are returned.
+
+`recent_tool_calls` accepts optional `params.limit` (default 20, minimum 1, maximum 50), `params.since` as a strict ISO-8601 timestamp, `params.correlationId`, and `params.publicToolName`. It reads only the redacted MCP tool-call trace and returns deterministic classifications: `NO_SERVER_RECEIPT_EVIDENCE`, `RECEIVED_NOT_DISPATCHED`, `DISPATCHED_NOT_EXECUTED`, `APP_POLICY_DENIED`, `APP_EXECUTION_ERROR`, `RESULT_RETURNED`, `RESPONSE_COMPLETED`, or `TRANSPORT_ERROR`. Valid dispatch correlation is bound by the MCP SDK JSON-RPC request ID supplied as handler metadata. Malformed `tools/call` requests receive receipt evidence before SDK rejection. Toolbox action scope requirements come from one canonical policy registry; OAuth scope denials classify as `APP_POLICY_DENIED` without fabricated dispatch stages, and mixed batches keep call-specific denial evidence. String JSON-RPC IDs are sanitized and capped at 128 characters, and arbitrary absolute paths in diagnostic strings are redacted while route fields such as `/mcp` and `/health` remain route values. Tool-call, discovery, and HTTP transport diagnostics use shared field-aware redaction. Missing receipt evidence means only that no matching server receipt evidence was found.
 
 `get_write_access_status` also includes a nested diagnostics block when called through MCP so older visible tool surfaces can report runtime, scope, and tool-count state.
 
@@ -370,7 +375,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-This self-test checks the local tool registry, MCP `tools/list` schema validity, the public surface of seven stable toolboxes plus `workspace_write_attached_image` when write-scoped, required internal gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, tool description safety phrases, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, hidden `run_allowed_script` public exposure, and gated branch workflow tool coverage. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
+This self-test checks the local tool registry, MCP `tools/list` schema validity, the public surface of seven stable toolboxes plus `workspace_write_attached_image` when write-scoped, required internal gated operations, stable toolbox registration, exposure-filtered legacy facade schemas, narrow toolbox schemas, tool description safety phrases, safe read-only facade calls through toolbox actions, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery and summary, docs-write denial when write mode is off, blocked-path denial, hidden `run_allowed_script` public exposure, and gated branch workflow tool coverage. JSON mode emits machine-readable pass/fail results for Builder Reports and release validation.
 
 This self-test complements but does not replace live ChatGPT connector validation.
 
@@ -390,7 +395,7 @@ The elevated approval token is configured in `config/write-access.local.json` as
 
 ## Internal Legacy Implementations
 
-The following entries describe internal implementation functions retained for toolbox routers and local maintenance context. They are not exposed as top-level public ChatGPT tools after WC-V1-FIX05.
+The following entries describe internal implementation functions retained for toolbox routers and local maintenance context. They are not exposed as top-level public ChatGPT tools. Direct calls to names outside the public toolbox surface continue to receive the existing safe public-surface rejection.
 
 ## `list_project_files`
 
@@ -484,6 +489,8 @@ Input:
 Output summary: changed files and post-apply git diff summary.
 
 Safety behavior: in both `patch` and `elevated` mode, the patch must exactly match a non-expired unused proposal for the same root. The proposal is marked used after successful apply. All existing patch checks still run: allowed-root, blocked-file, regular-file, symlink/submodule, size, and non-git-target checks when git enforcement is enabled. After applying, changed paths are checked with `lstat`, and symbolic link paths are rejected with a best-effort rollback. Proposal failures remain patch errors and are never replaced with an approval-token challenge.
+
+After source corrections to this behavior, run the package-and-promote path before treating the fix as active in ChatGPT. Runtime drift diagnostics identify stale packaged deployments where source and active runtime versions differ.
 
 Review behavior: write operations should still be reviewed with `git diff` before commit.
 

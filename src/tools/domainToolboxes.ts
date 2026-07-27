@@ -8,6 +8,7 @@ import { z } from "zod";
 import { type AppConfig } from "../config.js";
 import { getOAuthEndpointPaths, scopeIncludes } from "../oauth.js";
 import { readLastMcpDiscoveryTrace } from "../server/discoveryTrace.js";
+import { readRecentToolCalls, recordToolCallTrace, updateCurrentToolCallTraceContext } from "../server/toolCallTrace.js";
 import { serializeError, AppError } from "../utils/errors.js";
 import { runGit } from "../utils/git.js";
 import {
@@ -70,18 +71,20 @@ import {
   listWorkspaceCatalog,
   resolveWorkspaceRoot
 } from "../workspaces.js";
+import {
+  getToolboxActionPolicy,
+  SUPPORTED_ARTIFACT_ACTIONS,
+  SUPPORTED_BROWSER_ACTIONS,
+  SUPPORTED_DIAGNOSTICS_ACTIONS,
+  SUPPORTED_GIT_ACTIONS,
+  SUPPORTED_INTEGRATION_ACTIONS,
+  SUPPORTED_KNOWLEDGE_ACTIONS,
+  SUPPORTED_REPO_ACTIONS,
+  TOOLBOX_TOOL_NAMES,
+  type ToolboxName
+} from "./toolboxActionPolicy.js";
 
-export const TOOLBOX_TOOL_NAMES = [
-  "repo_toolbox",
-  "git_toolbox",
-  "artifact_toolbox",
-  "diagnostics_toolbox",
-  "integration_toolbox",
-  "browser_toolbox",
-  "knowledge_toolbox"
-] as const;
-
-export type ToolboxName = (typeof TOOLBOX_TOOL_NAMES)[number];
+export { TOOLBOX_TOOL_NAMES, type ToolboxName } from "./toolboxActionPolicy.js";
 
 export interface ToolboxRuntimeContext {
   callerScope: string;
@@ -101,9 +104,16 @@ export interface ToolboxRuntimeContext {
 export interface RuntimeScopeToolDiagnostics {
   runtime: {
     packageVersion: string | "unknown";
+    runtimePackageVersion: string | "unknown";
+    selectedWorkspacePackageVersion: string | "unknown";
+    packageVersionMatch: boolean | "unknown";
     commit: string | "unknown";
+    runtimeSourceCommit: string | "unknown";
+    selectedWorkspaceHead: string | "unknown";
     branch: string | "unknown";
     startedAt: string;
+    runtimeDriftDetected: boolean;
+    warnings: string[];
     workspaceRouting: WorkspaceDiagnostics;
   };
   oauth: {
@@ -348,6 +358,19 @@ const CurrentActionContextParamsSchema = z
     phaseId: z.string().min(1).max(128).optional()
   })
   .strict();
+const STRICT_ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u;
+const StrictIsoTimestampSchema = z.string().min(20).max(35).refine(
+  (value) => STRICT_ISO_TIMESTAMP_PATTERN.test(value) && !Number.isNaN(Date.parse(value)),
+  "since must be a strict ISO-8601 timestamp."
+);
+const RecentToolCallsParamsSchema = z
+  .object({
+    limit: z.number().int().min(1).max(50).default(20),
+    since: StrictIsoTimestampSchema.optional(),
+    correlationId: z.string().min(1).max(128).optional(),
+    publicToolName: z.string().min(1).max(128).optional()
+  })
+  .strict();
 const ReviewQueueParamsSchema = ArtifactFilterParamsSchema.extend({
   limit: ArtifactCatalogLimitSchema,
   cursor: z.string().min(1).max(32).optional()
@@ -379,68 +402,6 @@ const SourceAnalysisParamsSchema = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("mcp_registrations") }).strict(),
   z.object({ operation: z.literal("duplicate_mcp_tool_names") }).strict()
 ]);
-
-const SUPPORTED_REPO_ACTIONS = [
-  "status",
-  "list_files",
-  "read_file",
-  "search_files",
-  "write_markdown_artifact",
-  "write_json_artifact",
-  "propose_patch",
-  "apply_approved_patch"
-] as const;
-const SUPPORTED_GIT_ACTIONS = [
-  "status",
-  "diff",
-  "prepare_work_branch",
-  "pre_commit_scan",
-  "stage_paths",
-  "commit_staged",
-  "push_current_branch",
-  "readiness_summary",
-  "integrate_to_dev",
-  "inspect_history"
-] as const;
-const SUPPORTED_ARTIFACT_ACTIONS = [
-  "builder_report_index",
-  "builder_report_summary",
-  "release_artifact_summary",
-  "release_publication_summary",
-  "local_package_summary",
-  "read_image_artifact",
-  "list_artifacts",
-  "read_artifact_by_id",
-  "latest_artifact",
-  "artifact_pair_status",
-  "current_action_context",
-  "export_planning_corpus",
-  "review_queue"
-] as const;
-const SUPPORTED_DIAGNOSTICS_ACTIONS = [
-  "runtime_status",
-  "write_access_status",
-  "tool_exposure_status",
-  "oauth_scope_status",
-  "chatgpt_discovery_status",
-  "list_workspaces",
-  "public_safety_status",
-  "project_validation",
-  "mcp_server_startup",
-  "mcp_tool_registration",
-  "mcp_tool_inventory",
-  "electron_development_startup",
-  "electron_packaged_startup"
-] as const;
-const SUPPORTED_INTEGRATION_ACTIONS = [
-  "list_supported_services",
-  "get_service_status",
-  "list_service_capabilities",
-  "validate_service_configuration",
-  "prepare_external_handoff"
-] as const;
-const SUPPORTED_BROWSER_ACTIONS = ["get_browser_capabilities", "validate_public_endpoint"] as const;
-const SUPPORTED_KNOWLEDGE_ACTIONS = ["list_supported_sources", "get_project_memory_status", "get_reference_capabilities", "source_analysis"] as const;
 
 export const SUPPORTED_INTEGRATION_SERVICES = [
   "figma",
@@ -483,14 +444,30 @@ function parseToolboxInput(rawInput: unknown): ToolboxInput {
   };
 }
 
-function assertFilesWrite(context: ToolboxRuntimeContext, mappedToolName: string, toolbox: ToolboxName, action: string): void {
-  if (!scopeIncludes(context.callerScope, "files.write")) {
-    throw new AppError("APPROVAL_REQUIRED", `${toolbox}.${action} requires OAuth scope files.write.`, {
-      requiredScope: "files.write"
+function assertToolboxActionPolicy(context: ToolboxRuntimeContext | undefined, toolbox: ToolboxName, action: string): void {
+  const policy = getToolboxActionPolicy(toolbox, action);
+  if (!policy) {
+    return;
+  }
+
+  if (!context) {
+    if (policy.requiredScope === "files.write") {
+      throw new AppError("APPROVAL_REQUIRED", `${toolbox}.${action} requires OAuth scope ${policy.requiredScope}.`, {
+        requiredScope: policy.requiredScope
+      });
+    }
+    return;
+  }
+
+  if (!scopeIncludes(context.callerScope, policy.requiredScope)) {
+    throw new AppError("APPROVAL_REQUIRED", `${toolbox}.${action} requires OAuth scope ${policy.requiredScope}.`, {
+      requiredScope: policy.requiredScope
     });
   }
 
-  context.assertWriteToolEnabled(mappedToolName);
+  if (policy.requiredScope === "files.write" && policy.mappedInternalOperation) {
+    context.assertWriteToolEnabled(policy.mappedInternalOperation);
+  }
 }
 
 function toolNamesHash(names: readonly string[]): string {
@@ -532,21 +509,50 @@ function packageVersion(root: string): string | "unknown" {
   return typeof value === "string" && value.trim() ? value : "unknown";
 }
 
+function comparePackageVersions(
+  runtimePackageVersion: string | "unknown",
+  selectedWorkspacePackageVersion: string | "unknown"
+): boolean | "unknown" {
+  if (runtimePackageVersion === "unknown" || selectedWorkspacePackageVersion === "unknown") {
+    return "unknown";
+  }
+
+  return runtimePackageVersion === selectedWorkspacePackageVersion;
+}
+
 export async function buildRuntimeScopeToolDiagnostics(
   config: AppConfig,
-  context: ToolboxRuntimeContext
+  context: ToolboxRuntimeContext,
+  selectedWorkspaceRoot = config.defaultWorkspaceRoot ?? config.repoRoot
 ): Promise<RuntimeScopeToolDiagnostics> {
-  const [commit, branch] = await Promise.all([
+  const [runtimeSourceCommit, branch, selectedWorkspaceHead] = await Promise.all([
     runtimeGitOutputOptional(config.repoRoot, ["rev-parse", "--short", "HEAD"]),
-    runtimeGitOutputOptional(config.repoRoot, ["branch", "--show-current"])
+    runtimeGitOutputOptional(config.repoRoot, ["branch", "--show-current"]),
+    runtimeGitOutputOptional(selectedWorkspaceRoot, ["rev-parse", "--short", "HEAD"])
   ]);
+  const runtimePackageVersion = packageVersion(config.repoRoot);
+  const selectedWorkspacePackageVersion = packageVersion(selectedWorkspaceRoot);
+  const packageVersionMatch = comparePackageVersions(runtimePackageVersion, selectedWorkspacePackageVersion);
+  const runtimeDriftDetected = packageVersionMatch === false;
+  const warnings = runtimeDriftDetected
+    ? [
+        "The active MCP runtime package version does not match the selected ChampCity_GPT workspace version. Package, promote, restart, and reconnect the runtime before relying on current source behavior."
+      ]
+    : [];
 
   return {
     runtime: {
-      packageVersion: packageVersion(config.repoRoot),
-      commit,
+      packageVersion: runtimePackageVersion,
+      runtimePackageVersion,
+      selectedWorkspacePackageVersion,
+      packageVersionMatch,
+      commit: runtimeSourceCommit,
+      runtimeSourceCommit,
+      selectedWorkspaceHead,
       branch,
       startedAt: TOOLBOX_RUNTIME_STARTED_AT,
+      runtimeDriftDetected,
+      warnings,
       workspaceRouting: getWorkspaceDiagnostics(config)
     },
     oauth: {
@@ -650,6 +656,8 @@ async function runToolboxAction(
   toolbox: ToolboxName,
   rawInput: unknown,
   supportedActions: readonly string[],
+  config: AppConfig,
+  context: ToolboxRuntimeContext | undefined,
   handler: (input: ToolboxInput) => Promise<ToolboxResult>
 ): Promise<ToolboxResult> {
   let input: ToolboxInput;
@@ -659,11 +667,26 @@ async function runToolboxAction(
     return failed(toolbox, "unknown", error, supportedActions);
   }
 
+  updateCurrentToolCallTraceContext({
+    publicTool: toolbox,
+    action: input.action,
+    workspaceId: input.workspaceId
+  });
+  recordToolCallTrace(config, {
+    stage: "toolbox_entered",
+    publicTool: toolbox,
+    action: input.action,
+    workspaceId: input.workspaceId,
+    requestedPath: typeof input.params.relativePath === "string" ? input.params.relativePath : undefined,
+    result: "allow"
+  });
+
   if (!supportedActions.includes(input.action)) {
     return supportedActionError(toolbox, input.action, supportedActions);
   }
 
   try {
+    assertToolboxActionPolicy(context, toolbox, input.action);
     return await handler(input);
   } catch (error) {
     return failed(toolbox, input.action, error);
@@ -707,7 +730,7 @@ function sanitizeToolboxValue(value: unknown): unknown {
 }
 
 export async function repoToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
-  return runToolboxAction("repo_toolbox", rawInput, SUPPORTED_REPO_ACTIONS, async (input) => {
+  return runToolboxAction("repo_toolbox", rawInput, SUPPORTED_REPO_ACTIONS, config, context, async (input) => {
     const root = resolveWorkspaceRoot(input.workspaceId, config);
 
     switch (input.action) {
@@ -727,22 +750,18 @@ export async function repoToolbox(rawInput: unknown, config: AppConfig, context:
         return ok("repo_toolbox", input.action, withoutRoot(await searchProjectFiles({ root, ...params }, config)));
       }
       case "write_markdown_artifact": {
-        assertFilesWrite(context, "write_markdown_artifact", "repo_toolbox", input.action);
         const params = RepoWriteMarkdownParamsSchema.parse(input.params);
         return ok("repo_toolbox", input.action, await writeMarkdownArtifact({ root, ...params }, config));
       }
       case "write_json_artifact": {
-        assertFilesWrite(context, "write_json_artifact", "repo_toolbox", input.action);
         const params = RepoWriteJsonParamsSchema.parse(input.params);
         return ok("repo_toolbox", input.action, await writeJsonArtifact({ root, ...params }, config));
       }
       case "propose_patch": {
-        assertFilesWrite(context, "propose_patch", "repo_toolbox", input.action);
         const params = RepoProposePatchParamsSchema.parse(input.params);
         return ok("repo_toolbox", input.action, await proposePatch({ root, ...params }, config));
       }
       case "apply_approved_patch": {
-        assertFilesWrite(context, "apply_approved_patch", "repo_toolbox", input.action);
         const params = RepoApplyApprovedPatchParamsSchema.parse(input.params);
         return ok("repo_toolbox", input.action, await applyApprovedPatch({ root, ...params }, config));
       }
@@ -753,7 +772,7 @@ export async function repoToolbox(rawInput: unknown, config: AppConfig, context:
 }
 
 export async function gitToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
-  return runToolboxAction("git_toolbox", rawInput, SUPPORTED_GIT_ACTIONS, async (input) => {
+  return runToolboxAction("git_toolbox", rawInput, SUPPORTED_GIT_ACTIONS, config, context, async (input) => {
     const root = resolveWorkspaceRoot(input.workspaceId, config);
 
     switch (input.action) {
@@ -765,7 +784,6 @@ export async function gitToolbox(rawInput: unknown, config: AppConfig, context: 
         return ok("git_toolbox", input.action, await gitDiff({ root, ...params }, config));
       }
       case "prepare_work_branch": {
-        assertFilesWrite(context, "prepare_git_work_branch", "git_toolbox", input.action);
         const params = GitPrepareWorkBranchParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await prepareGitWorkBranch({ workspaceId: input.workspaceId, ...params }, config));
       }
@@ -774,17 +792,14 @@ export async function gitToolbox(rawInput: unknown, config: AppConfig, context: 
         return ok("git_toolbox", input.action, await preCommitSafetyScan({ root, ...params }, config));
       }
       case "stage_paths": {
-        assertFilesWrite(context, "safe_stage_changes", "git_toolbox", input.action);
         const params = GitStagePathsParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await safeStageChanges({ root, mode: "paths", paths: params.paths }, config));
       }
       case "commit_staged": {
-        assertFilesWrite(context, "commit_validated_changes", "git_toolbox", input.action);
         const params = GitCommitStagedParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await commitValidatedChanges({ root, ...params, allowMainCommit: false }, config));
       }
       case "push_current_branch": {
-        assertFilesWrite(context, "push_current_branch", "git_toolbox", input.action);
         const params = GitPushCurrentBranchParamsSchema.parse(input.params);
         return ok("git_toolbox", input.action, await pushCurrentBranch({ root, remote: "origin", ...params, allowMainPush: false }, config));
       }
@@ -793,7 +808,6 @@ export async function gitToolbox(rawInput: unknown, config: AppConfig, context: 
         return ok("git_toolbox", input.action, await getCommitReadiness({ root, targetBranch: params.targetBranch }, config));
       }
       case "integrate_to_dev": {
-        assertFilesWrite(context, "integrate_to_dev", "git_toolbox", input.action);
         return ok("git_toolbox", input.action, await integrateToDev({ workspaceId: input.workspaceId, ...input.params }, config));
       }
       case "inspect_history": {
@@ -828,7 +842,7 @@ function localPackageSummary(root: string) {
 }
 
 export async function artifactToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
-  return runToolboxAction("artifact_toolbox", rawInput, SUPPORTED_ARTIFACT_ACTIONS, async (input) => {
+  return runToolboxAction("artifact_toolbox", rawInput, SUPPORTED_ARTIFACT_ACTIONS, config, context, async (input) => {
     switch (input.action) {
       case "builder_report_index": {
         const params = BuilderReportIndexParamsSchema.parse(input.params);
@@ -899,18 +913,17 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
 }
 
 export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
-  return runToolboxAction("diagnostics_toolbox", rawInput, SUPPORTED_DIAGNOSTICS_ACTIONS, async (input) => {
-    if (input.action !== "project_validation") {
+  return runToolboxAction("diagnostics_toolbox", rawInput, SUPPORTED_DIAGNOSTICS_ACTIONS, config, context, async (input) => {
+    if (input.action !== "project_validation" && input.action !== "recent_tool_calls") {
       EmptyParamsSchema.parse(input.params);
     }
-    if (input.action !== "list_workspaces") {
-      resolveWorkspaceRoot(input.workspaceId, config);
-    }
+    const selectedWorkspaceRoot =
+      input.action !== "list_workspaces" && input.action !== "recent_tool_calls" ? resolveWorkspaceRoot(input.workspaceId, config) : undefined;
 
-    const diagnostics = await buildRuntimeScopeToolDiagnostics(config, context);
+    const diagnostics = await buildRuntimeScopeToolDiagnostics(config, context, selectedWorkspaceRoot);
     switch (input.action) {
       case "runtime_status":
-        return ok("diagnostics_toolbox", input.action, diagnostics.runtime);
+        return ok("diagnostics_toolbox", input.action, diagnostics.runtime, diagnostics.runtime.warnings);
       case "write_access_status":
         return ok("diagnostics_toolbox", input.action, {
           writeMode: config.writeMode,
@@ -951,6 +964,10 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
               warnings: ["No last ChatGPT MCP discovery trace is available."]
             });
       }
+      case "recent_tool_calls": {
+        const params = RecentToolCallsParamsSchema.parse(input.params);
+        return ok("diagnostics_toolbox", input.action, readRecentToolCalls(config, params));
+      }
       case "list_workspaces":
         return ok("diagnostics_toolbox", input.action, await listWorkspaceCatalog(config));
       case "public_safety_status":
@@ -976,6 +993,7 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
         const expectedArchitectActions = {
           diagnostics_toolbox: [
             "project_validation",
+            "recent_tool_calls",
             "mcp_server_startup",
             "mcp_tool_registration",
             "mcp_tool_inventory",
@@ -1140,7 +1158,7 @@ ${notes?.trim() || "No operator notes provided."}
 }
 
 export async function integrationToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
-  return runToolboxAction("integration_toolbox", rawInput, SUPPORTED_INTEGRATION_ACTIONS, async (input) => {
+  return runToolboxAction("integration_toolbox", rawInput, SUPPORTED_INTEGRATION_ACTIONS, config, context, async (input) => {
     switch (input.action) {
       case "list_supported_services":
         EmptyParamsSchema.parse(input.params);
@@ -1165,7 +1183,6 @@ export async function integrationToolbox(rawInput: unknown, config: AppConfig, c
         return ok("integration_toolbox", input.action, validateServiceConfiguration(params.serviceId));
       }
       case "prepare_external_handoff": {
-        assertFilesWrite(context, "write_markdown_artifact", "integration_toolbox", input.action);
         const root = resolveWorkspaceRoot(input.workspaceId, config);
         const params = IntegrationHandoffParamsSchema.parse(input.params);
         assertSupportedService(params.serviceId);
@@ -1193,8 +1210,8 @@ export async function integrationToolbox(rawInput: unknown, config: AppConfig, c
   });
 }
 
-export async function browserToolbox(rawInput: unknown, config: AppConfig): Promise<ToolboxResult> {
-  return runToolboxAction("browser_toolbox", rawInput, SUPPORTED_BROWSER_ACTIONS, async (input) => {
+export async function browserToolbox(rawInput: unknown, config: AppConfig, context?: ToolboxRuntimeContext): Promise<ToolboxResult> {
+  return runToolboxAction("browser_toolbox", rawInput, SUPPORTED_BROWSER_ACTIONS, config, context, async (input) => {
     resolveWorkspaceRoot(input.workspaceId, config);
     switch (input.action) {
       case "get_browser_capabilities":
@@ -1229,8 +1246,8 @@ export async function browserToolbox(rawInput: unknown, config: AppConfig): Prom
   });
 }
 
-export async function knowledgeToolbox(rawInput: unknown, config: AppConfig): Promise<ToolboxResult> {
-  return runToolboxAction("knowledge_toolbox", rawInput, SUPPORTED_KNOWLEDGE_ACTIONS, async (input) => {
+export async function knowledgeToolbox(rawInput: unknown, config: AppConfig, context?: ToolboxRuntimeContext): Promise<ToolboxResult> {
+  return runToolboxAction("knowledge_toolbox", rawInput, SUPPORTED_KNOWLEDGE_ACTIONS, config, context, async (input) => {
     resolveWorkspaceRoot(input.workspaceId, config);
     switch (input.action) {
       case "list_supported_sources":

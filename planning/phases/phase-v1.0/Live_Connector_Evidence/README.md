@@ -16,3 +16,6 @@ Live evidence must be captured manually by the operator or from explicit ChatGPT
 Local deterministic checks such as `npm run mcp:self-test` support release validation, but they do not prove live ChatGPT connector behavior.
 
 Do not store actual live evidence here if it contains secrets, raw public tunnel URLs, private local paths, OAuth material, local config contents, logs with secrets, or release binary contents. Use `%USERPROFILE%`, `%TEMP%`, `<REDACTED_LOCAL_PATH>`, `<REDACTED_PUBLIC_ENDPOINT>`, and `<REDACTED_SECRET>` instead.
+
+## Document Disposition
+Document.Status=Rejected

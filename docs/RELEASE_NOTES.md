@@ -7,6 +7,8 @@
 - Added the read-only `artifact_toolbox.export_planning_corpus` action with deterministic manifests, SHA-256 file hashes, full-text coverage accounting, and explicit unsupported or excluded-file reporting.
 - Expanded `current_action_context` diagnostics without inferring workflow authority when no structured current-action record exists.
 - Removed the elevated approval-token fallback from `apply_approved_patch`; all patch applications now require an exact, live, unused proposal match in both patch and elevated modes.
+- Added runtime/workspace package-version drift diagnostics and runtime promotion provenance manifest output so stale packaged deployments are visible after package-and-promote.
+- Added correlated, redacted MCP tool-call tracing with `diagnostics_toolbox.recent_tool_calls`, including SDK request-ID-bound dispatch correlation, malformed receipt evidence, per-call mixed-batch scope evidence, a canonical toolbox action-policy registry, shared field-aware diagnostic redaction, sanitized/capped string JSON-RPC IDs, arbitrary absolute-path redaction, and the restored 31-schema internal registry with unchanged public toolbox exposure behavior.
 - Added focused regression coverage for traversal, artifact filtering, planning-corpus export, current-action diagnostics, and proposal-mismatch behavior.
 
 ## v0.2.0 - Purpose-built architect diagnostics

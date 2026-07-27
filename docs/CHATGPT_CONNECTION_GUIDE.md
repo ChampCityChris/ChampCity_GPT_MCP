@@ -271,10 +271,10 @@ Recommended write workflow:
 
 1. Set write mode to `docs` for Markdown planning docs.
 2. Set write mode to `patch` for code changes.
-3. Ask ChatGPT to prepare `dev` or a Work Card feature branch with `prepare_git_work_branch` before source changes are staged or committed.
+3. Ask ChatGPT to prepare `dev` or a Work Card feature branch with `git_toolbox.prepare_work_branch` before source changes are staged or committed.
 4. Ask ChatGPT to propose a patch first and review the returned patch.
 5. Apply only the matching pending proposal.
-6. Ask ChatGPT to call `get_workspace_status_summary` and inspect any needed diff separately.
+6. Ask ChatGPT to call `repo_toolbox.status` and inspect any needed diff separately.
 7. Validate, then stage reviewed files, commit, and push only the current `dev` or feature branch.
 8. Use `elevated` only for source-control tools, scripts, or legacy fallback, then rotate or clear the elevated token.
 9. Return write mode to `off`.

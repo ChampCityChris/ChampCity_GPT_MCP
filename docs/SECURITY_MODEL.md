@@ -91,11 +91,17 @@ WC-V1-FIX05 leaves exactly seven stable read-visible public domain toolbox tools
 - `browser_toolbox`
 - `knowledge_toolbox`
 
-These tools reduce top-level MCP schema churn. `workspace_write_attached_image` is a bounded write-scoped top-level addition for ChatGPT attachment import only. ChatGPT may bind tool schemas for a connector or chat lifecycle, so future expansion should prefer new internal allowlisted toolbox actions over new top-level MCP tools when file-parameter constraints do not require a top-level tool. Root-explicit legacy tools are hidden from public `tools/list` and direct public calls.
+These tools reduce top-level MCP schema churn. `workspace_write_attached_image` is a bounded write-scoped top-level addition for ChatGPT attachment import only, so the ChatGPT-visible public MCP surface contains the seven toolbox tools plus the image writer when `files.write` and local write mode permit it. ChatGPT may bind tool schemas for a connector or chat lifecycle, so future expansion should prefer new internal allowlisted toolbox actions over new top-level MCP tools when file-parameter constraints do not require a top-level tool. Legacy top-level implementation functions remain registered internally where toolbox routers and local maintenance checks need them, but they are not exposed in public ChatGPT `tools/list`.
 
 The toolbox input shape is stable: `action`, optional `workspaceId`, and optional `params`. The schema is not a security boundary. Each action has strict server-side validation and rejects unknown actions, unknown services, unsafe params, and missing required params with structured errors.
 
 Workspace routing is stateless and per-call. Runtime config can define a workspace registry in `allowed-roots.local.json` with `workspaces` entries containing server-defined `workspaceId`, `label`, `root`, and optional expected `remote`, plus optional `defaultWorkspaceId`. Legacy `allowedRoots`-only configs still work; safe workspace IDs are derived from folder names. With multiple workspaces and no explicit default, project-specific toolbox calls using `workspaceId: "default"` fail with `WORKSPACE_REQUIRED` and safe available workspace IDs. There is no mutable global active workspace.
+
+`diagnostics_toolbox.runtime_status` reports the running server package version and the selected workspace package version without returning absolute local paths. If those versions differ, the diagnostic warns that the active packaged runtime may be stale and should be packaged, promoted, restarted, and reconnected before relying on current source behavior. This drift warning is diagnostic only; it does not disable MCP access by itself.
+
+Every parsed JSON-RPC object with `method: "tools/call"` gets a server-side correlation ID and HTTP receipt evidence before parameter validation, including malformed calls that are later rejected by the MCP SDK. For valid public calls, dispatch binding uses the installed MCP SDK handler metadata `extra.requestId`, not tool/action/path matching or handler-order claiming. The correlation ID is propagated through MCP dispatch, toolbox entry, helper audit events, tool-result creation, HTTP response completion, and transport-error logging. The trace records only bounded redacted metadata: tool name, toolbox action, safe workspace ID, repository-relative path hints where already allowed, sanitized JSON-RPC ID, result classification, sanitized error code/message, route, status, and duration. It never records file contents, search result contents, patch/artifact contents, full arguments, OAuth tokens, authorization codes, PKCE material, cookies, private tunnel URLs, absolute roots, stack traces, prompts, or attachment bytes.
+
+`diagnostics_toolbox.recent_tool_calls` reads only the redacted MCP tool-call trace. It supports `limit`, `since`, `correlationId`, and `publicToolName` filters and classifies calls as `NO_SERVER_RECEIPT_EVIDENCE`, `RECEIVED_NOT_DISPATCHED`, `DISPATCHED_NOT_EXECUTED`, `APP_POLICY_DENIED`, `APP_EXECUTION_ERROR`, `RESULT_RETURNED`, `RESPONSE_COMPLETED`, or `TRANSPORT_ERROR`. OAuth scope requirements for toolbox actions come from one canonical action-policy registry used by both the HTTP gate and toolbox router. OAuth scope denials are evaluated per contained call and classified as `APP_POLICY_DENIED` on actual receipt/completion evidence without fabricated dispatch or result stages; in a rejected mixed batch, an authorized sibling is recorded as received but not dispatched rather than inheriting another call's denial. String JSON-RPC IDs are sanitized, control-normalized, redacted for secrets, URLs, content keys, and arbitrary absolute paths, and capped at 128 characters. Tool-call, discovery, and HTTP transport diagnostics share field-aware redaction for free text, JSON-RPC IDs, routes, endpoints, host metadata, and request-derived errors. `NO_SERVER_RECEIPT_EVIDENCE` means only that no matching server receipt evidence was found.
 
 Toolbox visibility requires `files.read`. Mixed read/write toolboxes are safe because write-capable actions enforce OAuth `files.write` and the same local write-mode policy as the mapped legacy operation. A caller with only `files.read` can see and call read-only diagnostics, but write actions fail with a clear missing `files.write` or write-mode error. This avoids hiding diagnostics from read-only sessions.
 
@@ -122,7 +128,7 @@ npm run mcp:self-test
 npm run mcp:self-test -- --json
 ```
 
-The self-test is deterministic and local. It validates the MCP tool registry, `tools/list` schema, the public surface of seven stable toolboxes plus `workspace_write_attached_image` when write-scoped, required internal gated tool registration, stable toolbox registration, narrow safe-facade and toolbox schemas, safety-compatible descriptions, safe read-only facade calls, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery, denied docs-write behavior, blocked-path denial, and hidden public exposure for `run_allowed_script`. It uses temporary fixtures for denied write, blocked-path, and multi-workspace probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
+The self-test is deterministic and local. It validates the restored internal MCP registry baseline of 31 registered schemas, `tools/list` schema, the public surface of seven stable toolboxes plus `workspace_write_attached_image` when write-scoped, required internal gated operations, stable toolbox registration, exposure-filtering of legacy helper schemas, narrow toolbox schemas, safety-compatible descriptions, safe read-only facade calls through toolbox actions, toolbox read-only diagnostics, explicit multi-workspace routing, toolbox write denial without `files.write`, unknown toolbox action denial, unknown integration service denial, Builder Report discovery, denied docs-write behavior, blocked-path denial, and hidden public exposure for `run_allowed_script`. It uses temporary fixtures for denied write, blocked-path, and multi-workspace probes, does not contact ChatGPT.com, does not launch Cloudflare, does not mutate OAuth/DCR state, and does not run elevated scripts.
 
 The JSON output is intended for release validation and Builder Reports. It must remain redacted and must not expose secrets, tokens, OAuth stores, local config contents, full private user paths, release binary contents, logs, or generated output contents.
 
@@ -167,7 +173,7 @@ All file tools require a `root` value that matches one configured allowed root. 
 
 Configured roots can come from `config/allowed-roots.local.json` or `CHAMPCITY_GPT_ALLOWED_ROOTS`, separated by semicolons. Environment variables override local config. If neither is set, the server defaults to the current working directory only.
 
-Named workspaces are also configured in `allowed-roots.local.json`. A workspace root must be inside the configured allowed roots; when only `workspaces` are configured, their roots become the allowed roots. ChatGPT-facing toolbox calls receive only workspace IDs, not arbitrary root paths. The legacy absolute-root tools remain available for compatibility and still require a configured allowed root.
+Named workspaces are also configured in `allowed-roots.local.json`. A workspace root must be inside the configured allowed roots; when only `workspaces` are configured, their roots become the allowed roots. ChatGPT-facing toolbox calls receive only workspace IDs, not arbitrary root paths. The legacy absolute-root helpers are retained as internal implementations for toolbox routers, but they are not registered as public MCP tools.
 
 Installed mode reads local config from Electron `userData\config`; portable mode reads from `data\config` beside the executable. Packaged runtime must not depend on repo-local `config/*.local.json` files or a hardcoded source checkout path.
 
@@ -237,6 +243,8 @@ The old universal per-write `approvalToken` model was replaced because ChatGPT a
 
 `apply_approved_patch` requires OAuth `files.write` and write mode `patch` or `elevated`. In either mode it applies only when the supplied patch exactly matches a non-expired unused proposal for the same root. The proposal is marked used after successful application. Proposal mismatch, reuse, expiry, or hash failure is returned directly as a patch error; patch application never converts those failures into an approval-token request.
 
+Source corrections to patch approval are not active for ChatGPT until the current version is packaged, promoted to the development runtime copy, restarted, and reconnected. After promotion, compare the package versions in `diagnostics_toolbox.runtime_status`; stale packaged deployments are flagged by the runtime drift diagnostics.
+
 `apply_approved_patch` rejects git patches that declare symlink, submodule, or other non-regular file modes. Only regular text file modes are allowed; symlink mode `120000` and submodule/gitlink mode `160000` are denied before `git apply` runs. After a patch applies, the tool also checks changed paths with `lstat` and rejects the operation if any changed path is a symbolic link.
 
 When `CHAMPCITY_GPT_REQUIRE_GIT_ROOT=true`, write tools verify that targets belong to a git repository.
@@ -260,13 +268,13 @@ Recommended workflow:
 1. Use `docs` mode for Markdown planning docs.
 2. Use `patch` mode for code changes and require `propose_patch` before `apply_approved_patch`.
 3. Work on `dev` or a Work Card feature branch, not `main`; `main` is for stable release or baseline checkpoints.
-4. Ask ChatGPT to run `prepare_git_work_branch` when `dev` or `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` needs to be prepared.
+4. Ask ChatGPT to run `git_toolbox.prepare_work_branch` when `dev` or `feature/WC-V1-xxxx-*` / `feature/WC-V1-FIXxx-*` needs to be prepared.
 5. Validate the change on the prepared branch.
-6. Ask ChatGPT to call `get_change_set_readiness_summary` for the public-safe change set check.
-7. Ask ChatGPT to run `safe_stage_changes`.
-8. Ask ChatGPT to run `pre_commit_safety_scan`.
-9. Ask ChatGPT to run `commit_validated_changes` with a reviewed commit message.
-10. Ask ChatGPT to run `push_current_branch` only after reviewing the commit result.
+6. Ask ChatGPT to call `git_toolbox.readiness_summary` for the public-safe change set check.
+7. Ask ChatGPT to run `git_toolbox.stage_paths`.
+8. Ask ChatGPT to run `git_toolbox.pre_commit_scan`.
+9. Ask ChatGPT to run `git_toolbox.commit_staged` with a reviewed commit message.
+10. Ask ChatGPT to run `git_toolbox.push_current_branch` only after reviewing the commit result.
 11. After Architect review, run `git_toolbox.integrate_to_dev` in dry-run mode.
 12. After dry-run approval, run `git_toolbox.integrate_to_dev` with `dryRun: false` and `push: true`.
 13. Package/promote from `dev` only when a later scoped prompt asks for it.

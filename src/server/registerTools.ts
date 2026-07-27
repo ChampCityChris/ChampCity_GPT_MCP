@@ -46,7 +46,15 @@ import {
   WORKSPACE_WRITE_ATTACHED_IMAGE_TOOL_NAME,
   workspaceWriteAttachedImage
 } from "../tools/workspaceWriteAttachedImage.js";
+import { writeAuditLog } from "../security/auditLog.js";
+import { sanitizeDiagnosticText } from "../security/diagnosticRedaction.js";
 import { serializeError, AppError } from "../utils/errors.js";
+import {
+  isToolCallTraceIdentityMismatchError,
+  recordToolCallTrace,
+  runWithToolCallTraceRequestId,
+  updateCurrentToolCallTraceContext
+} from "./toolCallTrace.js";
 
 const textSchema = { type: "string" };
 const rootSchema = { type: "string", maxLength: MAX_ROOT_LENGTH, description: "Absolute configured allowed root." };
@@ -966,6 +974,53 @@ function toolErrorResponse(error: unknown) {
   };
 }
 
+function toolboxActionFromArgs(args: unknown): string | undefined {
+  return args && typeof args === "object" && !Array.isArray(args) && typeof (args as { action?: unknown }).action === "string"
+    ? (args as { action: string }).action
+    : undefined;
+}
+
+function workspaceIdFromArgs(args: unknown): string | undefined {
+  return args && typeof args === "object" && !Array.isArray(args) && typeof (args as { workspaceId?: unknown }).workspaceId === "string"
+    ? (args as { workspaceId: string }).workspaceId
+    : undefined;
+}
+
+function relativePathFromArgs(args: unknown): string | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return undefined;
+  }
+
+  const input = args as { params?: unknown; relativePath?: unknown };
+  if (typeof input.relativePath === "string") {
+    return input.relativePath;
+  }
+
+  if (input.params && typeof input.params === "object" && !Array.isArray(input.params)) {
+    const relativePath = (input.params as { relativePath?: unknown }).relativePath;
+    return typeof relativePath === "string" ? relativePath : undefined;
+  }
+
+  return undefined;
+}
+
+function responseResult(data: unknown): { result: "allow" | "deny" | "error"; errorCode?: string; errorMessage?: string } {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { result: "allow" };
+  }
+
+  const output = data as { ok?: unknown; error?: { code?: unknown; message?: unknown } };
+  if (output.ok === false) {
+    return {
+      result: "deny",
+      errorCode: typeof output.error?.code === "string" ? output.error.code : "UNKNOWN_ERROR",
+      errorMessage: typeof output.error?.message === "string" ? output.error.message : "Tool returned an error result."
+    };
+  }
+
+  return { result: "allow" };
+}
+
 export function assertWriteToolEnabled(toolName: string, config: AppConfig): void {
   if (toolName === "write_markdown_artifact" && !config.docsWritesAllowed) {
     throw new AppError("APPROVAL_REQUIRED", "write_markdown_artifact requires writeMode docs, patch, or elevated.");
@@ -1041,41 +1096,107 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const args = request.params.arguments ?? {};
+    const toolName = request.params.name;
+    const action = toolboxActionFromArgs(args);
+    const workspaceId = workspaceIdFromArgs(args);
+    const requestedPath = relativePathFromArgs(args);
 
     try {
-      if (!PUBLIC_TOOL_NAME_SET.has(request.params.name)) {
-        throw new AppError("INVALID_INPUT", "Tool is not exposed on the public toolbox surface.", {
-          publicTools: [...PUBLIC_TOOL_NAMES]
+      return await runWithToolCallTraceRequestId(extra.requestId, async () => {
+        updateCurrentToolCallTraceContext({
+          publicTool: toolName,
+          action,
+          workspaceId,
+          requestedPath
         });
-      }
+        recordToolCallTrace(config, {
+          stage: "dispatch_started",
+          publicTool: toolName,
+          action,
+          workspaceId,
+          requestedPath,
+          result: "allow"
+        });
 
-      assertWriteToolEnabled(request.params.name, config);
-      const toolboxContext = () => createToolboxRuntimeContext(config, exposureOptions);
+        const tracedResponse = (data: unknown): CallToolResult => {
+          const result = responseResult(data);
+          recordToolCallTrace(config, {
+            stage: "tool_result_returned",
+            publicTool: toolName,
+            action: action ?? toolboxActionFromArgs(args),
+            workspaceId,
+            requestedPath,
+            result: result.result,
+            errorCode: result.errorCode,
+            errorMessage: result.errorMessage
+          });
+          return toolResponse(data);
+        };
 
-      switch (request.params.name) {
-        case WORKSPACE_WRITE_ATTACHED_IMAGE_TOOL_NAME:
-          return toolResponse(await workspaceWriteAttachedImage(args, config));
-        case "repo_toolbox":
-          return toolResponse(await repoToolbox(args, config, toolboxContext()));
-        case "git_toolbox":
-          return toolResponse(await gitToolbox(args, config, toolboxContext()));
-        case "artifact_toolbox":
-          return toolResponse(await artifactToolbox(args, config, toolboxContext()));
-        case "diagnostics_toolbox":
-          return toolResponse(await diagnosticsToolbox(args, config, toolboxContext()));
-        case "integration_toolbox":
-          return toolResponse(await integrationToolbox(args, config, toolboxContext()));
-        case "browser_toolbox":
-          return toolResponse(await browserToolbox(args, config));
-        case "knowledge_toolbox":
-          return toolResponse(await knowledgeToolbox(args, config));
-        default:
-          return toolErrorResponse(new Error(`Unknown tool: ${request.params.name}`));
-      }
+        try {
+          if (!PUBLIC_TOOL_NAME_SET.has(toolName)) {
+            throw new AppError("INVALID_INPUT", "Tool is not exposed on the public toolbox surface.", {
+              publicTools: [...PUBLIC_TOOL_NAMES]
+            });
+          }
+
+          assertWriteToolEnabled(toolName, config);
+          const toolboxContext = () => createToolboxRuntimeContext(config, exposureOptions);
+
+          switch (toolName) {
+            case WORKSPACE_WRITE_ATTACHED_IMAGE_TOOL_NAME:
+              return tracedResponse(await workspaceWriteAttachedImage(args, config));
+            case "repo_toolbox":
+              return tracedResponse(await repoToolbox(args, config, toolboxContext()));
+            case "git_toolbox":
+              return tracedResponse(await gitToolbox(args, config, toolboxContext()));
+            case "artifact_toolbox":
+              return tracedResponse(await artifactToolbox(args, config, toolboxContext()));
+            case "diagnostics_toolbox":
+              return tracedResponse(await diagnosticsToolbox(args, config, toolboxContext()));
+            case "integration_toolbox":
+              return tracedResponse(await integrationToolbox(args, config, toolboxContext()));
+            case "browser_toolbox":
+              return tracedResponse(await browserToolbox(args, config, toolboxContext()));
+            case "knowledge_toolbox":
+              return tracedResponse(await knowledgeToolbox(args, config, toolboxContext()));
+            default:
+              return toolErrorResponse(new Error(`Unknown tool: ${toolName}`));
+          }
+        } catch (error) {
+          const serialized = serializeError(error);
+          recordToolCallTrace(config, {
+            stage: "tool_result_returned",
+            publicTool: toolName,
+            action,
+            workspaceId,
+            requestedPath,
+            result: "error",
+            errorCode: serialized.code,
+            errorMessage: serialized.message
+          });
+          return toolErrorResponse(error);
+        }
+      });
     } catch (error) {
-      return toolErrorResponse(error);
+      if (isToolCallTraceIdentityMismatchError(error)) {
+        try {
+          await writeAuditLog(config.auditLogPath, {
+            toolName: "http_mcp_trace_identity",
+            requestedPath: "tools/call",
+            result: "deny",
+            reason: sanitizeDiagnosticText(error.message)
+          });
+        } catch (logError) {
+          const message = logError instanceof Error ? logError.message : String(logError);
+          console.warn(`Failed to write MCP trace identity diagnostic: ${sanitizeDiagnosticText(message)}`);
+        }
+        return toolErrorResponse(new AppError("INVALID_INPUT", "HTTP tool-call trace identity mismatch."));
+      }
+
+      throw error;
     }
   });
 }

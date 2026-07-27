@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, mkdir, readFile, stat } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -28,6 +29,7 @@ const sourcePath = path.join(outputDir, artifactName);
 const userHomeFromRepo = path.resolve(repoRoot, "..", "..");
 const runtimeDir = path.join(userHomeFromRepo, "Apps", "ChampCity_GPT_MCP_Runtime");
 const runtimeExePath = path.join(runtimeDir, "ChampCity GPT MCP Launcher-live.exe");
+const runtimeManifestPath = path.join(runtimeDir, "runtime-manifest.json");
 
 function assertInside(parent, child, label) {
   const relative = path.relative(parent, child);
@@ -86,6 +88,52 @@ async function sha256(filePath) {
   return hash.digest("hex");
 }
 
+async function gitOutputOptional(args) {
+  try {
+    return await new Promise((resolve) => {
+      const child = spawn("git", args, {
+        cwd: repoRoot,
+        shell: false,
+        windowsHide: true,
+      });
+      let stdout = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString("utf8");
+      });
+      child.on("error", () => resolve("unknown"));
+      child.on("close", (code) => {
+        resolve(code === 0 ? stdout.trim() || "unknown" : "unknown");
+      });
+    });
+  } catch {
+    return "unknown";
+  }
+}
+
+export function createRuntimeManifest({
+  packageVersion,
+  sourceCommit,
+  sourceArtifactSha256,
+  runtimeCopySha256,
+  promotedAt,
+}) {
+  return {
+    packageVersion,
+    sourceCommit: sourceCommit || "unknown",
+    sourceArtifactSha256,
+    runtimeCopySha256,
+    promotedAt,
+  };
+}
+
+export async function writeRuntimeManifestAtomic(filePath, manifest) {
+  const manifestDir = path.dirname(filePath);
+  await mkdir(manifestDir, { recursive: true });
+  const tempPath = path.join(manifestDir, `.runtime-manifest-${process.pid}-${Date.now()}.tmp`);
+  await writeFile(tempPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await rename(tempPath, filePath);
+}
+
 function reportArtifact(label, filePath, fileStat, hash) {
   console.log(`${label}: ${filePath}`);
   console.log(`${label} LastWriteTime: ${fileStat.mtime.toISOString()}`);
@@ -93,7 +141,7 @@ function reportArtifact(label, filePath, fileStat, hash) {
   console.log(`${label} SHA-256: ${hash}`);
 }
 
-try {
+export async function promoteRuntimeExecutable() {
   const [sourceStat, packageJsonStat, builderConfigStat] = await Promise.all([
     stat(sourcePath),
     stat(packageJsonPath),
@@ -118,12 +166,30 @@ try {
     throw new Error(`Runtime copy hash mismatch after copy: ${runtimeExePath}`);
   }
 
+  const manifest = createRuntimeManifest({
+    packageVersion: version,
+    sourceCommit: await gitOutputOptional(["rev-parse", "--short", "HEAD"]),
+    sourceArtifactSha256: sourceHash,
+    runtimeCopySha256: runtimeHash,
+    promotedAt: new Date().toISOString(),
+  });
+  await writeRuntimeManifestAtomic(runtimeManifestPath, manifest);
+
   console.log(`Package version: ${version}`);
   reportArtifact("Source portable executable", sourcePath, sourceStat, sourceHash);
   reportArtifact("Runtime copy executable", runtimeExePath, runtimeStat, runtimeHash);
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  console.error(`Expected current-version portable executable: ${sourcePath}`);
-  console.error(`Runtime copy destination: ${runtimeExePath}`);
-  process.exitCode = 1;
+  console.log(`Runtime manifest: ${runtimeManifestPath}`);
+  console.log(`Runtime manifest contents: ${JSON.stringify(manifest)}`);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  try {
+    await promoteRuntimeExecutable();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    console.error(`Expected current-version portable executable: ${sourcePath}`);
+    console.error(`Runtime copy destination: ${runtimeExePath}`);
+    console.error(`Runtime manifest destination: ${runtimeManifestPath}`);
+    process.exitCode = 1;
+  }
 }

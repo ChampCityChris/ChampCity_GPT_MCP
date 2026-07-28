@@ -42,6 +42,7 @@ import { proposePatch } from "./proposePatch.js";
 import { readProjectFile } from "./readProjectFile.js";
 import { MAX_IMAGE_ARTIFACT_BYTES, readImageArtifact } from "./readImageArtifact.js";
 import { searchProjectFiles } from "./searchProjectFiles.js";
+import { saveArchitectInterviewOutput, SaveArchitectInterviewOutputParamsSchema } from "./saveArchitectInterviewOutput.js";
 import { writeJsonArtifact } from "./writeJsonArtifact.js";
 import { writeMarkdownArtifact } from "./writeMarkdownArtifact.js";
 import { completedResult, type ArchitectToolResult } from "./architect/common.js";
@@ -919,6 +920,10 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
       case "review_queue": {
         const params = ReviewQueueParamsSchema.parse(input.params);
         return ok("artifact_toolbox", input.action, await reviewQueue({ workspaceId: input.workspaceId, ...params }, config));
+      }
+      case "save_architect_interview_output": {
+        const params = SaveArchitectInterviewOutputParamsSchema.parse(input.params);
+        return ok("artifact_toolbox", input.action, await saveArchitectInterviewOutput({ workspaceId: input.workspaceId, ...params }, config));
       }
       default:
         return supportedActionError("artifact_toolbox", input.action, SUPPORTED_ARTIFACT_ACTIONS);

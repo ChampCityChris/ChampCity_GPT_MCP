@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import {
   CHATGPT_EVIDENCE_TEMPLATE_PATH,
   REQUIRED_CAV_REFERENCES,
+  REQUIRED_ARTIFACT_ACTION_REFERENCES,
   REQUIRED_PUBLIC_TOOLBOX_TOOLS,
   REQUIRED_SAFE_REPLACEMENT_TOOLS,
   REQUIRED_SECTIONS,
@@ -66,6 +67,14 @@ describe("ChatGPT evidence validator", () => {
 
     for (const toolName of REQUIRED_PUBLIC_TOOLBOX_TOOLS) {
       assert.match(template, new RegExp(toolName, "u"));
+    }
+  });
+
+  it("template mentions all required artifact toolbox action references", () => {
+    const template = readTemplate();
+
+    for (const actionName of REQUIRED_ARTIFACT_ACTION_REFERENCES) {
+      assert.match(template, new RegExp(actionName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
     }
   });
 

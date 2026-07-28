@@ -81,6 +81,10 @@ export const REQUIRED_PUBLIC_TOOLBOX_TOOLS = [
   "knowledge_toolbox"
 ] as const;
 
+export const REQUIRED_ARTIFACT_ACTION_REFERENCES = [
+  "artifact_toolbox.save_architect_interview_output"
+] as const;
+
 export const REQUIRED_METADATA_FIELDS = [
   "Evidence file version:",
   "Validation date/time:",
@@ -283,6 +287,19 @@ function evaluateRequiredPublicToolboxTools(markdown: string): ChatGptEvidenceCh
   });
 }
 
+function evaluateRequiredArtifactActionReferences(markdown: string): ChatGptEvidenceCheck {
+  const missingActions = REQUIRED_ARTIFACT_ACTION_REFERENCES.filter((actionName) => !markdown.includes(actionName));
+  if (missingActions.length > 0) {
+    return fail("REQUIRED_ARTIFACT_ACTION_REFERENCES", "Evidence is missing one or more required artifact toolbox action names.", {
+      missingActions
+    });
+  }
+
+  return pass("REQUIRED_ARTIFACT_ACTION_REFERENCES", "Evidence mentions all required artifact toolbox actions.", {
+    actionCount: REQUIRED_ARTIFACT_ACTION_REFERENCES.length
+  });
+}
+
 function evaluateMetadataFields(markdown: string): ChatGptEvidenceCheck {
   const missingFields = REQUIRED_METADATA_FIELDS.filter((field) => !hasLineLabel(markdown, field));
   if (missingFields.length > 0) {
@@ -361,6 +378,7 @@ export function validateChatGptEvidenceText(markdown: string, options: ValidateC
     evaluateRequiredCavReferences(markdown),
     evaluateRequiredSafeReplacementTools(markdown),
     evaluateRequiredPublicToolboxTools(markdown),
+    evaluateRequiredArtifactActionReferences(markdown),
     evaluateMetadataFields(markdown),
     evaluateLocalBaselineCommands(markdown),
     evaluateSafePlaceholdersAllowed(markdown),

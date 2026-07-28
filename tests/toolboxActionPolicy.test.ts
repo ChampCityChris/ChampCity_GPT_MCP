@@ -53,6 +53,7 @@ describe("toolbox action policy", () => {
     assert.equal(requiredScopeForPublicToolCall("repo_toolbox", "read_file"), "files.read");
     assert.equal(requiredScopeForPublicToolCall("repo_toolbox", "write_markdown_artifact"), "files.write");
     assert.equal(requiredScopeForPublicToolCall("git_toolbox", "stage_paths"), "files.write");
+    assert.equal(requiredScopeForPublicToolCall("artifact_toolbox", "save_architect_interview_output"), "files.write");
     assert.equal(requiredScopeForPublicToolCall("integration_toolbox", "prepare_external_handoff"), "files.write");
     assert.equal(requiredScopeForPublicToolCall("browser_toolbox", "get_browser_capabilities"), "files.read");
     assert.equal(requiredScopeForPublicToolCall("unknown_tool", "write_markdown_artifact"), undefined);
@@ -60,6 +61,7 @@ describe("toolbox action policy", () => {
 
     assert.equal(mappedInternalOperationForToolboxAction("repo_toolbox", "write_markdown_artifact"), "write_markdown_artifact");
     assert.equal(mappedInternalOperationForToolboxAction("git_toolbox", "stage_paths"), "safe_stage_changes");
+    assert.equal(mappedInternalOperationForToolboxAction("artifact_toolbox", "save_architect_interview_output"), "write_markdown_artifact");
     assert.equal(mappedInternalOperationForToolboxAction("integration_toolbox", "prepare_external_handoff"), "write_markdown_artifact");
     assert.equal(mappedInternalOperationForToolboxAction("repo_toolbox", "read_file"), undefined);
   });

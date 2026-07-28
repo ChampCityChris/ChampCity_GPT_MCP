@@ -22,6 +22,7 @@ import {
   repoToolbox,
   TOOLBOX_TOOL_NAMES
 } from "../tools/domainToolboxes.js";
+import { SUPPORTED_ARTIFACT_ACTIONS } from "../tools/toolboxActionPolicy.js";
 import { readProjectFile } from "../tools/readProjectFile.js";
 import { runAllowedScript } from "../tools/runAllowedScript.js";
 import {
@@ -503,6 +504,18 @@ export function evaluateToolboxSchemasNarrow(toolDefinitions: readonly ToolDefin
 
   return pass("TOOLBOX_SCHEMAS_NARROW", "Toolbox schemas expose only action, workspaceId, and params.", {
     checkedTools: [...TOOLBOX_TOOLS]
+  });
+}
+
+export function evaluateArtifactToolboxActionInventory(): McpSelfTestCheck {
+  if (!SUPPORTED_ARTIFACT_ACTIONS.includes("save_architect_interview_output")) {
+    return fail("ARTIFACT_TOOLBOX_ACTION_INVENTORY", "artifact_toolbox action inventory is missing save_architect_interview_output.", {
+      supportedActions: [...SUPPORTED_ARTIFACT_ACTIONS]
+    });
+  }
+
+  return pass("ARTIFACT_TOOLBOX_ACTION_INVENTORY", "artifact_toolbox action inventory includes save_architect_interview_output.", {
+    actionName: "save_architect_interview_output"
   });
 }
 
@@ -994,6 +1007,7 @@ export async function runMcpSelfTest(options: RunMcpSelfTestOptions = {}): Promi
     );
     checks.push(await runRequiredCheck("SAFE_FACADE_SCHEMAS_NARROW", () => evaluateSafeFacadeSchemasNarrow()));
     checks.push(await runRequiredCheck("TOOLBOX_SCHEMAS_NARROW", () => evaluateToolboxSchemasNarrow()));
+    checks.push(await runRequiredCheck("ARTIFACT_TOOLBOX_ACTION_INVENTORY", () => evaluateArtifactToolboxActionInventory()));
     checks.push(await runRequiredCheck("TOOL_DESCRIPTIONS_SAFETY_COMPATIBLE", () => evaluateToolDescriptionsSafetyCompatible()));
     checks.push(
       await runRequiredCheck("DIAGNOSTICS_TOOLBOX_RUNTIME_STATUS_WORKS", () => runDiagnosticsToolboxRuntimeStatusWorksCheck(readConfig))

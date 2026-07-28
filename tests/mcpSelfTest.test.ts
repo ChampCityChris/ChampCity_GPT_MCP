@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import {
   evaluateRequiredReadToolsPresent,
+  evaluateArtifactToolboxActionInventory,
   runBlockedPathDeniedCheck,
   runDocsWriteDeniedWhenOffCheck,
   runMcpSelfTest,
@@ -136,6 +137,13 @@ describe("MCP protocol self-test", () => {
     assert.ok(checkIds.includes("BUILDER_REPORT_INDEX_WORKS"));
     assert.ok(checkIds.includes("BUILDER_REPORT_SUMMARY_WORKS"));
     assert.ok(checkIds.includes("EXPLICIT_MULTI_WORKSPACE_ROUTING_WORKS"));
+    assert.ok(checkIds.includes("ARTIFACT_TOOLBOX_ACTION_INVENTORY"));
+  });
+
+  it("includes the Architect Interview save action in artifact toolbox inventory", () => {
+    const check = evaluateArtifactToolboxActionInventory();
+
+    assert.equal(check.status, "PASS");
   });
 
   it("does not include unredacted local user paths in JSON output", async () => {

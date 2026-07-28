@@ -43,11 +43,6 @@ function authorityFor(workspace: ResolvedWorkspace, operation: WorkspaceOperatio
   let denialReason: WorkspaceAuthority["denialReason"];
 
   if (operation === "artifact_persistence") {
-    if (workspace.writePolicy === "git_required" && !workspace.gitDetected) {
-      allowed = false;
-      denialReason = "GIT_REQUIRED";
-    }
-
     if (
       workspace.writePolicy === "artifact_only" &&
       relativePath !== undefined &&

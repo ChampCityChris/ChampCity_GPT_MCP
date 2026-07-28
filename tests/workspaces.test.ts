@@ -111,8 +111,8 @@ describe("workspace registry", () => {
     assert.equal(catalog.workspaces[0]?.remoteMatchesExpected, "unknown");
     assert.equal(catalog.workspaces[0]?.writePolicy, "git_required");
     assert.equal(catalog.workspaces[0]?.gitDetected, false);
-    assert.equal(catalog.workspaces[0]?.artifactPersistenceAvailable, false);
-    assert.equal(catalog.workspaces[0]?.artifactPersistenceReason, "GIT_REQUIRED");
+    assert.equal(catalog.workspaces[0]?.artifactPersistenceAvailable, true);
+    assert.doesNotMatch(catalog.workspaces[0]?.artifactPersistenceReason ?? "", /git|GIT_REQUIRED/i);
     assert.equal(catalog.workspaces[0]?.gitMutationAvailable, false);
     assert.equal(catalog.workspaces[0]?.gitMutationReason, "GIT_REQUIRED");
     assert.equal(catalog.diagnostics.defaultWorkspaceId, "workspace_a");

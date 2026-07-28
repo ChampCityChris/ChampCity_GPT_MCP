@@ -370,9 +370,11 @@ function artifactPersistenceCapability(workspace: ConfiguredWorkspace, gitDetect
     };
   }
 
-  return gitDetected
-    ? { available: true, reason: "git_required workspace has a detected Git repository" }
-    : { available: false, reason: "GIT_REQUIRED" };
+  void gitDetected;
+  return {
+    available: true,
+    reason: "configured workspace permits artifact persistence through allowed-root, write-mode, OAuth, path-policy, and canonical-evidence controls"
+  };
 }
 
 function gitMutationCapability(workspace: ConfiguredWorkspace, gitDetected: boolean): { available: boolean; reason: string } {

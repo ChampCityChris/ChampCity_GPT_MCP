@@ -16,8 +16,10 @@ import {
 let tempRoot: string;
 let auditRoot: string;
 
-const intakePath = "planning/project/Project_Intake/PROJECT_INTAKE_fixture.json";
-const promptPath = "planning/project/Project_Architect_Interview_Prompts/PROJECT_ARCHITECT_INTERVIEW_PROMPT_fixture.json";
+const metadataOpen = "<!-- CHAMPCITY-METADATA";
+const metadataClose = "CHAMPCITY-METADATA -->";
+const intakePath = "planning/project/Project_Intake/PROJECT_INTAKE_fixture.md";
+const promptPath = "planning/project/Project_Architect_Interview_Prompts/PROJECT_ARCHITECT_INTERVIEW_PROMPT_fixture.md";
 const targetPath = "planning/project/Project_Architect_Interviews/PROJECT_ARCHITECT_INTERVIEW_fixture.md";
 const jsonSiblingPath = "planning/project/Project_Architect_Interviews/PROJECT_ARCHITECT_INTERVIEW_fixture.json";
 
@@ -62,8 +64,45 @@ function readFile(relativePath: string): string {
   return fs.readFileSync(path.join(tempRoot, ...relativePath.split("/")), "utf8");
 }
 
-function writeJson(relativePath: string, value: unknown): void {
-  writeFile(relativePath, `${JSON.stringify(value, null, 2)}\n`);
+function canonicalDocument(metadata: Record<string, unknown>, body: string): string {
+  return [metadataOpen, JSON.stringify(metadata, null, 2), metadataClose, "", `${body.replace(/\r\n?/gu, "\n").replace(/\n*$/u, "")}\n`].join("\n");
+}
+
+function baseIntake(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    artifactType: "project-intake",
+    artifactRevision: 1,
+    participationRole: "gatingReview",
+    identity: { "Project.ArtifactKey": "fixture_project" },
+    sourceRevisions: [],
+    workflowData: {
+      projectName: "Fixture Project",
+      projectSlug: "fixture_project"
+    },
+    documentDisposition: { status: "Approved", notes: "", reviewedAt: "2026-07-28T00:00:00.000Z" },
+    ...overrides
+  };
+}
+
+function basePrompt(overrides: Record<string, unknown> = {}, target = targetPath): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    artifactType: "project-architect-interview-prompt",
+    artifactRevision: 1,
+    participationRole: "nonReviewHandoff",
+    identity: { projectSlug: "fixture_project", "Project.ArtifactKey": "fixture_project" },
+    sourceRevisions: [{ path: intakePath, revision: 1 }],
+    workflowData: {
+      projectName: "Fixture Project",
+      projectSlug: "fixture_project",
+      architectOutputTargets: {
+        markdown: target
+      }
+    },
+    documentDisposition: { status: "Approved", notes: "", reviewedAt: null },
+    ...overrides
+  };
 }
 
 function config(writeMode: AppConfig["writeMode"] = "docs"): AppConfig {
@@ -93,35 +132,17 @@ function context(appConfig: AppConfig, scope = "files.read files.write") {
   return createToolboxRuntimeContext(appConfig, { scope });
 }
 
-function seedEvidence(overrides: { intake?: Record<string, unknown>; prompt?: Record<string, unknown>; target?: string } = {}): void {
-  const intake = {
-    artifactType: "project-intake",
-    artifactRevision: 1,
-    participationRole: "gatingReview",
-    projectArtifactKey: "fixture_project",
-    projectSlug: "fixture_project",
-    projectName: "Fixture Project",
-    documentDisposition: { status: "Approved" },
-    ...overrides.intake
-  };
-  writeJson(intakePath, intake);
-
-  const prompt = {
-    artifactType: "project-architect-interview-prompt",
-    artifactRevision: 1,
-    participationRole: "nonReviewHandoff",
-    projectArtifactKey: "fixture_project",
-    projectSlug: "fixture_project",
-    sourceRevisions: [{ path: intakePath, revision: 1 }],
-    workflowData: {
-      architectOutputTargets: {
-        markdown: overrides.target ?? targetPath
-      }
-    },
-    documentDisposition: { status: "Approved" },
-    ...overrides.prompt
-  };
-  writeJson(promptPath, prompt);
+function seedEvidence(
+  overrides: { intake?: Record<string, unknown>; prompt?: Record<string, unknown>; target?: string; intakeBody?: string; promptBody?: string } = {}
+): void {
+  writeFile(
+    intakePath,
+    canonicalDocument(baseIntake(overrides.intake), overrides.intakeBody ?? "# Project Intake: Fixture Project\n")
+  );
+  writeFile(
+    promptPath,
+    canonicalDocument(basePrompt(overrides.prompt, overrides.target), overrides.promptBody ?? "# Project Architect Interview Prompt: Fixture Project\n")
+  );
 }
 
 function interviewBody(label = "Initial"): string {
@@ -177,8 +198,11 @@ describe("artifact_toolbox.save_architect_interview_output", () => {
     assert.match(writeModeOff.error?.message ?? "", /writeMode docs, patch, or elevated/u);
   });
 
-  it("creates valid canonical Markdown on first save without a JSON sibling", async () => {
+  it("resolves canonical .md Intake and Prompt, then creates canonical Markdown without a JSON sibling", async () => {
     seedEvidence();
+    writeFile("planning/project/Project_Intake/PROJECT_INTAKE_fixture.json", "{broken");
+    writeFile("planning/project/Project_Architect_Interview_Prompts/PROJECT_ARCHITECT_INTERVIEW_PROMPT_fixture.json", "{broken");
+
     const result = await saveViaToolbox(interviewBody());
     const output = result.result as { status?: string; relativePath?: string; artifactRevision?: number; disposition?: string; sha256?: string };
     const saved = readFile(targetPath);
@@ -190,12 +214,19 @@ describe("artifact_toolbox.save_architect_interview_output", () => {
     assert.equal(output.artifactRevision, 1);
     assert.equal(output.disposition, "Pending");
     assert.match(output.sha256 ?? "", /^[a-f0-9]{64}$/u);
+    assert.ok(saved.startsWith(metadataOpen));
     assert.equal(parsed.artifactRevision, 1);
     assert.equal(parsed.disposition, "Pending");
+    assert.deepEqual(parsed.identity, { "Project.ArtifactKey": "fixture_project", projectSlug: "fixture_project" });
     assert.deepEqual(parsed.sourceRevisions, [
       { path: intakePath, revision: 1 },
       { path: promptPath, revision: 1 }
     ]);
+    assert.equal(parsed.metadata.workflowData && Object.keys(parsed.metadata.workflowData).length, 0);
+    assert.equal(parsed.metadata.documentDisposition.notes, "");
+    assert.equal(parsed.metadata.documentDisposition.reviewedAt, null);
+    assert.equal(parsed.body, interviewBody());
+    assert.doesNotMatch(saved, /Artifact\.Revision=|Document\.Status=|## Source Revisions/u);
     assert.equal(fs.existsSync(path.join(tempRoot, ...jsonSiblingPath.split("/"))), false);
   });
 
@@ -218,7 +249,7 @@ describe("artifact_toolbox.save_architect_interview_output", () => {
   it("refuses approved, malformed, and identity-mismatched existing targets", async () => {
     seedEvidence();
     await saveViaToolbox(interviewBody("Approved"));
-    writeFile(targetPath, readFile(targetPath).replace("Document.Status=Pending", "Document.Status=Approved"));
+    writeFile(targetPath, readFile(targetPath).replace("\"status\": \"Pending\"", "\"status\": \"Approved\""));
     const approved = await saveViaToolbox(interviewBody("Changed"));
 
     writeFile(targetPath, "# malformed\n");
@@ -226,7 +257,7 @@ describe("artifact_toolbox.save_architect_interview_output", () => {
 
     await fs.promises.unlink(path.join(tempRoot, ...targetPath.split("/")));
     await saveViaToolbox(interviewBody("Identity"));
-    writeFile(targetPath, readFile(targetPath).replace("projectSlug=fixture_project", "projectSlug=other_project"));
+    writeFile(targetPath, readFile(targetPath).replace("\"Project.ArtifactKey\": \"fixture_project\"", "\"Project.ArtifactKey\": \"other_project\""));
     const mismatched = await saveViaToolbox(interviewBody("Changed again"));
 
     assert.equal(approved.ok, false);
@@ -237,7 +268,7 @@ describe("artifact_toolbox.save_architect_interview_output", () => {
     assert.equal(mismatched.error?.code, "INVALID_INPUT");
   });
 
-  it("rejects caller authority fields, canonical body metadata, missing/conflicting evidence, and unsafe derived targets", async () => {
+  it("rejects caller authority fields, canonical body metadata, duplicate, malformed, stale, historical, and unsafe evidence", async () => {
     seedEvidence();
     const callerAuthority = await artifactToolbox(
       {
@@ -248,15 +279,24 @@ describe("artifact_toolbox.save_architect_interview_output", () => {
       config(),
       context(config())
     );
-    const bodyMetadata = await saveViaToolbox(`# Project Architect Interview
-Artifact.Revision=9
-${interviewBody()}`);
+    const bodyMetadata = await saveViaToolbox(`${metadataOpen}\n{}\n${metadataClose}\n\n${interviewBody()}`);
 
-    fs.rmSync(path.join(tempRoot, ...promptPath.split("/")));
-    const missingPrompt = await saveViaToolbox(interviewBody());
+    writeFile(
+      "planning/project/Project_Intake/PROJECT_INTAKE_duplicate.md",
+      canonicalDocument(baseIntake({ identity: { "Project.ArtifactKey": "duplicate_project" } }), "# Duplicate\n")
+    );
+    const duplicate = await saveViaToolbox(interviewBody());
 
-    seedEvidence({ prompt: { projectSlug: "conflicting_project" } });
-    const conflict = await saveViaToolbox(interviewBody());
+    fs.rmSync(path.join(tempRoot, "planning", "project", "Project_Intake"), { recursive: true, force: true });
+    fs.mkdirSync(path.join(tempRoot, "planning", "project", "Project_Intake"), { recursive: true });
+    writeFile(intakePath, `${metadataOpen}\n{broken\n${metadataClose}\n\n# Broken\n`);
+    const malformed = await saveViaToolbox(interviewBody());
+
+    seedEvidence({ prompt: { sourceRevisions: [{ path: intakePath, revision: 999 }] } });
+    const stale = await saveViaToolbox(interviewBody());
+
+    seedEvidence({ intake: { participationRole: "historical" } });
+    const historical = await saveViaToolbox(interviewBody());
 
     seedEvidence({ target: "../escape.md" });
     const unsafeTarget = await saveViaToolbox(interviewBody());
@@ -265,12 +305,27 @@ ${interviewBody()}`);
     assert.equal(callerAuthority.error?.code, "INVALID_INPUT");
     assert.equal(bodyMetadata.ok, false);
     assert.equal(bodyMetadata.error?.code, "INVALID_INPUT");
-    assert.equal(missingPrompt.ok, false);
-    assert.equal(missingPrompt.error?.code, "INVALID_INPUT");
-    assert.equal(conflict.ok, false);
-    assert.equal(conflict.error?.code, "INVALID_INPUT");
+    assert.equal(duplicate.ok, false);
+    assert.equal(duplicate.error?.code, "INVALID_INPUT");
+    assert.equal(malformed.ok, false);
+    assert.equal(malformed.error?.code, "INVALID_INPUT");
+    assert.equal(stale.ok, false);
+    assert.equal(stale.error?.code, "INVALID_INPUT");
+    assert.equal(historical.ok, false);
+    assert.equal(historical.error?.code, "INVALID_INPUT");
     assert.equal(unsafeTarget.ok, false);
     assert.equal(unsafeTarget.error?.code, "PATH_DENIED");
+  });
+
+  it("permits artifact persistence for configured non-Git workspaces without using Git as authority", async () => {
+    fs.rmSync(path.join(tempRoot, ".git"), { recursive: true, force: true });
+    seedEvidence();
+    const appConfig = config("docs");
+    const result = await saveViaToolbox(interviewBody("Non Git"), appConfig);
+
+    assert.equal(result.ok, true);
+    assert.equal((result.result as { status?: string }).status, "saved");
+    assert.equal(parseArchitectInterviewDocument(readFile(targetPath)).body, interviewBody("Non Git"));
   });
 
   it("rejects evidence-change races and restores original bytes after verification failure", async () => {
@@ -286,9 +341,7 @@ ${interviewBody()}`);
         appConfig,
         {
           beforeEvidenceRecheck: () => {
-            const prompt = JSON.parse(readFile(promptPath)) as Record<string, unknown>;
-            prompt.artifactRevision = 2;
-            writeJson(promptPath, prompt);
+            writeFile(promptPath, canonicalDocument(basePrompt({ artifactRevision: 2 }), "# Prompt changed\n"));
           }
         }
       );
@@ -296,9 +349,7 @@ ${interviewBody()}`);
       raceError = error;
     }
 
-    const prompt = JSON.parse(readFile(promptPath)) as Record<string, unknown>;
-    prompt.artifactRevision = 1;
-    writeJson(promptPath, prompt);
+    writeFile(promptPath, canonicalDocument(basePrompt(), "# Prompt restored\n"));
 
     let verificationError: unknown;
     try {
@@ -317,7 +368,7 @@ ${interviewBody()}`);
 
     const audit = fs.readFileSync(path.join(auditRoot, "audit.log"), "utf8");
     assert.match(String(raceError), /changed before/u);
-    assert.match(String(verificationError), /canonical|valid/u);
+    assert.match(String(verificationError), /canonical|valid/iu);
     assert.equal(readFile(targetPath), original);
     assert.doesNotMatch(audit, /Original substantive interview body|Corrupt substantive interview body/u);
     assert.doesNotMatch(audit, new RegExp(tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));

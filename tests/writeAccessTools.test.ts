@@ -291,7 +291,7 @@ describe("write approval token enforcement", () => {
     );
   });
 
-  it("non-Git git_required workspaces deny artifact and patch writes even when legacy requireGitRoot is false", async () => {
+  it("non-Git git_required workspaces permit artifact writes but still deny Git-backed patch writes", async () => {
     const config = testConfig({
       requireGitRoot: false,
       workspaces: [
@@ -309,14 +309,11 @@ describe("write approval token enforcement", () => {
       patchWritesAllowed: true
     });
 
-    await assert.rejects(
-      () => writeMarkdownArtifact({ root: tempRoot, relativePath: "planning/note.md", content: "# Note\n" }, config),
-      (error: unknown) => (error as { code?: string }).code === "GIT_REQUIRED"
-    );
-    await assert.rejects(
-      () => writeJsonArtifact({ root: tempRoot, relativePath: "planning/data.json", content: "{}" }, config),
-      (error: unknown) => (error as { code?: string }).code === "GIT_REQUIRED"
-    );
+    const markdown = await writeMarkdownArtifact({ root: tempRoot, relativePath: "planning/note.md", content: "# Note\n" }, config);
+    const json = await writeJsonArtifact({ root: tempRoot, relativePath: "planning/data.json", content: "{}" }, config);
+
+    assert.equal(markdown.writePolicy, "git_required");
+    assert.equal(json.writePolicy, "git_required");
     await assert.rejects(
       () => applyApprovedPatch({ root: tempRoot, patch: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n" }, config),
       (error: unknown) => (error as { code?: string }).code === "GIT_REQUIRED"

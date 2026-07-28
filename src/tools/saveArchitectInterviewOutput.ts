@@ -18,9 +18,13 @@ const INTAKE_DIR = "planning/project/Project_Intake";
 const PROMPT_DIR = "planning/project/Project_Architect_Interview_Prompts";
 const INTERVIEW_DIR = "planning/project/Project_Architect_Interviews";
 const TARGET_PREFIX = `${INTERVIEW_DIR}/`;
+const METADATA_OPEN_DELIMITER = "<!-- CHAMPCITY-METADATA";
+const METADATA_CLOSE_DELIMITER = "CHAMPCITY-METADATA -->";
+const PARTICIPATION_ROLES = ["gatingReview", "compoundGatingReview", "nonReviewHandoff", "contextOnly", "historical"] as const;
+const DOCUMENT_DISPOSITION_STATUSES = ["Pending", "Approved", "Rejected", "RevisionRequested"] as const;
 
 const CANONICAL_BODY_LINE_PATTERN =
-  /^(?:---|\+\+\+|Artifact\.Revision\s*=|participationRole\s*=|schemaVersion\s*=|artifactType\s*=|Project\.ArtifactKey\s*=|projectSlug\s*=|workflowData\s*=|Document\.(?:Status|Notes|ReviewedAt)\s*=|disposition\.)/imu;
+  /^(?:<!--\s*CHAMPCITY-METADATA|CHAMPCITY-METADATA\s*-->|---|\+\+\+|Artifact\.Revision\s*=|participationRole\s*=|schemaVersion\s*=|artifactType\s*=|Project\.ArtifactKey\s*=|projectSlug\s*=|workflowData\s*=|Document\.(?:Status|Notes|ReviewedAt)\s*=|disposition\.)/imu;
 
 export const SaveArchitectInterviewOutputParamsSchema = z
   .object({
@@ -48,18 +52,37 @@ export interface SaveArchitectInterviewOutputResult {
   sha256: string;
 }
 
-interface EvidenceFile {
+interface SourceRevision {
+  path: string;
+  revision: number;
+}
+
+interface CanonicalDocumentMetadata {
+  schemaVersion: 1;
+  artifactType: string;
+  artifactRevision: number;
+  participationRole: (typeof PARTICIPATION_ROLES)[number];
+  identity: Record<string, unknown>;
+  sourceRevisions: SourceRevision[];
+  workflowData: Record<string, unknown>;
+  documentDisposition: {
+    status: (typeof DOCUMENT_DISPOSITION_STATUSES)[number];
+    notes: string;
+    reviewedAt: string | null;
+  };
+}
+
+interface ParsedCanonicalMarkdownDocument {
+  metadata: CanonicalDocumentMetadata;
+  bodyMarkdown: string;
+}
+
+interface EvidenceFile extends ParsedCanonicalMarkdownDocument {
   relativePath: string;
   absolutePath: string;
   raw: string;
   sha256: string;
-  metadata: Record<string, unknown>;
   artifactRevision: number;
-}
-
-interface Identity {
-  projectSlug: string;
-  projectArtifactKey?: string;
 }
 
 interface EvidenceSnapshot {
@@ -67,7 +90,7 @@ interface EvidenceSnapshot {
   root: string;
   intake: EvidenceFile;
   prompt: EvidenceFile;
-  identity: Identity;
+  identity: Record<string, unknown>;
   targetRelativePath: string;
   targetAbsolutePath: string;
   targetState: TargetState;
@@ -80,17 +103,13 @@ interface TargetState {
   parsed?: ParsedInterviewDocument;
 }
 
-interface ParsedInterviewDocument {
+export interface ParsedInterviewDocument {
   artifactRevision: number;
   disposition: "Pending" | "Approved" | string;
   body: string;
-  identity: Identity;
+  identity: Record<string, unknown>;
   sourceRevisions: SourceRevision[];
-}
-
-interface SourceRevision {
-  path: string;
-  revision: number;
+  metadata: CanonicalDocumentMetadata;
 }
 
 export interface SaveArchitectInterviewOutputTestHooks {
@@ -110,52 +129,147 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function positiveRevision(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-    throw new AppError("INVALID_INPUT", `${label} must have a positive artifact revision.`);
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new AppError("INVALID_INPUT", `Canonical metadata requires ${field}.`);
   }
   return value;
 }
 
-function dispositionStatus(metadata: Record<string, unknown>): string | undefined {
-  const disposition = isObject(metadata.documentDisposition) ? metadata.documentDisposition : isObject(metadata.disposition) ? metadata.disposition : undefined;
-  return stringValue(disposition?.status);
+function requiredPositiveInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new AppError("INVALID_INPUT", `Canonical metadata requires positive integer ${field}.`);
+  }
+  return value;
 }
 
-async function sha256File(absolutePath: string): Promise<string> {
-  return crypto.createHash("sha256").update(await fs.readFile(absolutePath)).digest("hex");
+function requiredRecord(value: unknown, field: string): Record<string, unknown> {
+  if (!isObject(value)) {
+    throw new AppError("INVALID_INPUT", `Canonical metadata requires object ${field}.`);
+  }
+  return value;
+}
+
+function requiredParticipationRole(value: unknown): CanonicalDocumentMetadata["participationRole"] {
+  if (PARTICIPATION_ROLES.includes(value as CanonicalDocumentMetadata["participationRole"])) {
+    return value as CanonicalDocumentMetadata["participationRole"];
+  }
+  throw new AppError("INVALID_INPUT", "Canonical metadata participationRole is not supported.");
+}
+
+function sourceRevisionArray(value: unknown): SourceRevision[] {
+  if (!Array.isArray(value)) {
+    throw new AppError("INVALID_INPUT", "Canonical metadata sourceRevisions must be an array.");
+  }
+  return value.map((entry) => {
+    const record = requiredRecord(entry, "sourceRevisions entry");
+    return {
+      path: normalizeSlashPath(requiredString(record.path, "sourceRevisions.path")),
+      revision: requiredPositiveInteger(record.revision, "sourceRevisions.revision")
+    };
+  });
+}
+
+function dispositionValue(value: unknown): CanonicalDocumentMetadata["documentDisposition"] {
+  const record = requiredRecord(value, "documentDisposition");
+  const status = record.status;
+  if (!DOCUMENT_DISPOSITION_STATUSES.includes(status as CanonicalDocumentMetadata["documentDisposition"]["status"])) {
+    throw new AppError("INVALID_INPUT", "Canonical metadata documentDisposition.status is not supported.");
+  }
+  const notes = typeof record.notes === "string" ? record.notes : "";
+  const reviewedAt = record.reviewedAt === null || typeof record.reviewedAt === "string" ? record.reviewedAt : null;
+  return { status: status as CanonicalDocumentMetadata["documentDisposition"]["status"], notes, reviewedAt };
+}
+
+function validateCanonicalMetadata(input: unknown): CanonicalDocumentMetadata {
+  const value = requiredRecord(input, "metadata");
+  if (value.schemaVersion !== 1) {
+    throw new AppError("INVALID_INPUT", "Canonical metadata schemaVersion must be 1.");
+  }
+
+  return {
+    schemaVersion: 1,
+    artifactType: requiredString(value.artifactType, "artifactType"),
+    artifactRevision: requiredPositiveInteger(value.artifactRevision, "artifactRevision"),
+    participationRole: requiredParticipationRole(value.participationRole),
+    identity: requiredRecord(value.identity, "identity"),
+    sourceRevisions: sourceRevisionArray(value.sourceRevisions),
+    workflowData: requiredRecord(value.workflowData, "workflowData"),
+    documentDisposition: dispositionValue(value.documentDisposition)
+  };
+}
+
+function parseCanonicalMarkdownDocument(content: string, relativePath = "document"): ParsedCanonicalMarkdownDocument {
+  const withoutBom = content.startsWith("\uFEFF") ? content.slice(1) : content;
+  if (!withoutBom.startsWith(METADATA_OPEN_DELIMITER)) {
+    throw new AppError("INVALID_INPUT", "Canonical document must begin with CHAMPCITY metadata.", { relativePath });
+  }
+
+  const closeIndex = withoutBom.indexOf(METADATA_CLOSE_DELIMITER);
+  if (closeIndex < 0) {
+    throw new AppError("INVALID_INPUT", "Canonical document metadata block is missing its closing delimiter.", { relativePath });
+  }
+  if (withoutBom.indexOf(METADATA_OPEN_DELIMITER, METADATA_OPEN_DELIMITER.length) >= 0) {
+    throw new AppError("INVALID_INPUT", "Canonical document contains a duplicate metadata block.", { relativePath });
+  }
+  if (withoutBom.indexOf(METADATA_CLOSE_DELIMITER, closeIndex + METADATA_CLOSE_DELIMITER.length) >= 0) {
+    throw new AppError("INVALID_INPUT", "Canonical document contains more than one metadata closing delimiter.", { relativePath });
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(withoutBom.slice(METADATA_OPEN_DELIMITER.length, closeIndex).trim());
+  } catch (error) {
+    throw new AppError("INVALID_INPUT", "Canonical document metadata is malformed JSON.", {
+      relativePath,
+      cause: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  return {
+    metadata: validateCanonicalMetadata(parsed),
+    bodyMarkdown: withoutBom.slice(closeIndex + METADATA_CLOSE_DELIMITER.length).replace(/^(?:\r?\n){1,2}/u, "")
+  };
+}
+
+function normalizeMarkdownBody(value: string): string {
+  return `${value.replace(/\r\n?/gu, "\n").replace(/\n*$/u, "")}\n`;
+}
+
+function serializeCanonicalMarkdownDocument(metadata: CanonicalDocumentMetadata, bodyMarkdown: string): string {
+  const normalized = validateCanonicalMetadata(metadata);
+  return [
+    METADATA_OPEN_DELIMITER,
+    JSON.stringify(normalized, null, 2),
+    METADATA_CLOSE_DELIMITER,
+    "",
+    normalizeMarkdownBody(bodyMarkdown)
+  ].join("\n");
 }
 
 function sha256Text(value: string): string {
   return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-async function readJsonEvidence(root: string, relativePath: string): Promise<EvidenceFile> {
+async function readMarkdownEvidence(root: string, relativePath: string): Promise<EvidenceFile | undefined> {
   const absolutePath = path.join(root, ...relativePath.split("/"));
   const raw = await fs.readFile(absolutePath, "utf8");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw) as unknown;
-  } catch (error) {
-    throw new AppError("INVALID_INPUT", "Canonical evidence JSON is malformed.", {
-      relativePath,
-      cause: error instanceof Error ? error.message : String(error)
-    });
+  if (!raw.startsWith(METADATA_OPEN_DELIMITER)) {
+    return undefined;
   }
-  if (!isObject(parsed)) {
-    throw new AppError("INVALID_INPUT", "Canonical evidence JSON must be an object.", { relativePath });
-  }
+
+  const parsed = parseCanonicalMarkdownDocument(raw, relativePath);
   return {
+    ...parsed,
     relativePath,
     absolutePath,
     raw,
     sha256: sha256Text(raw),
-    metadata: parsed,
-    artifactRevision: positiveRevision(parsed.artifactRevision, relativePath)
+    artifactRevision: parsed.metadata.artifactRevision
   };
 }
 
-async function listJsonEvidence(root: string, relativeDir: string): Promise<string[]> {
+async function listMarkdownEvidence(root: string, relativeDir: string): Promise<string[]> {
   const absoluteDir = path.join(root, ...relativeDir.split("/"));
   let entries: fsSync.Dirent[];
   try {
@@ -168,71 +282,56 @@ async function listJsonEvidence(root: string, relativeDir: string): Promise<stri
   }
 
   return entries
-    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".md"))
     .map((entry) => `${relativeDir}/${entry.name}`)
     .sort((left, right) => left.localeCompare(right));
 }
 
-function assertCurrentApprovedIntake(evidence: EvidenceFile): void {
-  if (evidence.metadata.artifactType !== "project-intake") {
-    throw new AppError("INVALID_INPUT", "Project Intake evidence has the wrong artifactType.", { relativePath: evidence.relativePath });
-  }
-  if (evidence.metadata.participationRole === "historical") {
-    throw new AppError("INVALID_INPUT", "Historical Project Intake evidence cannot be used.", { relativePath: evidence.relativePath });
-  }
-  if (dispositionStatus(evidence.metadata) !== "Approved") {
-    throw new AppError("INVALID_INPUT", "Project Intake evidence must be Approved.", { relativePath: evidence.relativePath });
-  }
+function isCurrentApprovedIntake(evidence: EvidenceFile): boolean {
+  return (
+    evidence.metadata.artifactType === "project-intake" &&
+    evidence.metadata.participationRole !== "historical" &&
+    evidence.metadata.artifactRevision > 0 &&
+    evidence.metadata.documentDisposition.status === "Approved"
+  );
 }
 
-function sourceRevisions(metadata: Record<string, unknown>): SourceRevision[] {
-  if (!Array.isArray(metadata.sourceRevisions)) {
-    return [];
-  }
-  return metadata.sourceRevisions
-    .filter(isObject)
-    .map((entry) => ({
-      path: normalizeSlashPath(String(entry.path ?? "")),
-      revision: Number(entry.revision)
-    }))
-    .filter((entry) => entry.path && Number.isInteger(entry.revision) && entry.revision > 0);
+function sourceRevisions(metadata: CanonicalDocumentMetadata): SourceRevision[] {
+  return metadata.sourceRevisions.map((entry) => ({
+    path: normalizeSlashPath(entry.path),
+    revision: entry.revision
+  }));
 }
 
-function promptWorkflowData(metadata: Record<string, unknown>): Record<string, unknown> {
-  if (!isObject(metadata.workflowData)) {
-    throw new AppError("INVALID_INPUT", "Architect Interview Prompt must include workflowData.");
-  }
+function promptWorkflowData(metadata: CanonicalDocumentMetadata): Record<string, unknown> {
   return metadata.workflowData;
 }
 
-function assertCurrentApprovedPrompt(prompt: EvidenceFile, intake: EvidenceFile): void {
-  if (prompt.metadata.artifactType !== "project-architect-interview-prompt") {
-    throw new AppError("INVALID_INPUT", "Architect Interview Prompt evidence has the wrong artifactType.", { relativePath: prompt.relativePath });
+function isCurrentApprovedPrompt(prompt: EvidenceFile, intake: EvidenceFile): boolean {
+  if (
+    prompt.metadata.artifactType !== "project-architect-interview-prompt" ||
+    prompt.metadata.participationRole !== "nonReviewHandoff" ||
+    prompt.metadata.documentDisposition.status !== "Approved"
+  ) {
+    return false;
   }
-  if (prompt.metadata.participationRole !== "nonReviewHandoff") {
-    throw new AppError("INVALID_INPUT", "Architect Interview Prompt must use participationRole nonReviewHandoff.", { relativePath: prompt.relativePath });
-  }
-  if (dispositionStatus(prompt.metadata) !== "Approved") {
-    throw new AppError("INVALID_INPUT", "Architect Interview Prompt evidence must be Approved.", { relativePath: prompt.relativePath });
-  }
+
   const matchedSource = sourceRevisions(prompt.metadata).some(
     (entry) => entry.path === intake.relativePath && entry.revision === intake.artifactRevision
   );
   if (!matchedSource) {
-    throw new AppError("INVALID_INPUT", "Architect Interview Prompt does not link to the current Approved Project Intake revision.", {
-      promptPath: prompt.relativePath,
-      intakePath: intake.relativePath,
-      intakeRevision: intake.artifactRevision
-    });
+    return false;
   }
+
   const targets = isObject(promptWorkflowData(prompt.metadata).architectOutputTargets)
-    ? promptWorkflowData(prompt.metadata).architectOutputTargets as Record<string, unknown>
+    ? (promptWorkflowData(prompt.metadata).architectOutputTargets as Record<string, unknown>)
     : undefined;
-  if (!stringValue(targets?.markdown)) {
-    throw new AppError("INVALID_INPUT", "Architect Interview Prompt must define workflowData.architectOutputTargets.markdown.", {
-      relativePath: prompt.relativePath
-    });
-  }
+  return Boolean(stringValue(targets?.markdown));
+}
+
+async function currentCanonicalEvidence(root: string, relativeDir: string): Promise<EvidenceFile[]> {
+  const candidates = await Promise.all((await listMarkdownEvidence(root, relativeDir)).map((entry) => readMarkdownEvidence(root, entry)));
+  return candidates.filter((entry): entry is EvidenceFile => Boolean(entry));
 }
 
 function oneEvidence(candidates: EvidenceFile[], label: string): EvidenceFile {
@@ -245,28 +344,35 @@ function oneEvidence(candidates: EvidenceFile[], label: string): EvidenceFile {
   return candidates[0];
 }
 
-function identityFromEvidence(intake: EvidenceFile, prompt: EvidenceFile): Identity {
-  const intakeSlug = stringValue(intake.metadata.projectSlug);
-  const promptSlug = stringValue(prompt.metadata.projectSlug);
-  if (intakeSlug && promptSlug && intakeSlug !== promptSlug) {
-    throw new AppError("INVALID_INPUT", "Project slug identity conflicts between Intake and Prompt evidence.");
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  if (isObject(value)) {
+    return `{${Object.keys(value)
+      .sort((left, right) => left.localeCompare(right))
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function identityFromEvidence(intake: EvidenceFile, prompt: EvidenceFile): Record<string, unknown> {
+  const identity: Record<string, unknown> = {};
+  for (const source of [intake.metadata.identity, prompt.metadata.identity]) {
+    for (const [key, value] of Object.entries(source)) {
+      if (key in identity && stableJson(identity[key]) !== stableJson(value)) {
+        throw new AppError("INVALID_INPUT", `Project identity conflicts between Intake and Prompt evidence for ${key}.`);
+      }
+      identity[key] = value;
+    }
   }
 
-  const intakeArtifactKey = stringValue(intake.metadata.projectArtifactKey) ?? stringValue(intake.metadata["Project.ArtifactKey"]);
-  const promptArtifactKey = stringValue(prompt.metadata.projectArtifactKey) ?? stringValue(prompt.metadata["Project.ArtifactKey"]);
-  if (intakeArtifactKey && promptArtifactKey && intakeArtifactKey !== promptArtifactKey) {
-    throw new AppError("INVALID_INPUT", "Project ArtifactKey identity conflicts between Intake and Prompt evidence.");
+  if (Object.keys(identity).length === 0) {
+    throw new AppError("INVALID_INPUT", "Project identity must include at least one canonical identity value.");
   }
 
-  const projectSlug = promptSlug ?? intakeSlug ?? promptArtifactKey ?? intakeArtifactKey;
-  if (!projectSlug) {
-    throw new AppError("INVALID_INPUT", "Project identity must include projectSlug or Project.ArtifactKey.");
-  }
-
-  return {
-    projectSlug,
-    ...(promptArtifactKey ?? intakeArtifactKey ? { projectArtifactKey: promptArtifactKey ?? intakeArtifactKey } : {})
-  };
+  return identity;
 }
 
 function targetFromPrompt(root: string, prompt: EvidenceFile): { relativePath: string; absolutePath: string } {
@@ -339,64 +445,25 @@ async function assertTargetSafe(root: string, absolutePath: string, relativePath
   }
 }
 
-function normalizeMarkdownBody(value: string): string {
-  return `${value.replace(/\r\n/gu, "\n").trim()}\n`;
-}
-
-function field(content: string, key: string): string | undefined {
-  const escaped = key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  return new RegExp(`^${escaped}\\s*=\\s*(?<value>.*)$`, "imu").exec(content)?.groups?.value.trim();
-}
-
-function parseRevisionLine(line: string): SourceRevision | undefined {
-  const match = /^-\s*path:\s*(?<path>\S+)\s+revision:\s*(?<revision>\d+)\s*$/u.exec(line.trim());
-  return match?.groups ? { path: normalizeSlashPath(match.groups.path), revision: Number(match.groups.revision) } : undefined;
-}
-
-function section(content: string, heading: string): string | undefined {
-  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const match = new RegExp(`^##\\s+${escaped}\\s*$([\\s\\S]*?)(?=^##\\s+|(?![\\s\\S]))`, "imu").exec(content);
-  return match?.[1]?.trim();
-}
-
 export function parseArchitectInterviewDocument(content: string): ParsedInterviewDocument {
-  const normalized = content.replace(/\r\n/gu, "\n");
-  if (field(normalized, "schemaVersion") !== "1" || field(normalized, "artifactType") !== "project-architect-interview") {
+  const parsed = parseCanonicalMarkdownDocument(content);
+  if (parsed.metadata.artifactType !== "project-architect-interview") {
     throw new AppError("INVALID_INPUT", "Existing Architect Interview target is not a valid canonical Interview document.");
   }
-  const revision = Number(field(normalized, "Artifact.Revision"));
-  if (!Number.isInteger(revision) || revision <= 0) {
-    throw new AppError("INVALID_INPUT", "Existing Architect Interview target has an invalid revision.");
-  }
-  if (field(normalized, "participationRole") !== "gatingReview") {
+  if (parsed.metadata.participationRole !== "gatingReview") {
     throw new AppError("INVALID_INPUT", "Existing Architect Interview target has the wrong participationRole.");
   }
-
-  const sourceSection = section(normalized, "Source Revisions");
-  const sourceRevisionEntries = sourceSection
-    ?.split("\n")
-    .map(parseRevisionLine)
-    .filter((entry): entry is SourceRevision => Boolean(entry)) ?? [];
-  if (sourceRevisionEntries.length !== 2) {
+  if (parsed.metadata.sourceRevisions.length !== 2) {
     throw new AppError("INVALID_INPUT", "Existing Architect Interview target has invalid source revisions.");
   }
 
-  const bodyMatch = /^##\s+Source Revisions\s*$[\s\S]*?(?=^##\s+)/imu.exec(normalized);
-  const bodyStart = bodyMatch ? bodyMatch.index + bodyMatch[0].length : -1;
-  const dispositionIndex = normalized.search(/^##\s+Document Disposition\s*$/imu);
-  if (bodyStart < 0 || dispositionIndex < 0 || dispositionIndex <= bodyStart) {
-    throw new AppError("INVALID_INPUT", "Existing Architect Interview target has an invalid body envelope.");
-  }
-
   return {
-    artifactRevision: revision,
-    disposition: field(normalized, "Document.Status") ?? "",
-    body: normalizeMarkdownBody(normalized.slice(bodyStart, dispositionIndex)),
-    identity: {
-      projectSlug: field(normalized, "projectSlug") ?? "",
-      ...(field(normalized, "Project.ArtifactKey") ? { projectArtifactKey: field(normalized, "Project.ArtifactKey") } : {})
-    },
-    sourceRevisions: sourceRevisionEntries
+    artifactRevision: parsed.metadata.artifactRevision,
+    disposition: parsed.metadata.documentDisposition.status,
+    body: normalizeMarkdownBody(parsed.bodyMarkdown),
+    identity: parsed.metadata.identity,
+    sourceRevisions: sourceRevisions(parsed.metadata),
+    metadata: parsed.metadata
   };
 }
 
@@ -424,19 +491,8 @@ async function readTargetState(absolutePath: string): Promise<TargetState> {
 async function resolveEvidence(workspaceId: string, config: AppConfig): Promise<EvidenceSnapshot> {
   const workspace = resolveWorkspace(workspaceId, config);
   const root = workspace.root;
-  const intakeFiles = await Promise.all((await listJsonEvidence(root, INTAKE_DIR)).map((entry) => readJsonEvidence(root, entry)));
-  const intakeCandidates = intakeFiles.filter((entry) => {
-    assertCurrentApprovedIntake(entry);
-    return true;
-  });
-  const intake = oneEvidence(intakeCandidates, "Project Intake");
-
-  const promptFiles = await Promise.all((await listJsonEvidence(root, PROMPT_DIR)).map((entry) => readJsonEvidence(root, entry)));
-  const promptCandidates = promptFiles.filter((entry) => {
-    assertCurrentApprovedPrompt(entry, intake);
-    return true;
-  });
-  const prompt = oneEvidence(promptCandidates, "Architect Interview Prompt");
+  const intake = oneEvidence((await currentCanonicalEvidence(root, INTAKE_DIR)).filter(isCurrentApprovedIntake), "Project Intake");
+  const prompt = oneEvidence((await currentCanonicalEvidence(root, PROMPT_DIR)).filter((entry) => isCurrentApprovedPrompt(entry, intake)), "Architect Interview Prompt");
   const target = targetFromPrompt(root, prompt);
   await assertTargetSafe(root, target.absolutePath, target.relativePath);
 
@@ -460,11 +516,11 @@ function expectedSourceRevisions(evidence: EvidenceSnapshot): SourceRevision[] {
 }
 
 function sameSourceRevisions(left: SourceRevision[], right: SourceRevision[]): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return stableJson(left) === stableJson(right);
 }
 
-function sameIdentity(left: Identity, right: Identity): boolean {
-  return left.projectSlug === right.projectSlug && (left.projectArtifactKey ?? "") === (right.projectArtifactKey ?? "");
+function sameIdentity(left: Record<string, unknown>, right: Record<string, unknown>): boolean {
+  return stableJson(left) === stableJson(right);
 }
 
 function assertExistingTargetCompatible(existing: ParsedInterviewDocument, evidence: EvidenceSnapshot): void {
@@ -485,37 +541,29 @@ function assertExistingTargetCompatible(existing: ParsedInterviewDocument, evide
   }
 }
 
-function titleFromEvidence(evidence: EvidenceSnapshot): string {
-  return stringValue(evidence.intake.metadata.projectName) ?? evidence.identity.projectSlug;
+function buildMetadata(evidence: EvidenceSnapshot, artifactRevision: number): CanonicalDocumentMetadata {
+  return validateCanonicalMetadata({
+    schemaVersion: 1,
+    artifactType: "project-architect-interview",
+    artifactRevision,
+    participationRole: "gatingReview",
+    identity: evidence.identity,
+    sourceRevisions: expectedSourceRevisions(evidence),
+    workflowData: {},
+    documentDisposition: {
+      status: "Pending",
+      notes: "",
+      reviewedAt: null
+    }
+  });
 }
 
 function buildDocument(evidence: EvidenceSnapshot, body: string, artifactRevision: number): string {
-  const artifactKey = evidence.identity.projectArtifactKey ? `Project.ArtifactKey=${evidence.identity.projectArtifactKey}\n` : "";
-  const sources = expectedSourceRevisions(evidence)
-    .map((entry) => `- path: ${entry.path} revision: ${entry.revision}`)
-    .join("\n");
-  return `# Project Architect Interview - ${titleFromEvidence(evidence)}
-schemaVersion=1
-artifactType=project-architect-interview
-Artifact.Revision=${artifactRevision}
-participationRole=gatingReview
-projectSlug=${evidence.identity.projectSlug}
-${artifactKey}workflowData={}
-
-## Source Revisions
-${sources}
-
-${normalizeMarkdownBody(body)}
-## Document Disposition
-
-Document.Status=Pending
-Document.Notes=
-Document.ReviewedAt=null
-`;
+  return serializeCanonicalMarkdownDocument(buildMetadata(evidence, artifactRevision), body);
 }
 
 function comparableEvidence(evidence: EvidenceSnapshot): string {
-  return JSON.stringify({
+  return stableJson({
     workspaceId: evidence.workspaceId,
     root: evidence.root,
     intakePath: evidence.intake.relativePath,
@@ -550,6 +598,7 @@ async function installAndVerify(
     const parsed = parseArchitectInterviewDocument(reread);
     if (
       reread !== content ||
+      !reread.startsWith(METADATA_OPEN_DELIMITER) ||
       !sameIdentity(parsed.identity, evidence.identity) ||
       !sameSourceRevisions(parsed.sourceRevisions, expectedSourceRevisions(evidence)) ||
       parsed.disposition !== "Pending"

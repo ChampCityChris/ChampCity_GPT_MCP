@@ -10,6 +10,7 @@ import { createToolboxRuntimeContext } from "../src/server/registerTools.js";
 import { createMarkdownArtifact } from "../src/tools/createMarkdownArtifact.js";
 import { artifactToolbox } from "../src/tools/domainToolboxes.js";
 import { MAX_MARKDOWN_ARTIFACT_CONTENT_LENGTH } from "../src/tools/inputLimits.js";
+import { SUPPORTED_ARTIFACT_ACTIONS } from "../src/tools/toolboxActionPolicy.js";
 
 let tempRoot: string;
 let auditRoot: string;
@@ -105,6 +106,43 @@ function listTemporaryFiles(directory: string): string[] {
   return fs.existsSync(directory) ? fs.readdirSync(directory).filter((name) => /\.tmp$/u.test(name)) : [];
 }
 
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function concurrentCreates(contentA: string, contentB: string) {
+  initRepo();
+  const config = testConfig("docs");
+  const ready = deferred<void>();
+  let waiting = 0;
+  const waitForBoth = async () => {
+    waiting += 1;
+    if (waiting === 2) {
+      ready.resolve();
+    }
+    await ready.promise;
+  };
+
+  const first = createMarkdownArtifact(
+    { workspaceId: "neutral_workspace", relativePath: "docs/concurrent.md", content: contentA },
+    config,
+    { beforeFinalInstall: waitForBoth }
+  );
+  const second = createMarkdownArtifact(
+    { workspaceId: "neutral_workspace", relativePath: "docs/concurrent.md", content: contentB },
+    config,
+    { beforeFinalInstall: waitForBoth }
+  );
+
+  return Promise.allSettled([first, second]);
+}
+
 describe("artifact_toolbox.create_markdown_artifact", () => {
   it("creates a missing neutral Markdown target with exact opaque content and generic response fields", async () => {
     initRepo();
@@ -174,6 +212,36 @@ describe("artifact_toolbox.create_markdown_artifact", () => {
     assert.equal(fs.statSync(absolutePath).mtime.getTime(), oldTime.getTime());
   });
 
+  it("allows only one concurrent missing-target create with different bytes and preserves the winner", async () => {
+    const results = await concurrentCreates("First winner\n", "Second winner\n");
+    const saved = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+
+    assert.equal(saved.length, 1);
+    assert.equal(rejected.length, 1);
+    assert.equal(saved[0].status, "fulfilled");
+    assert.equal(saved[0].value.status, "saved");
+    assert.equal(rejected[0].status, "rejected");
+    assert.match(String(rejected[0].reason), /already exists with different content/u);
+    assert.equal(["First winner\n", "Second winner\n"].includes(fs.readFileSync(target("docs/concurrent.md"), "utf8")), true);
+    assert.deepEqual(listTemporaryFiles(path.dirname(target("docs/concurrent.md"))), []);
+  });
+
+  it("returns saved plus already_saved for concurrent identical missing-target creates without rewriting the winner", async () => {
+    const results = await concurrentCreates("Same bytes\n", "Same bytes\n");
+    const fulfilled = results.map((result) => {
+      assert.equal(result.status, "fulfilled");
+      return result.value.status;
+    });
+    const absolutePath = target("docs/concurrent.md");
+    const mtime = fs.statSync(absolutePath).mtimeMs;
+
+    assert.deepEqual(fulfilled.sort(), ["already_saved", "saved"]);
+    assert.equal(fs.readFileSync(absolutePath, "utf8"), "Same bytes\n");
+    assert.equal(fs.statSync(absolutePath).mtimeMs, mtime);
+    assert.deepEqual(listTemporaryFiles(path.dirname(absolutePath)), []);
+  });
+
   it("rejects existing different content when overwrite is false and leaves bytes unchanged", async () => {
     initRepo();
     const config = testConfig("docs");
@@ -192,6 +260,50 @@ describe("artifact_toolbox.create_markdown_artifact", () => {
     assert.equal(result.ok, false);
     assert.equal(result.error?.code, "DESTINATION_EXISTS");
     assert.equal(fs.readFileSync(target("docs/conflict.md"), "utf8"), "Original\n");
+  });
+
+  it("does not overwrite a target that appears after the missing-target observation", async () => {
+    initRepo();
+    const config = testConfig("docs");
+
+    await assert.rejects(
+      () =>
+        createMarkdownArtifact(
+          { workspaceId: "neutral_workspace", relativePath: "docs/appeared.md", content: "Requested\n", overwrite: false },
+          config,
+          {
+            afterMissingTargetObserved: (targetPath) => {
+              fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+              fs.writeFileSync(targetPath, "Concurrent\n", "utf8");
+            }
+          }
+        ),
+      /already exists with different content/u
+    );
+
+    assert.equal(fs.readFileSync(target("docs/appeared.md"), "utf8"), "Concurrent\n");
+  });
+
+  it("removes a created final file after exclusive-create failure without deleting another file", async () => {
+    initRepo();
+    const config = testConfig("docs");
+
+    await assert.rejects(
+      () =>
+        createMarkdownArtifact(
+          { workspaceId: "neutral_workspace", relativePath: "docs/partial.md", content: "Requested\n" },
+          config,
+          {
+            afterCreateFileOpened: () => {
+              throw new Error("Injected create failure");
+            }
+          }
+        ),
+      /Injected create failure/u
+    );
+
+    assert.equal(fs.existsSync(target("docs/partial.md")), false);
+    assert.deepEqual(listTemporaryFiles(path.dirname(target("docs/partial.md"))), []);
   });
 
   it("atomically replaces existing different content when overwrite is true and removes temp files", async () => {
@@ -258,6 +370,162 @@ describe("artifact_toolbox.create_markdown_artifact", () => {
 
     assert.equal(fs.readFileSync(target("docs/restore.md"), "utf8"), "Original\n");
     assert.deepEqual(listTemporaryFiles(path.dirname(target("docs/restore.md"))), []);
+  });
+
+  it("surfaces rollback-write failure instead of suppressing it", async () => {
+    initRepo();
+    const config = testConfig("docs");
+    write("docs/rollback-write.md", "Original\n");
+
+    await assert.rejects(
+      () =>
+        createMarkdownArtifact(
+          { workspaceId: "neutral_workspace", relativePath: "docs/rollback-write.md", content: "Replacement\n", overwrite: true },
+          config,
+          {
+            afterReplaceBeforeVerify: (targetPath) => {
+              fs.writeFileSync(targetPath, "Corrupt\n", "utf8");
+            },
+            restoreOriginalBytesOverride: async () => {
+              throw new Error("Injected rollback write failure");
+            }
+          }
+        ),
+      /rollback was unsuccessful/u
+    );
+
+    assert.equal(fs.readFileSync(target("docs/rollback-write.md"), "utf8"), "Corrupt\n");
+    assert.deepEqual(listTemporaryFiles(path.dirname(target("docs/rollback-write.md"))), []);
+  });
+
+  it("surfaces rollback-verification mismatch instead of claiming restoration", async () => {
+    initRepo();
+    const config = testConfig("docs");
+    write("docs/rollback-mismatch.md", "Original\n");
+
+    await assert.rejects(
+      () =>
+        createMarkdownArtifact(
+          { workspaceId: "neutral_workspace", relativePath: "docs/rollback-mismatch.md", content: "Replacement\n", overwrite: true },
+          config,
+          {
+            afterReplaceBeforeVerify: (targetPath) => {
+              fs.writeFileSync(targetPath, "Corrupt\n", "utf8");
+            },
+            afterRollbackBeforeVerify: (targetPath) => {
+              fs.writeFileSync(targetPath, "Wrong restored bytes\n", "utf8");
+            }
+          }
+        ),
+      /rollback was unsuccessful/u
+    );
+
+    assert.equal(fs.readFileSync(target("docs/rollback-mismatch.md"), "utf8"), "Wrong restored bytes\n");
+    assert.deepEqual(listTemporaryFiles(path.dirname(target("docs/rollback-mismatch.md"))), []);
+  });
+
+  it("revalidates each newly created parent directory", async () => {
+    initRepo();
+    const config = testConfig("docs");
+    const validatedSegments: string[] = [];
+
+    const result = await createMarkdownArtifact(
+      { workspaceId: "neutral_workspace", relativePath: "docs/new-parent/child.md", content: "Nested\n" },
+      config,
+      {
+        afterParentSegmentValidated: (_segmentPath, relativePath) => {
+          validatedSegments.push(relativePath);
+        }
+      }
+    );
+
+    assert.equal(result.status, "saved");
+    assert.deepEqual(validatedSegments, ["docs", "docs/new-parent"]);
+    assert.equal(fs.readFileSync(target("docs/new-parent/child.md"), "utf8"), "Nested\n");
+  });
+
+  it("rejects a parent symlink or junction introduced after initial resolution without writing outside the workspace", async () => {
+    initRepo();
+    const config = testConfig("docs");
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "champcity-create-md-outside-"));
+    let fixtureCreated = false;
+    let caughtError: unknown;
+    try {
+      await createMarkdownArtifact(
+        { workspaceId: "neutral_workspace", relativePath: "docs/raced-parent/out.md", content: "No escape\n" },
+        config,
+        {
+          afterParentSegmentValidated: (segmentPath, relativePath) => {
+            if (relativePath !== "docs" || fixtureCreated) {
+              return;
+            }
+            fs.rmSync(segmentPath, { recursive: true, force: true });
+            try {
+              fs.symlinkSync(outside, segmentPath, process.platform === "win32" ? "junction" : "dir");
+              fixtureCreated = true;
+            } catch (error) {
+              if (!error || typeof error !== "object" || !("code" in error) || !["EPERM", "EACCES"].includes(String(error.code))) {
+                throw error;
+              }
+            }
+          }
+        }
+      );
+    } catch (error) {
+      caughtError = error;
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+
+    if (fixtureCreated) {
+      assert.match(String(caughtError), /parent paths must be regular directories/u);
+      assert.equal(fs.existsSync(path.join(outside, "raced-parent", "out.md")), false);
+    } else {
+      assert.equal(caughtError, undefined);
+      assert.equal(fs.readFileSync(target("docs/raced-parent/out.md"), "utf8"), "No escape\n");
+    }
+  });
+
+  it("revalidates the final parent real path immediately before installation", async () => {
+    initRepo();
+    const config = testConfig("docs");
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "champcity-create-md-final-outside-"));
+    let fixtureCreated = false;
+    let caughtError: unknown;
+    try {
+      await createMarkdownArtifact(
+        { workspaceId: "neutral_workspace", relativePath: "docs/final-parent/out.md", content: "No escape\n" },
+        config,
+        {
+          afterParentChainValidated: (parentPath) => {
+            if (fixtureCreated) {
+              return;
+            }
+            fs.rmSync(parentPath, { recursive: true, force: true });
+            try {
+              fs.symlinkSync(outside, parentPath, process.platform === "win32" ? "junction" : "dir");
+              fixtureCreated = true;
+            } catch (error) {
+              if (!error || typeof error !== "object" || !("code" in error) || !["EPERM", "EACCES"].includes(String(error.code))) {
+                throw error;
+              }
+            }
+          }
+        }
+      );
+    } catch (error) {
+      caughtError = error;
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+
+    if (fixtureCreated) {
+      assert.match(String(caughtError), /parent paths must be regular directories/u);
+      assert.equal(fs.existsSync(path.join(outside, "out.md")), false);
+    } else {
+      assert.equal(caughtError, undefined);
+      assert.equal(fs.readFileSync(target("docs/final-parent/out.md"), "utf8"), "No escape\n");
+    }
   });
 
   it("rejects unsafe paths, non-Markdown targets, blocked paths, symlink segments, and artifact-root escapes", async () => {
@@ -378,6 +646,28 @@ describe("artifact_toolbox.create_markdown_artifact", () => {
       assert.equal(result.error?.code, "INVALID_INPUT");
       assert.equal(fs.existsSync(target(`docs/${field}.md`)), false);
     }
+  });
+
+  it("keeps the artifact action inventory bounded and submit_handoff_outputs unsupported", async () => {
+    initRepo();
+    const config = testConfig("docs");
+
+    assert.equal(SUPPORTED_ARTIFACT_ACTIONS.includes("create_markdown_artifact"), true);
+    assert.equal(SUPPORTED_ARTIFACT_ACTIONS.includes("submit_handoff_outputs" as never), false);
+
+    const result = await artifactToolbox(
+      {
+        action: "submit_handoff_outputs",
+        workspaceId: "neutral_workspace",
+        params: {}
+      },
+      config,
+      context(config)
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "INVALID_INPUT");
+    assert.equal((result.error?.details?.supportedActions as string[] | undefined)?.includes("submit_handoff_outputs"), false);
   });
 
   it("requires files.write and local docs write mode", async () => {

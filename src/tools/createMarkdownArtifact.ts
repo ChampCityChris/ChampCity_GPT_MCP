@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { type AppConfig } from "../config.js";
 import { assertMarkdownArtifactPath } from "../security/filePolicy.js";
-import { resolveProjectPath, toRootRelativePath } from "../security/pathPolicy.js";
+import { isPathInside, resolveProjectPath, toRootRelativePath } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
 import { assertWorkspaceAuthorityAllowed, resolveWorkspaceAuthorityForRoot } from "../workspaceAuthority.js";
 import { resolveWorkspaceRoot } from "../workspaces.js";
@@ -35,7 +35,14 @@ export interface CreateMarkdownArtifactOutput {
 
 export interface CreateMarkdownArtifactTestHooks {
   afterInitialSnapshot?: (targetPath: string) => Promise<void> | void;
+  afterMissingTargetObserved?: (targetPath: string) => Promise<void> | void;
+  afterParentSegmentValidated?: (segmentPath: string, relativePath: string) => Promise<void> | void;
+  afterParentChainValidated?: (parentPath: string, targetPath: string) => Promise<void> | void;
+  beforeFinalInstall?: (targetPath: string) => Promise<void> | void;
+  afterCreateFileOpened?: (targetPath: string) => Promise<void> | void;
   afterReplaceBeforeVerify?: (targetPath: string) => Promise<void> | void;
+  restoreOriginalBytesOverride?: (targetPath: string, originalBytes: Buffer) => Promise<void>;
+  afterRollbackBeforeVerify?: (targetPath: string) => Promise<void> | void;
 }
 
 const WINDOWS_RESERVED_DEVICE_NAME_PATTERN = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
@@ -81,6 +88,54 @@ async function assertNoExistingReparseSegments(rootRealPath: string, requestedRe
   }
 }
 
+async function assertValidatedDirectory(rootRealPath: string, directoryPath: string, relativePath: string): Promise<void> {
+  const stats = await fs.lstat(directoryPath);
+  if (stats.isSymbolicLink() || isWindowsReparsePoint(stats) || !stats.isDirectory()) {
+    throw new AppError("PATH_DENIED", "Artifact parent paths must be regular directories.", {
+      relativePath
+    });
+  }
+
+  const realPath = await fs.realpath(directoryPath);
+  if (!isPathInside(realPath, rootRealPath)) {
+    throw new AppError("PATH_DENIED", "Artifact parent path escapes the selected workspace root.", {
+      relativePath
+    });
+  }
+}
+
+async function validateOrCreateParentChain(
+  rootRealPath: string,
+  requestedRelativePath: string,
+  targetPath: string,
+  testHooks: CreateMarkdownArtifactTestHooks
+): Promise<void> {
+  await assertValidatedDirectory(rootRealPath, rootRealPath, ".");
+
+  let current = rootRealPath;
+  const parentSegments = requestedRelativePath.split(/[\\/]+/u).filter(Boolean).slice(0, -1);
+  for (const [index, segment] of parentSegments.entries()) {
+    await assertValidatedDirectory(rootRealPath, current, index === 0 ? "." : parentSegments.slice(0, index).join("/"));
+    current = path.join(current, segment);
+    const segmentRelativePath = parentSegments.slice(0, index + 1).join("/");
+
+    try {
+      await fs.mkdir(current);
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST") {
+        throw error;
+      }
+    }
+
+    await assertValidatedDirectory(rootRealPath, current, segmentRelativePath);
+    await testHooks.afterParentSegmentValidated?.(current, segmentRelativePath);
+  }
+
+  const parentPath = path.dirname(targetPath);
+  await assertValidatedDirectory(rootRealPath, parentPath, parentSegments.join("/") || ".");
+  await testHooks.afterParentChainValidated?.(parentPath, targetPath);
+}
+
 async function readExistingRegularFile(targetPath: string, relativePath: string): Promise<Buffer | null> {
   let stats: Awaited<ReturnType<typeof fs.lstat>>;
   try {
@@ -117,6 +172,73 @@ async function writeTempAndRename(targetPath: string, bytes: Buffer, label: stri
   }
 }
 
+function sameFileIdentity(left: Awaited<ReturnType<typeof fs.lstat>>, right: Awaited<ReturnType<typeof fs.lstat>>): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function removeCreatedFileIfSame(targetPath: string, createdStats: Awaited<ReturnType<typeof fs.lstat>>): Promise<void> {
+  try {
+    const currentStats = await fs.lstat(targetPath);
+    if (sameFileIdentity(currentStats, createdStats)) {
+      await fs.rm(targetPath, { force: true });
+    }
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+async function createExclusiveAndVerify(
+  targetPath: string,
+  contentBytes: Buffer,
+  relativePath: string,
+  testHooks: CreateMarkdownArtifactTestHooks
+): Promise<"saved" | "already_saved"> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  let createdStats: Awaited<ReturnType<typeof fs.lstat>> | undefined;
+
+  try {
+    handle = await fs.open(targetPath, "wx");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") {
+      const currentBytes = await readExistingRegularFile(targetPath, relativePath);
+      if (currentBytes?.equals(contentBytes)) {
+        return "already_saved";
+      }
+      throw new AppError("DESTINATION_EXISTS", "Markdown artifact already exists with different content.", {
+        relativePath
+      });
+    }
+    throw error;
+  }
+
+  try {
+    const handleStats = await handle.stat();
+    createdStats = await fs.lstat(targetPath);
+    if (!sameFileIdentity(handleStats, createdStats)) {
+      throw new AppError("VERIFICATION_FAILED", "Markdown artifact creation identity could not be verified.", {
+        relativePath
+      });
+    }
+
+    await testHooks.afterCreateFileOpened?.(targetPath);
+    await handle.writeFile(contentBytes);
+    await handle.close();
+    handle = undefined;
+    await verifyExactBytes(targetPath, contentBytes, relativePath);
+    return "saved";
+  } catch (error) {
+    if (handle) {
+      await handle.close().catch(() => undefined);
+    }
+    if (createdStats) {
+      await removeCreatedFileIfSame(targetPath, createdStats);
+    }
+    throw error;
+  }
+}
+
 async function verifyExactBytes(targetPath: string, expectedBytes: Buffer, relativePath: string): Promise<void> {
   const actualBytes = await readExistingRegularFile(targetPath, relativePath);
   if (!actualBytes || !actualBytes.equals(expectedBytes)) {
@@ -126,8 +248,40 @@ async function verifyExactBytes(targetPath: string, expectedBytes: Buffer, relat
   }
 }
 
-async function restoreOriginalBytes(targetPath: string, originalBytes: Buffer): Promise<void> {
-  await writeTempAndRename(targetPath, originalBytes, "restore");
+function diagnosticSummary(error: unknown): string {
+  if (error instanceof AppError) {
+    return `${error.code}: ${error.message}`;
+  }
+
+  if (error && typeof error === "object" && "code" in error) {
+    return `filesystem_error:${String(error.code)}`;
+  }
+
+  return error instanceof Error ? error.name : "unknown_error";
+}
+
+async function restoreOriginalBytes(
+  targetPath: string,
+  originalBytes: Buffer,
+  relativePath: string,
+  originalError: unknown,
+  testHooks: CreateMarkdownArtifactTestHooks
+): Promise<void> {
+  try {
+    if (testHooks.restoreOriginalBytesOverride) {
+      await testHooks.restoreOriginalBytesOverride(targetPath, originalBytes);
+    } else {
+      await writeTempAndRename(targetPath, originalBytes, "restore");
+    }
+    await testHooks.afterRollbackBeforeVerify?.(targetPath);
+    await verifyExactBytes(targetPath, originalBytes, relativePath);
+  } catch (rollbackError) {
+    throw new AppError("VERIFICATION_FAILED", "Markdown artifact rollback was unsuccessful after write verification failed.", {
+      relativePath,
+      originalFailure: diagnosticSummary(originalError),
+      rollbackFailure: diagnosticSummary(rollbackError)
+    });
+  }
 }
 
 export async function createMarkdownArtifact(
@@ -186,11 +340,31 @@ export async function createMarkdownArtifact(
       });
     }
 
-    await fs.mkdir(path.dirname(resolved.resolvedPath), { recursive: true });
+    if (!existingBytes) {
+      await testHooks.afterMissingTargetObserved?.(resolved.resolvedPath);
+    }
+
+    await validateOrCreateParentChain(resolved.rootRealPath, resolved.relativePath, resolved.resolvedPath, testHooks);
+    await testHooks.beforeFinalInstall?.(resolved.resolvedPath);
+    await validateOrCreateParentChain(resolved.rootRealPath, resolved.relativePath, resolved.resolvedPath, {});
 
     if (!existingBytes) {
-      await writeTempAndRename(resolved.resolvedPath, contentBytes, "create");
-      await verifyExactBytes(resolved.resolvedPath, contentBytes, relativePath);
+      const status = await createExclusiveAndVerify(resolved.resolvedPath, contentBytes, relativePath, testHooks);
+      if (status === "already_saved") {
+        updateAudit({
+          requestedPath: input.relativePath,
+          normalizedRelativePath: relativePath,
+          resolvedPath: resolved.resolvedPath,
+          byteCount: contentBytes.length,
+          workspaceId: authority.workspaceId
+        });
+        return {
+          status,
+          workspaceId: authority.workspaceId,
+          relativePath,
+          sizeBytes: contentBytes.length
+        };
+      }
     } else {
       await testHooks.afterInitialSnapshot?.(resolved.resolvedPath);
       const preReplaceBytes = await readExistingRegularFile(resolved.resolvedPath, relativePath);
@@ -205,7 +379,7 @@ export async function createMarkdownArtifact(
         await testHooks.afterReplaceBeforeVerify?.(resolved.resolvedPath);
         await verifyExactBytes(resolved.resolvedPath, contentBytes, relativePath);
       } catch (error) {
-        await restoreOriginalBytes(resolved.resolvedPath, existingBytes).catch(() => undefined);
+        await restoreOriginalBytes(resolved.resolvedPath, existingBytes, relativePath, error, testHooks);
         throw error;
       }
     }

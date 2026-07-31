@@ -1,24 +1,42 @@
+param(
+  [string]$RepositoryRoot = ""
+)
+
 $ErrorActionPreference = "Stop"
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+  $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+} else {
+  $repoRoot = (Resolve-Path -LiteralPath $RepositoryRoot).Path
+}
 $releaseRoot = Join-Path $repoRoot "release"
+$distSrcRoot = Join-Path $repoRoot "dist\src"
 $failures = New-Object System.Collections.Generic.List[string]
 
 function Add-Failure([string]$Message) {
   [void]$failures.Add($Message)
 }
 
-if (-not (Test-Path -LiteralPath $releaseRoot)) {
-  Write-Host "PASS release cleanliness"
-  Write-Host "WARN release/ does not exist; run npm run app:dist before checking release artifacts."
-  exit 0
+function Get-RelativePath([string]$Root, [string]$FullName) {
+  return $FullName.Substring($Root.Length).TrimStart('\', '/')
 }
 
-$files = Get-ChildItem -LiteralPath $releaseRoot -Recurse -Force -File
-$dirs = Get-ChildItem -LiteralPath $releaseRoot -Recurse -Force -Directory
+$retiredProductionPatterns = @(
+  '(^|[\\/])saveArchitectInterviewOutput\.(js|js\.map|d\.ts|mjs|cjs)$',
+  '(^|[\\/])saveProjectPlanningOutputs\.(js|js\.map|d\.ts|mjs|cjs)$'
+)
 
-function Get-RelativeReleasePath([string]$FullName) {
-  return $FullName.Substring($releaseRoot.Length).TrimStart('\', '/')
+if (Test-Path -LiteralPath $distSrcRoot) {
+  $distSrcFiles = Get-ChildItem -LiteralPath $distSrcRoot -Recurse -Force -File
+  foreach ($file in $distSrcFiles) {
+    $relative = Get-RelativePath $distSrcRoot $file.FullName
+    foreach ($pattern in $retiredProductionPatterns) {
+      if ($relative -match $pattern) {
+        Add-Failure "Retired compiled production module found in package input: dist/src/$($relative -replace '\\', '/')"
+        break
+      }
+    }
+  }
 }
 
 $blockedFilePatterns = @(
@@ -38,8 +56,15 @@ $blockedDirPatterns = @(
   '[\\/]generated$'
 )
 
+$files = @()
+$dirs = @()
+if (Test-Path -LiteralPath $releaseRoot) {
+  $files = Get-ChildItem -LiteralPath $releaseRoot -Recurse -Force -File
+  $dirs = Get-ChildItem -LiteralPath $releaseRoot -Recurse -Force -Directory
+}
+
 foreach ($file in $files) {
-  $relative = Get-RelativeReleasePath $file.FullName
+  $relative = Get-RelativePath $releaseRoot $file.FullName
   foreach ($pattern in $blockedFilePatterns) {
     if ($relative -match $pattern) {
       Add-Failure "Blocked local file found in release output: $relative"
@@ -49,7 +74,7 @@ foreach ($file in $files) {
 }
 
 foreach ($dir in $dirs) {
-  $relative = Get-RelativeReleasePath $dir.FullName
+  $relative = Get-RelativePath $releaseRoot $dir.FullName
   foreach ($pattern in $blockedDirPatterns) {
     if ($relative -match $pattern) {
       Add-Failure "Blocked local directory found in release output: $relative"
@@ -66,7 +91,7 @@ $privatePatterns = @(
 
 $textExtensions = '\.(txt|md|json|yml|yaml|js|html|css|ps1|map)$'
 foreach ($file in ($files | Where-Object { $_.Name -match $textExtensions })) {
-  $relative = Get-RelativeReleasePath $file.FullName
+  $relative = Get-RelativePath $releaseRoot $file.FullName
   $content = Get-Content -LiteralPath $file.FullName -Raw
   foreach ($pattern in $privatePatterns) {
     if ($content -match $pattern) {
@@ -84,4 +109,8 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host "PASS release cleanliness"
-Write-Host "Checked $($files.Count) release files."
+if (-not (Test-Path -LiteralPath $releaseRoot)) {
+  Write-Host "WARN release/ does not exist; run npm run app:dist before checking release artifacts."
+} else {
+  Write-Host "Checked $($files.Count) release files."
+}

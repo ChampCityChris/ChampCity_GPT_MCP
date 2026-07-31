@@ -7,6 +7,7 @@ import type { Notification, Request } from "@modelcontextprotocol/sdk/types.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 
 import {
+  SUPPORTED_ARTIFACT_ACTIONS,
   SUPPORTED_TOOLBOX_ACTIONS,
   TOOLBOX_ACTION_POLICY,
   TOOLBOX_TOOL_NAMES,
@@ -53,7 +54,8 @@ describe("toolbox action policy", () => {
     assert.equal(requiredScopeForPublicToolCall("repo_toolbox", "read_file"), "files.read");
     assert.equal(requiredScopeForPublicToolCall("repo_toolbox", "write_markdown_artifact"), "files.write");
     assert.equal(requiredScopeForPublicToolCall("git_toolbox", "stage_paths"), "files.write");
-    assert.equal(requiredScopeForPublicToolCall("artifact_toolbox", "save_architect_interview_output"), "files.write");
+    assert.equal(requiredScopeForPublicToolCall("artifact_toolbox", "create_markdown_artifact"), "files.write");
+    assert.equal(requiredScopeForPublicToolCall("artifact_toolbox", "submit_handoff_outputs"), undefined);
     assert.equal(requiredScopeForPublicToolCall("integration_toolbox", "prepare_external_handoff"), "files.write");
     assert.equal(requiredScopeForPublicToolCall("browser_toolbox", "get_browser_capabilities"), "files.read");
     assert.equal(requiredScopeForPublicToolCall("unknown_tool", "write_markdown_artifact"), undefined);
@@ -61,8 +63,69 @@ describe("toolbox action policy", () => {
 
     assert.equal(mappedInternalOperationForToolboxAction("repo_toolbox", "write_markdown_artifact"), "write_markdown_artifact");
     assert.equal(mappedInternalOperationForToolboxAction("git_toolbox", "stage_paths"), "safe_stage_changes");
-    assert.equal(mappedInternalOperationForToolboxAction("artifact_toolbox", "save_architect_interview_output"), "write_markdown_artifact");
+    assert.equal(mappedInternalOperationForToolboxAction("artifact_toolbox", "create_markdown_artifact"), "write_markdown_artifact");
+    assert.equal(mappedInternalOperationForToolboxAction("artifact_toolbox", "submit_handoff_outputs"), undefined);
     assert.equal(mappedInternalOperationForToolboxAction("integration_toolbox", "prepare_external_handoff"), "write_markdown_artifact");
     assert.equal(mappedInternalOperationForToolboxAction("repo_toolbox", "read_file"), undefined);
+  });
+
+  it("keeps retired and unsupported handoff submission action names out of production source and action inventory", () => {
+    const srcRoot = path.join(process.cwd(), "src");
+    const retiredNames = [
+      "saveArchitectInterviewOutput",
+      "SaveArchitectInterviewOutputParamsSchema",
+      "saveProjectPlanningOutputs",
+      "SaveProjectPlanningOutputsParamsSchema",
+      "submitHandoffOutputs",
+      "SubmitHandoffOutputsParamsSchema",
+      "SUPPORTED_HANDOFF_KINDS",
+      "HANDOFF_OUTPUT_CONTRACT_REGISTRY"
+    ];
+    const retiredFiles = [
+      path.join(srcRoot, "tools", "saveArchitectInterviewOutput.ts"),
+      path.join(srcRoot, "tools", "saveProjectPlanningOutputs.ts"),
+      path.join(srcRoot, "tools", "submitHandoffOutputs.ts"),
+      path.join(srcRoot, "tools", "internal", "handoffContracts", "architectInterview.ts"),
+      path.join(srcRoot, "tools", "internal", "handoffContracts", "projectPlanning.ts"),
+      path.join(srcRoot, "tools", "internal", "canonicalSubmission", "canonicalMarkdown.ts")
+    ];
+    const files: string[] = [];
+    const collect = (directory: string): void => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const absolutePath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          collect(absolutePath);
+        } else if (entry.isFile() && /\.(?:ts|tsx|js|mjs|cjs)$/u.test(entry.name)) {
+          files.push(absolutePath);
+        }
+      }
+    };
+    collect(srcRoot);
+    const productionSource = files.map((file) => fs.readFileSync(file, "utf8")).join("\n");
+
+    for (const retiredName of retiredNames) {
+      assert.equal(productionSource.includes(retiredName), false, `${retiredName} must not appear in production source`);
+    }
+    for (const retiredFile of retiredFiles) {
+      assert.equal(fs.existsSync(retiredFile), false, `${retiredFile} must not exist`);
+    }
+    assert.equal(SUPPORTED_ARTIFACT_ACTIONS.includes("submit_handoff_outputs" as never), false);
+    assert.equal(SUPPORTED_ARTIFACT_ACTIONS.includes("save_architect_interview_output" as never), false);
+    assert.equal(SUPPORTED_ARTIFACT_ACTIONS.includes("save_project_planning_outputs" as never), false);
+  });
+
+  it("adds only the generic artifact Markdown write action without changing unrelated toolbox action inventories", () => {
+    assert.deepEqual(SUPPORTED_TOOLBOX_ACTIONS.repo_toolbox, [
+      "status",
+      "list_files",
+      "read_file",
+      "search_files",
+      "write_markdown_artifact",
+      "write_json_artifact",
+      "propose_patch",
+      "apply_approved_patch"
+    ]);
+    assert.ok(SUPPORTED_ARTIFACT_ACTIONS.includes("create_markdown_artifact"));
+    assert.equal(SUPPORTED_ARTIFACT_ACTIONS.includes("submit_handoff_outputs" as never), false);
   });
 });

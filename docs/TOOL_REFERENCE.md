@@ -17,7 +17,7 @@ OAuth metadata:
 Scope mapping:
 
 - `files.read`: `tools/list` and the seven public toolbox tools: `repo_toolbox`, `git_toolbox`, `artifact_toolbox`, `diagnostics_toolbox`, `integration_toolbox`, `browser_toolbox`, and `knowledge_toolbox`.
-- `files.write`: required for `workspace_write_attached_image` and inside write-capable toolbox actions such as `repo_toolbox.write_markdown_artifact`, `repo_toolbox.write_json_artifact`, `repo_toolbox.propose_patch`, `repo_toolbox.apply_approved_patch`, `integration_toolbox.prepare_external_handoff`, and git mutating actions under `git_toolbox`.
+- `files.write`: required for `workspace_write_attached_image` and inside write-capable toolbox actions such as `artifact_toolbox.create_markdown_artifact`, `repo_toolbox.write_markdown_artifact`, `repo_toolbox.write_json_artifact`, `repo_toolbox.propose_patch`, `repo_toolbox.apply_approved_patch`, `integration_toolbox.prepare_external_handoff`, and git mutating actions under `git_toolbox`.
 
 Write access has OAuth plus local write-mode gates. `CHAMPCITY_GPT_WRITE_MODE=off|docs|patch|elevated` is preferred, with `config/write-access.local.json` as the local-file source. Legacy `CHAMPCITY_GPT_ENABLE_WRITE_TOOLS=true` maps to `docs`.
 
@@ -232,6 +232,7 @@ Initial actions:
 - `release_artifact_summary`
 - `release_publication_summary`
 - `local_package_summary`
+- `create_markdown_artifact`
 - `read_image_artifact`
 - `list_artifacts`
 - `read_artifact_by_id`
@@ -242,6 +243,10 @@ Initial actions:
 - `review_queue`
 
 Read actions return bounded project-artifact summaries. The obsolete Figma-specific Codex handoff prompt action was removed. All artifact discovery and context actions resolve `workspaceId` through the configured workspace registry, return repository-relative paths only, reject unknown action parameters, reject unsafe metadata paths, and never mutate files, hashes, registry entries, review state, or workflow state.
+
+`create_markdown_artifact` is a generic single-file Markdown persistence action. It accepts exactly `relativePath`, `content`, and optional `overwrite`, requires OAuth `files.write` plus write mode `docs`, `patch`, or `elevated`, writes exact UTF-8 content to a safe repository-relative `.md` path, returns `saved` or `already_saved`, and does not return hashes, revision tokens, artifact types, workflow fields, or interpreted document metadata. Existing identical content is not rewritten. Existing different content fails unless `overwrite` is `true`; overwrite replacement uses internal raw-byte comparison and exact-byte reread verification.
+
+The retired action names `save_architect_interview_output`, `save_project_planning_outputs`, and `submit_handoff_outputs` are unsupported.
 
 `list_artifacts` discovers artifacts from structured registry records when present, then JSON sidecars, structured Markdown front matter, documented repository path conventions, and file metadata. It accepts `phaseId`, `artifactType`, `artifactTypes`, `workCardId`, `status`, `statuses`, `pathPrefix`, `recordKind`, `includeDerived`, `includeSidecars`, `sourceOnly`, `limit`, and `cursor`. Filters use AND semantics. Each result includes a non-authoritative `recordKind` of `source`, `sidecar`, or `derived`; this is classification for review ergonomics, not an authority ranking. The prior complete inventory view remains the default. Results sort by `modifiedAt` descending, then `artifactId` ascending for stable ties. `limit` defaults to `50`, is capped at `200`, and page metadata plus `nextCursor` are returned when more records remain.
 

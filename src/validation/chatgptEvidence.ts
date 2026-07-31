@@ -81,8 +81,8 @@ export const REQUIRED_PUBLIC_TOOLBOX_TOOLS = [
   "knowledge_toolbox"
 ] as const;
 
-export const REQUIRED_ARTIFACT_ACTION_REFERENCES = [
-  "artifact_toolbox.save_architect_interview_output"
+export const UNSUPPORTED_ARTIFACT_ACTION_REFERENCES = [
+  "artifact_toolbox.submit_handoff_outputs"
 ] as const;
 
 export const REQUIRED_METADATA_FIELDS = [
@@ -287,16 +287,16 @@ function evaluateRequiredPublicToolboxTools(markdown: string): ChatGptEvidenceCh
   });
 }
 
-function evaluateRequiredArtifactActionReferences(markdown: string): ChatGptEvidenceCheck {
-  const missingActions = REQUIRED_ARTIFACT_ACTION_REFERENCES.filter((actionName) => !markdown.includes(actionName));
-  if (missingActions.length > 0) {
-    return fail("REQUIRED_ARTIFACT_ACTION_REFERENCES", "Evidence is missing one or more required artifact toolbox action names.", {
-      missingActions
+function evaluateUnsupportedArtifactActionReferencesAbsent(markdown: string): ChatGptEvidenceCheck {
+  const presentActions = UNSUPPORTED_ARTIFACT_ACTION_REFERENCES.filter((actionName) => markdown.includes(actionName));
+  if (presentActions.length > 0) {
+    return fail("UNSUPPORTED_ARTIFACT_ACTION_REFERENCES_ABSENT", "Evidence mentions one or more unsupported artifact toolbox action names.", {
+      presentActions
     });
   }
 
-  return pass("REQUIRED_ARTIFACT_ACTION_REFERENCES", "Evidence mentions all required artifact toolbox actions.", {
-    actionCount: REQUIRED_ARTIFACT_ACTION_REFERENCES.length
+  return pass("UNSUPPORTED_ARTIFACT_ACTION_REFERENCES_ABSENT", "Evidence does not mention unsupported artifact toolbox actions.", {
+    actionCount: UNSUPPORTED_ARTIFACT_ACTION_REFERENCES.length
   });
 }
 
@@ -378,7 +378,7 @@ export function validateChatGptEvidenceText(markdown: string, options: ValidateC
     evaluateRequiredCavReferences(markdown),
     evaluateRequiredSafeReplacementTools(markdown),
     evaluateRequiredPublicToolboxTools(markdown),
-    evaluateRequiredArtifactActionReferences(markdown),
+    evaluateUnsupportedArtifactActionReferencesAbsent(markdown),
     evaluateMetadataFields(markdown),
     evaluateLocalBaselineCommands(markdown),
     evaluateSafePlaceholdersAllowed(markdown),

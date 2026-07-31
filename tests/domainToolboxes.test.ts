@@ -900,6 +900,23 @@ describe("stable domain toolbox tools", () => {
     assert.equal((result.error?.details?.supportedActions as string[] | undefined)?.includes("create_codex_handoff_prompt"), false);
   });
 
+  it("artifact_toolbox no longer supports handoff output submission", async () => {
+    initRepo();
+    const config = testConfig("docs");
+    const result = await artifactToolbox(
+      {
+        action: "submit_handoff_outputs",
+        params: { handoffKind: "architect-interview", outputs: { architectInterviewMarkdown: "# Architect Interview\n" } }
+      },
+      config,
+      context(config, "files.read files.write")
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "INVALID_INPUT");
+    assert.equal((result.error?.details?.supportedActions as string[] | undefined)?.includes("submit_handoff_outputs"), false);
+  });
+
   it("integration_toolbox rejects arbitrary upstream MCP tool names", async () => {
     initRepo();
     const config = testConfig("off");

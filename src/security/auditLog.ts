@@ -19,6 +19,7 @@ export interface AuditLogEntry {
   byteCount?: number;
   detectedFormat?: string;
   status?: string;
+  reconciliationMode?: string;
   durationMs?: number;
   sha256?: string;
 }

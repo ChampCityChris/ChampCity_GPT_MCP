@@ -508,14 +508,18 @@ export function evaluateToolboxSchemasNarrow(toolDefinitions: readonly ToolDefin
 }
 
 export function evaluateArtifactToolboxActionInventory(): McpSelfTestCheck {
-  if (!SUPPORTED_ARTIFACT_ACTIONS.includes("save_architect_interview_output")) {
-    return fail("ARTIFACT_TOOLBOX_ACTION_INVENTORY", "artifact_toolbox action inventory is missing save_architect_interview_output.", {
+  const unsupportedActions = ["submit_handoff_outputs"] as const;
+  const supportedArtifactActions = SUPPORTED_ARTIFACT_ACTIONS as readonly string[];
+  const presentUnsupportedActions = unsupportedActions.filter((action) => supportedArtifactActions.includes(action));
+  if (presentUnsupportedActions.length > 0) {
+    return fail("ARTIFACT_TOOLBOX_ACTION_INVENTORY", "artifact_toolbox action inventory includes unsupported handoff submission action.", {
+      presentUnsupportedActions,
       supportedActions: [...SUPPORTED_ARTIFACT_ACTIONS]
     });
   }
 
-  return pass("ARTIFACT_TOOLBOX_ACTION_INVENTORY", "artifact_toolbox action inventory includes save_architect_interview_output.", {
-    actionName: "save_architect_interview_output"
+  return pass("ARTIFACT_TOOLBOX_ACTION_INVENTORY", "artifact_toolbox action inventory excludes unsupported handoff submission action.", {
+    unsupportedActions
   });
 }
 

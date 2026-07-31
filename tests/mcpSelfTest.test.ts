@@ -140,7 +140,7 @@ describe("MCP protocol self-test", () => {
     assert.ok(checkIds.includes("ARTIFACT_TOOLBOX_ACTION_INVENTORY"));
   });
 
-  it("includes the Architect Interview save action in artifact toolbox inventory", () => {
+  it("excludes the unsupported handoff submission action from artifact toolbox inventory", () => {
     const check = evaluateArtifactToolboxActionInventory();
 
     assert.equal(check.status, "PASS");

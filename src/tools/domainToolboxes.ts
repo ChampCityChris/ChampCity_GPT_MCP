@@ -42,9 +42,9 @@ import { proposePatch } from "./proposePatch.js";
 import { readProjectFile } from "./readProjectFile.js";
 import { MAX_IMAGE_ARTIFACT_BYTES, readImageArtifact } from "./readImageArtifact.js";
 import { searchProjectFiles } from "./searchProjectFiles.js";
-import { saveArchitectInterviewOutput, SaveArchitectInterviewOutputParamsSchema } from "./saveArchitectInterviewOutput.js";
 import { writeJsonArtifact } from "./writeJsonArtifact.js";
 import { writeMarkdownArtifact } from "./writeMarkdownArtifact.js";
+import { CreateMarkdownArtifactParamsSchema, createMarkdownArtifact } from "./createMarkdownArtifact.js";
 import { completedResult, type ArchitectToolResult } from "./architect/common.js";
 import { validateDevelopmentElectronStartup, validatePackagedElectronStartup } from "./architect/electronDiagnostics.js";
 import { runGitInspection, type GitInspectionInput } from "./architect/gitInspection.js";
@@ -878,6 +878,10 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
       case "local_package_summary":
         EmptyParamsSchema.parse(input.params);
         return ok("artifact_toolbox", input.action, localPackageSummary(resolveWorkspaceRoot(input.workspaceId, config)));
+      case "create_markdown_artifact": {
+        const params = CreateMarkdownArtifactParamsSchema.parse(input.params);
+        return ok("artifact_toolbox", input.action, await createMarkdownArtifact({ workspaceId: input.workspaceId, ...params }, config));
+      }
       case "read_image_artifact": {
         const params = ReadImageArtifactParamsSchema.parse(input.params);
         const image = await readImageArtifact({ workspaceId: input.workspaceId, ...params }, config);
@@ -920,10 +924,6 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
       case "review_queue": {
         const params = ReviewQueueParamsSchema.parse(input.params);
         return ok("artifact_toolbox", input.action, await reviewQueue({ workspaceId: input.workspaceId, ...params }, config));
-      }
-      case "save_architect_interview_output": {
-        const params = SaveArchitectInterviewOutputParamsSchema.parse(input.params);
-        return ok("artifact_toolbox", input.action, await saveArchitectInterviewOutput({ workspaceId: input.workspaceId, ...params }, config));
       }
       default:
         return supportedActionError("artifact_toolbox", input.action, SUPPORTED_ARTIFACT_ACTIONS);

@@ -7,10 +7,10 @@ import { describe, it } from "node:test";
 import {
   CHATGPT_EVIDENCE_TEMPLATE_PATH,
   REQUIRED_CAV_REFERENCES,
-  REQUIRED_ARTIFACT_ACTION_REFERENCES,
   REQUIRED_PUBLIC_TOOLBOX_TOOLS,
   REQUIRED_SAFE_REPLACEMENT_TOOLS,
   REQUIRED_SECTIONS,
+  UNSUPPORTED_ARTIFACT_ACTION_REFERENCES,
   validateChatGptEvidenceText,
   type ChatGptEvidenceReport
 } from "../src/validation/chatgptEvidence.js";
@@ -70,11 +70,11 @@ describe("ChatGPT evidence validator", () => {
     }
   });
 
-  it("template mentions all required artifact toolbox action references", () => {
+  it("template omits unsupported artifact toolbox action references", () => {
     const template = readTemplate();
 
-    for (const actionName of REQUIRED_ARTIFACT_ACTION_REFERENCES) {
-      assert.match(template, new RegExp(actionName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+    for (const actionName of UNSUPPORTED_ARTIFACT_ACTION_REFERENCES) {
+      assert.doesNotMatch(template, new RegExp(actionName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
     }
   });
 
@@ -122,6 +122,15 @@ describe("ChatGPT evidence validator", () => {
 
     assert.equal(report.ok, false);
     assert.ok(report.checks.some((check) => check.id === "REQUIRED_CAV_REFERENCES" && check.status === "FAIL"));
+  });
+
+  it("fails evidence that mentions an unsupported artifact toolbox action", () => {
+    const report = validateChatGptEvidenceText(`${readTemplate()}\n\nartifact_toolbox.submit_handoff_outputs\n`, {
+      target: "unsupported-artifact-action-fixture"
+    });
+
+    assert.equal(report.ok, false);
+    assert.ok(report.checks.some((check) => check.id === "UNSUPPORTED_ARTIFACT_ACTION_REFERENCES_ABSENT" && check.status === "FAIL"));
   });
 
   it("permits safe redaction placeholders", () => {

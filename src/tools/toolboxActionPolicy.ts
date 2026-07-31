@@ -32,6 +32,7 @@ export const TOOLBOX_ACTION_POLICY = {
     release_artifact_summary: { requiredScope: "files.read" },
     release_publication_summary: { requiredScope: "files.read" },
     local_package_summary: { requiredScope: "files.read" },
+    create_markdown_artifact: { requiredScope: "files.write", mappedInternalOperation: "write_markdown_artifact" },
     read_image_artifact: { requiredScope: "files.read" },
     list_artifacts: { requiredScope: "files.read" },
     read_artifact_by_id: { requiredScope: "files.read" },
@@ -39,8 +40,7 @@ export const TOOLBOX_ACTION_POLICY = {
     artifact_pair_status: { requiredScope: "files.read" },
     current_action_context: { requiredScope: "files.read" },
     export_planning_corpus: { requiredScope: "files.read" },
-    review_queue: { requiredScope: "files.read" },
-    save_architect_interview_output: { requiredScope: "files.write", mappedInternalOperation: "write_markdown_artifact" }
+    review_queue: { requiredScope: "files.read" }
   },
   diagnostics_toolbox: {
     runtime_status: { requiredScope: "files.read" },

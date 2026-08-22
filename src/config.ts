@@ -25,6 +25,7 @@ import {
   normalizeArtifactWriteRoots,
   type WorkspaceWritePolicy
 } from "./workspaceWritePolicy.js";
+import { type WorkspaceCapabilityConfig } from "./workspaceCapabilities.js";
 
 export interface AppConfig {
   repoRoot: string;
@@ -74,6 +75,7 @@ interface LocalWorkspaceConfig {
   root: string;
   remote?: string;
   writePolicy?: WorkspaceWritePolicy;
+  workspaceCapabilities?: WorkspaceCapabilityConfig;
   artifactWriteRoots?: string[];
 }
 
@@ -134,6 +136,36 @@ function assertNonEmptyString(value: unknown, label: string): string {
   return value;
 }
 
+function assertEnumValue<T extends string>(value: unknown, label: string, allowed: readonly T[]): T {
+  if (typeof value === "string" && (allowed as readonly string[]).includes(value)) {
+    return value as T;
+  }
+
+  throw new AppError("INVALID_INPUT", `${label} must be one of: ${allowed.join(", ")}.`);
+}
+
+function assertWorkspaceCapabilityConfig(value: unknown, label: string): WorkspaceCapabilityConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new AppError("INVALID_INPUT", `${label} must be an object.`);
+  }
+
+  const raw = value as Record<string, unknown>;
+  const parsed: WorkspaceCapabilityConfig = {};
+  if (raw.artifactPersistence !== undefined) {
+    parsed.artifactPersistence = assertEnumValue(raw.artifactPersistence, `${label}.artifactPersistence`, ["enabled", "disabled"] as const);
+  }
+  if (raw.patchWorkflow !== undefined) {
+    parsed.patchWorkflow = assertEnumValue(raw.patchWorkflow, `${label}.patchWorkflow`, ["enabled", "disabled"] as const);
+  }
+  if (raw.gitOperations !== undefined) {
+    parsed.gitOperations = assertEnumValue(raw.gitOperations, `${label}.gitOperations`, ["auto", "disabled"] as const);
+  }
+  if (raw.releaseOperations !== undefined) {
+    parsed.releaseOperations = assertEnumValue(raw.releaseOperations, `${label}.releaseOperations`, ["auto", "disabled"] as const);
+  }
+  return parsed;
+}
+
 function assertLocalWorkspaces(value: unknown, label: string): LocalWorkspaceConfig[] {
   if (!Array.isArray(value)) {
     throw new AppError("INVALID_INPUT", `${label} must be an array.`);
@@ -160,6 +192,10 @@ function assertLocalWorkspaces(value: unknown, label: string): LocalWorkspaceCon
 
     if (workspace.writePolicy !== undefined) {
       parsed.writePolicy = assertWorkspaceWritePolicy(workspace.writePolicy, `${label}[${index}].writePolicy`);
+    }
+
+    if (workspace.workspaceCapabilities !== undefined) {
+      parsed.workspaceCapabilities = assertWorkspaceCapabilityConfig(workspace.workspaceCapabilities, `${label}[${index}].workspaceCapabilities`);
     }
 
     if (workspace.artifactWriteRoots !== undefined) {
@@ -268,6 +304,7 @@ function normalizeConfiguredWorkspaces(workspaces: LocalWorkspaceConfig[] | unde
       root,
       ...(workspace.remote ? { remote: workspace.remote } : {}),
       writePolicy,
+      workspaceCapabilities: workspace.workspaceCapabilities,
       artifactWriteRoots: artifactRoots.roots,
       artifactRootWarnings: artifactRoots.warnings,
       source: "configured" as const

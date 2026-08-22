@@ -54,6 +54,7 @@ describe("toolbox action policy", () => {
     assert.equal(requiredScopeForPublicToolCall("repo_toolbox", "read_file"), "files.read");
     assert.equal(requiredScopeForPublicToolCall("repo_toolbox", "write_markdown_artifact"), "files.write");
     assert.equal(requiredScopeForPublicToolCall("git_toolbox", "stage_paths"), "files.write");
+    assert.equal(requiredScopeForPublicToolCall("diagnostics_toolbox", "workspace_safety_status"), "files.read");
     assert.equal(requiredScopeForPublicToolCall("artifact_toolbox", "create_markdown_artifact"), "files.write");
     assert.equal(requiredScopeForPublicToolCall("artifact_toolbox", "submit_handoff_outputs"), undefined);
     assert.equal(requiredScopeForPublicToolCall("integration_toolbox", "prepare_external_handoff"), "files.write");
@@ -114,11 +115,15 @@ describe("toolbox action policy", () => {
     assert.equal(SUPPORTED_ARTIFACT_ACTIONS.includes("save_project_planning_outputs" as never), false);
   });
 
-  it("adds only the generic artifact Markdown write action without changing unrelated toolbox action inventories", () => {
+  it("tracks repo bounded-read actions and the generic artifact Markdown write action", () => {
     assert.deepEqual(SUPPORTED_TOOLBOX_ACTIONS.repo_toolbox, [
       "status",
       "list_files",
       "read_file",
+      "inspect_text_file",
+      "read_text_chunk",
+      "read_text_lines",
+      "read_markdown_section",
       "search_files",
       "write_markdown_artifact",
       "write_json_artifact",

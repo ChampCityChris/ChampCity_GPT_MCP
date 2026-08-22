@@ -2,6 +2,9 @@ const MAX_DIAGNOSTIC_TEXT_LENGTH = 500;
 const MAX_DIAGNOSTIC_ROUTE_LENGTH = 128;
 const MAX_DIAGNOSTIC_ENDPOINT_LENGTH = 128;
 export const MAX_DIAGNOSTIC_JSON_RPC_ID_STRING_LENGTH = 128;
+const MAX_DIAGNOSTIC_IDENTIFIER_LENGTH = 128;
+const MAX_DIAGNOSTIC_KEY_NAME_LENGTH = 80;
+const MAX_DIAGNOSTIC_ARRAY_LENGTH = 20;
 
 const APPROVED_ROUTES = new Set([
   "/mcp",
@@ -81,4 +84,46 @@ export function sanitizeDiagnosticEndpoint(value: unknown): string | undefined {
   }
 
   return /^[A-Za-z0-9._:-]{1,128}$/u.test(sanitized) ? sanitized : "<REDACTED_ENDPOINT>";
+}
+
+export function sanitizeDiagnosticIdentifier(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) {
+    return undefined;
+  }
+
+  const sanitized = sanitizeDiagnosticText(value).slice(0, MAX_DIAGNOSTIC_IDENTIFIER_LENGTH);
+  return /^[A-Za-z0-9._:-]{1,128}$/u.test(sanitized) ? sanitized : undefined;
+}
+
+export function sanitizeDiagnosticSha256(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ? value : undefined;
+}
+
+export function sanitizeDiagnosticKeyName(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) {
+    return undefined;
+  }
+
+  const sanitized = collapseControls(value).slice(0, MAX_DIAGNOSTIC_KEY_NAME_LENGTH);
+  return /^[A-Za-z0-9._:-]{1,80}$/u.test(sanitized) ? sanitized : undefined;
+}
+
+export function sanitizeDiagnosticStringArray(value: unknown, maxItems = MAX_DIAGNOSTIC_ARRAY_LENGTH): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const output = value
+    .map((entry) => sanitizeDiagnosticKeyName(entry))
+    .filter((entry): entry is string => Boolean(entry))
+    .slice(0, maxItems);
+  return output.length > 0 ? output : undefined;
+}
+
+export function sanitizeDiagnosticBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+export function sanitizeDiagnosticInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : undefined;
 }

@@ -9,7 +9,7 @@ import { assertFilePolicyAllowsPath } from "../security/filePolicy.js";
 import { resolveProjectPath, toRootRelativePath } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
 import { assertWorkspaceAuthorityAllowed, resolveWorkspaceAuthorityForRoot } from "../workspaceAuthority.js";
-import { forbiddenFinding, isIgnored, normalizeGitPath } from "./gitWorkflow/safety.js";
+import { forbiddenFinding, normalizeGitPath } from "./gitWorkflow/safety.js";
 import { MAX_JSON_ARTIFACT_CONTENT_LENGTH, MAX_RELATIVE_PATH_LENGTH, MAX_ROOT_LENGTH } from "./inputLimits.js";
 import { withAudit } from "./common.js";
 
@@ -46,7 +46,7 @@ function normalizeJsonContent(content: string): string {
   return `${JSON.stringify(parsed, null, 2)}\n`;
 }
 
-async function assertJsonArtifactPathAllowed(root: string, resolvedPath: string, relativePath: string, includeGitIgnoreCheck: boolean): Promise<void> {
+async function assertJsonArtifactPathAllowed(resolvedPath: string, relativePath: string): Promise<void> {
   assertFilePolicyAllowsPath(resolvedPath, relativePath);
 
   if (path.extname(resolvedPath).toLowerCase() !== ".json") {
@@ -61,12 +61,6 @@ async function assertJsonArtifactPathAllowed(root: string, resolvedPath: string,
     throw new AppError("FILE_DENIED", forbidden.message, {
       relativePath: normalizedRelativePath,
       rule: forbidden.rule
-    });
-  }
-
-  if (includeGitIgnoreCheck && await isIgnored(root, normalizedRelativePath)) {
-    throw new AppError("FILE_DENIED", "Ignored files must not be written through JSON artifacts.", {
-      relativePath: normalizedRelativePath
     });
   }
 }
@@ -102,7 +96,7 @@ export async function writeJsonArtifact(rawInput: unknown, config: AppConfig): P
     const relativePath = toRootRelativePath(resolved.rootRealPath, resolved.resolvedPath);
     const authority = resolveWorkspaceAuthorityForRoot(resolved.rootRealPath, config, "artifact_persistence", relativePath);
     assertWorkspaceAuthorityAllowed(authority);
-    await assertJsonArtifactPathAllowed(resolved.rootRealPath, resolved.resolvedPath, relativePath, authority.policy === "git_required");
+    await assertJsonArtifactPathAllowed(resolved.resolvedPath, relativePath);
 
     const exists = await assertExistingTargetIsRegularFile(resolved.resolvedPath, relativePath);
 

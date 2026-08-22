@@ -218,13 +218,13 @@ Each workspace may also define a write policy:
 }
 ```
 
-`writePolicy` is either `git_required` or `artifact_only`. Existing and newly added ordinary project roots default to `git_required`. `artifact_only` permits only bounded Markdown and JSON artifact persistence through `repo_toolbox.write_markdown_artifact` and `repo_toolbox.write_json_artifact`; patch and Git workflows remain unavailable. `artifactWriteRoots` are server-configured workspace-relative directory prefixes. If omitted for `artifact_only`, the launcher/server default is `planning`. The special root `.` is accepted only when explicitly saved and the launcher warns that it permits Markdown/JSON artifact-extension writes throughout the workspace.
+`writePolicy` is a legacy compatibility field, either `git_required` or `artifact_only`. Existing and newly added ordinary project roots default to `git_required`, but Git is not required for reads, searches, general diagnostics, or bounded Markdown/JSON artifact persistence. `artifact_only` preserves configured artifact-root limits and keeps Git mutation unavailable. Future-facing configs may use `workspaceCapabilities` with `artifactPersistence`, `patchWorkflow`, `gitOperations`, and `releaseOperations`; the app accepts this schema without automatically rewriting local config. `artifactWriteRoots` are server-configured workspace-relative directory prefixes. If omitted for `artifact_only`, the launcher/server default is `planning`. The special root `.` is accepted only when explicitly saved and the launcher warns that it permits Markdown/JSON artifact-extension writes throughout the workspace.
 
 The Allowed Roots Manager shows each workspace label, safe workspace ID, root, write policy selector, and artifact roots when planning mode is selected. Saving preserves labels, roots, remotes, default workspace selection, audit settings, allowed commands, and unrelated local config metadata. The app does not automatically run `git init`.
 
 `allowedRoots` remains supported. If only `allowedRoots` is configured, the server derives safe workspace IDs from folder names. ChatGPT-facing toolbox calls should use `diagnostics_toolbox.list_workspaces` and pass explicit workspace IDs instead of local paths.
 
-Environment variables still override local config for documented fields, but no environment value can globally bypass Git-backed mutation requirements. Legacy `requireGitRoot:false` is deprecated and only affects bounded legacy Markdown/JSON artifact persistence for non-Git derived roots; explicit workspace `writePolicy` is preferred.
+Environment variables still override local config for documented fields, but no environment value can globally bypass Git-backed mutation requirements. Legacy `requireGitRoot:false` is deprecated and only affects bounded legacy Markdown/JSON artifact persistence for non-Git derived roots; explicit workspace capability configuration is preferred. A project workspace such as `revisionary` is valid even when it is separate from the ChampCity GPT MCP service repository and has no `.git` directory.
 
 ## Configure ChatGPT OAuth
 

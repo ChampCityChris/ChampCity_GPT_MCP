@@ -62,6 +62,14 @@ Check health:
 curl http://127.0.0.1:3333/health
 ```
 
+## Result Delivery Diagnostics
+
+Tool responses include a compact structured delivery receipt when acknowledgement is useful. The receipt contains `correlationId`, `resultAttemptId`, and `payloadSha256`, plus the diagnostic action names `result_delivery_status` and `acknowledge_tool_result`.
+
+Use `diagnostics_toolbox.result_delivery_status` to inspect safe delivery metadata by exact `correlationId` or `resultAttemptId`. Use `diagnostics_toolbox.acknowledge_tool_result` only to record that a later caller supplied the matching receipt. This acknowledgement is telemetry only; it is not an approval control, does not retrieve, unlock, or reveal a hidden payload, does not mutate project workspace files, and does not prove OpenAI approved the content under every host-side policy.
+
+HTTP response `finish` means the local Node server handed response bytes to the transport stack. It is not client acknowledgement. Result telemetry stores dimensions and SHA-256 byte identifiers only; it must not retain document text, prompt text, patch text, artifact bodies, credentials, raw URLs, or absolute local paths. Live ChatGPT safety decisions remain outside the MCP server's direct observability.
+
 ## Cloudflare Tunnel Validation
 
 Use the Cloudflare setup package in this repo:
@@ -128,7 +136,7 @@ For normal ChatGPT-facing read-only status and release diagnostics, use the tool
 - `artifact_toolbox.builder_report_index`
 - `artifact_toolbox.builder_report_summary`
 - `artifact_toolbox.read_image_artifact`
-- `diagnostics_toolbox.public_safety_status`
+- `diagnostics_toolbox.workspace_safety_status`
 
 These actions avoid caller-supplied local roots, command-string inputs, and executable file globs. They return structured summaries with repository-relative paths where possible. `run_allowed_script` is not exposed publicly.
 
@@ -176,7 +184,7 @@ ChatGPT may bind tool schemas for the connector or chat lifecycle. Adding new to
 
 Existing narrow tools remain available for backward compatibility. The toolbox tools are visible with `files.read`; write-capable actions inside them still require OAuth `files.write` plus the same local write-mode policy as the mapped legacy tool. `workspace_write_attached_image` is a bounded top-level exception for ChatGPT image attachments and is visible only when `files.write` and local write mode permit it. A read-only caller can still use diagnostics/read-only toolbox actions, while write actions fail with a clear missing-scope or write-mode denial.
 
-Use explicit workspace IDs when more than one project is configured. Ask ChatGPT to call `diagnostics_toolbox` with `action: "list_workspaces"` to see safe IDs, then pass the chosen ID on project-specific calls:
+Use explicit workspace IDs when more than one project is configured. Ask ChatGPT to call `diagnostics_toolbox` with `action: "list_workspaces"` to see safe IDs, then pass the chosen ID on project-specific calls. A workspace ID such as `revisionary` identifies the served project and does not need to match the ChampCity GPT MCP service repository:
 
 ```json
 {
@@ -190,10 +198,10 @@ Use explicit workspace IDs when more than one project is configured. Ask ChatGPT
 
 Current public action groups:
 
-- `repo_toolbox`: `status`, `list_files`, `read_file`, `search_files`, `write_markdown_artifact`, `write_json_artifact`, `propose_patch`, `apply_approved_patch`
+- `repo_toolbox`: `status`, `list_files`, `read_file`, `inspect_text_file`, `read_text_chunk`, `read_text_lines`, `read_markdown_section`, `search_files`, `write_markdown_artifact`, `write_json_artifact`, `propose_patch`, `apply_approved_patch`
 - `git_toolbox`: `status`, `diff`, `prepare_work_branch`, `pre_commit_scan`, `stage_paths`, `commit_staged`, `push_current_branch`, `readiness_summary`, `integrate_to_dev`, `inspect_history`
-- `artifact_toolbox`: `builder_report_index`, `builder_report_summary`, `release_artifact_summary`, `release_publication_summary`, `local_package_summary`, `create_markdown_artifact`, `read_image_artifact`, `list_artifacts`, `read_artifact_by_id`, `latest_artifact`, `artifact_pair_status`, `current_action_context`, `export_planning_corpus`, `review_queue`
-- `diagnostics_toolbox`: `runtime_status`, `write_access_status`, `tool_exposure_status`, `oauth_scope_status`, `chatgpt_discovery_status`, `list_workspaces`, `public_safety_status`, `project_validation`, `mcp_server_startup`, `mcp_tool_registration`, `mcp_tool_inventory`, `electron_development_startup`, `electron_packaged_startup`
+- `artifact_toolbox`: `builder_report_index`, `builder_report_summary`, `release_artifact_summary`, `release_publication_summary`, `local_package_summary`, `create_markdown_artifact`, `read_image_artifact`, `list_artifacts`, `read_artifact_by_id`, `inspect_artifact_text`, `read_artifact_text_chunk`, `latest_artifact`, `artifact_pair_status`, `current_action_context`, `export_planning_corpus`, `review_queue`
+- `diagnostics_toolbox`: `runtime_status`, `write_access_status`, `tool_exposure_status`, `oauth_scope_status`, `chatgpt_discovery_status`, `list_workspaces`, `workspace_safety_status`, `public_safety_status` (deprecated alias), `project_validation`, `mcp_server_startup`, `mcp_tool_registration`, `mcp_tool_inventory`, `describe_toolbox_action`, `electron_development_startup`, `electron_packaged_startup`
 - `integration_toolbox`: `list_supported_services`, `get_service_status`, `list_service_capabilities`, `validate_service_configuration`, `prepare_external_handoff`
 - `browser_toolbox`: `get_browser_capabilities`, `validate_public_endpoint`
 - `knowledge_toolbox`: `list_supported_sources`, `get_project_memory_status`, `get_reference_capabilities`, `source_analysis`
@@ -201,6 +209,15 @@ Current public action groups:
 Do not expect a `figma_toolbox`. Figma is represented under `integration_toolbox` as `figma` and `figma_make`, but current Figma responses are broker-not-implemented placeholders and do not call old direct Figma API/token/MCP code. `integration_toolbox` is a governed broker, not arbitrary upstream MCP passthrough. `browser_toolbox` is constrained validation, not browser scraping. `knowledge_toolbox` is optional project reference capability, not hidden memory mutation.
 
 Architect validation is purpose-built: `project_validation` accepts only the fixed operations `typecheck`, `build`, `test`, and `release_checks`. ChampCity MCP does not expose arbitrary shell or command execution. Source analysis uses repository TypeScript source and can return `source_unavailable` in packaged-runtime mode. Artifact discovery, ID reads, latest-artifact selection, pair status, current-action context, and Architect review queues are available through `artifact_toolbox`; handoff-output submission, repair actions, workflow advancement, approval/rejection transitions, semantic Markdown/JSON equivalence checks, and automatic registry mutation are not implemented in this release.
+
+For long text or Markdown, prefer bounded projection:
+
+1. Call `repo_toolbox.inspect_text_file` or `artifact_toolbox.inspect_artifact_text`.
+2. Read with `read_text_chunk`, `read_text_lines`, `read_markdown_section`, or `read_artifact_text_chunk`.
+3. Continue with the returned `nextCursor` until `complete: true`.
+4. If a chunk is blocked or incomplete in ChatGPT, retry the same cursor with a smaller `maximumBytes`.
+
+Public text chunks default to 8,192 UTF-8 bytes and are hard-capped at 16,384 bytes per content item. `read_file` only returns complete inline content at or below 16,384 bytes; larger files return the first bounded chunk plus a cursor. This is exact source delivery with SHA-256 and byte/line ranges, not summary, redaction, encoding, or obfuscation. Bounded delivery reduces false-positive blast radius but cannot guarantee OpenAI host acceptance.
 
 When approving ChatGPT app scopes, use:
 
@@ -293,4 +310,3 @@ node .\dist\src\index.js --transport stdio
 ```
 
 Use STDIO for trusted local MCP clients only. ChatGPT.com needs the HTTPS endpoint above.
-

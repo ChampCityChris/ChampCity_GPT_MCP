@@ -8,6 +8,7 @@ import {
   resolveWorkspace,
   type ResolvedWorkspace
 } from "./workspaces.js";
+import { buildWorkspaceCapabilitySummary, type WorkspaceCapabilitySummary } from "./workspaceCapabilities.js";
 import {
   detectGitRepository,
   isRelativePathInsideArtifactRoots,
@@ -38,12 +39,33 @@ function resolveWorkspaceByRoot(root: string, config: AppConfig): ResolvedWorksp
   return resolveWorkspace(match.workspaceId, config);
 }
 
-function authorityFor(workspace: ResolvedWorkspace, operation: WorkspaceOperationClass, relativePath?: string): WorkspaceAuthority {
+function releaseInspectionDenialReason(workspace: ResolvedWorkspace, capabilities: WorkspaceCapabilitySummary): WorkspaceAuthority["denialReason"] | undefined {
+  if (workspace.writePolicy === "artifact_only") {
+    return "WORKSPACE_POLICY_DENIED";
+  }
+
+  if (capabilities.releaseInspection.available) {
+    return undefined;
+  }
+
+  return capabilities.gitInspection.reasonCode === "NOT_GIT_REPOSITORY"
+    ? "GIT_CAPABILITY_UNAVAILABLE"
+    : "WORKSPACE_POLICY_DENIED";
+}
+
+function authorityFor(workspace: ResolvedWorkspace, config: AppConfig, operation: WorkspaceOperationClass, relativePath?: string): WorkspaceAuthority {
   let allowed = true;
   let denialReason: WorkspaceAuthority["denialReason"];
 
-  if (operation === "artifact_persistence") {
+  if (operation === "filesystem_read" || operation === "workspace_diagnostics" || operation === "artifact_persistence") {
     if (
+      operation === "artifact_persistence" &&
+      workspace.workspaceCapabilities?.artifactPersistence === "disabled"
+    ) {
+      allowed = false;
+      denialReason = "WORKSPACE_POLICY_DENIED";
+    } else if (
+      operation === "artifact_persistence" &&
       workspace.writePolicy === "artifact_only" &&
       relativePath !== undefined &&
       !isRelativePathInsideArtifactRoots(relativePath, workspace.artifactWriteRoots)
@@ -51,12 +73,35 @@ function authorityFor(workspace: ResolvedWorkspace, operation: WorkspaceOperatio
       allowed = false;
       denialReason = "TARGET_OUTSIDE_ARTIFACT_ROOTS";
     }
-  } else if (workspace.writePolicy === "artifact_only") {
+  } else if (operation === "patch_workflow") {
+    if (workspace.workspaceCapabilities?.patchWorkflow === "disabled" || workspace.writePolicy === "artifact_only") {
+      allowed = false;
+      denialReason = "WORKSPACE_POLICY_DENIED";
+    } else if (!workspace.gitDetected) {
+      allowed = false;
+      denialReason = "GIT_CAPABILITY_UNAVAILABLE";
+    }
+  } else if (operation === "git_inspection") {
+    if (workspace.workspaceCapabilities?.gitOperations === "disabled") {
+      allowed = false;
+      denialReason = "WORKSPACE_POLICY_DENIED";
+    } else if (!workspace.gitDetected) {
+      allowed = false;
+      denialReason = "GIT_CAPABILITY_UNAVAILABLE";
+    }
+  } else if (operation === "release_inspection") {
+    denialReason = releaseInspectionDenialReason(workspace, buildWorkspaceCapabilitySummary(workspace, config));
+    allowed = denialReason === undefined;
+  } else if (
+    (operation === "git_mutation" && workspace.workspaceCapabilities?.gitOperations === "disabled") ||
+    (operation === "release_publication" && workspace.workspaceCapabilities?.releaseOperations === "disabled") ||
+    workspace.writePolicy === "artifact_only"
+  ) {
     allowed = false;
     denialReason = "WORKSPACE_POLICY_DENIED";
   } else if (!workspace.gitDetected) {
     allowed = false;
-    denialReason = "GIT_REQUIRED";
+    denialReason = "GIT_CAPABILITY_UNAVAILABLE";
   }
 
   return {
@@ -79,7 +124,7 @@ export function resolveWorkspaceAuthorityForRoot(
   relativePath?: string
 ): WorkspaceAuthority {
   const workspace = resolveWorkspaceByRoot(root, config);
-  return authorityFor(workspace, operation, relativePath);
+  return authorityFor(workspace, config, operation, relativePath);
 }
 
 export function resolveWorkspaceAuthority(
@@ -88,7 +133,7 @@ export function resolveWorkspaceAuthority(
   operation: WorkspaceOperationClass,
   relativePath?: string
 ): WorkspaceAuthority {
-  return authorityFor(resolveWorkspace(workspaceId, config), operation, relativePath);
+  return authorityFor(resolveWorkspace(workspaceId, config), config, operation, relativePath);
 }
 
 export function assertWorkspaceAuthorityAllowed(authority: WorkspaceAuthority): void {
@@ -97,7 +142,7 @@ export function assertWorkspaceAuthorityAllowed(authority: WorkspaceAuthority): 
   }
 
   if (authority.denialReason === "WORKSPACE_POLICY_DENIED") {
-    throw new AppError("WORKSPACE_POLICY_DENIED", "Selected workspace policy does not allow this Git-backed operation.", {
+    throw new AppError("WORKSPACE_POLICY_DENIED", "Selected workspace policy does not allow the requested capability.", {
       workspaceId: authority.workspaceId,
       writePolicy: authority.policy,
       operation: authority.operation
@@ -112,7 +157,7 @@ export function assertWorkspaceAuthorityAllowed(authority: WorkspaceAuthority): 
     });
   }
 
-  throw new AppError("GIT_REQUIRED", "Selected workspace must be a confirmed Git repository for this operation.", {
+  throw new AppError("GIT_CAPABILITY_UNAVAILABLE", "The requested capability is unavailable because the selected workspace is not a Git repository.", {
     workspaceId: authority.workspaceId,
     writePolicy: authority.policy,
     operation: authority.operation

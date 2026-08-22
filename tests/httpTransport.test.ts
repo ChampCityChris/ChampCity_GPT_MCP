@@ -1,4 +1,5 @@
-﻿import fs from "node:fs";
+import http from "node:http";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -85,8 +86,8 @@ function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   };
 }
 
-function createScopedMcpServerFactory(config: AppConfig) {
-  return (auth?: { scope: string }) => createMcpServer(config, "0.1.0-test", { scope: auth?.scope });
+function createScopedMcpServerFactory(config: AppConfig, options: { serializationFailureFixture?: () => unknown } = {}) {
+  return (auth?: { scope: string }) => createMcpServer(config, "0.1.0-test", { ...options, scope: auth?.scope });
 }
 
 function toolboxActionFromArguments(args: unknown): string | undefined {
@@ -325,6 +326,27 @@ function textResultPayload(messages: Array<Record<string, unknown>>, id: string 
   );
   assert.ok(textContent);
   return JSON.parse(textContent.text) as Record<string, unknown>;
+}
+
+interface DeliveryReceipt {
+  correlationId: string;
+  resultAttemptId: string;
+  payloadSha256: string;
+}
+
+function deliveryReceiptFromToolResult(result: Record<string, unknown>): DeliveryReceipt {
+  const structuredContent = result.structuredContent as { champcityDeliveryReceipt?: DeliveryReceipt } | undefined;
+  assert.ok(structuredContent?.champcityDeliveryReceipt);
+  return structuredContent.champcityDeliveryReceipt;
+}
+
+function modelVisibleStructuredPayloadFromToolResult(result: Record<string, unknown>): Record<string, unknown> {
+  const structuredContent = result.structuredContent;
+  assert.ok(structuredContent && typeof structuredContent === "object" && !Array.isArray(structuredContent));
+  const payload = structuredContent as Record<string, unknown>;
+  assert.ok("result" in payload, `Expected substantive structured result, received ${JSON.stringify(payload)}`);
+  assert.notDeepEqual(Object.keys(payload), ["champcityDeliveryReceipt"]);
+  return payload;
 }
 
 async function initializeOAuthMcpSession(handleUrl: string, scope: string): Promise<Record<string, string>> {
@@ -1452,6 +1474,9 @@ describe("HTTP MCP transport safety", () => {
       assert.equal(unknown.response.status, 200);
       assert.match(JSON.stringify(unknown.messages), /not exposed on the public toolbox surface/u);
       assert.doesNotMatch(JSON.stringify(unknown.messages), /LEGACY_TOOL_REMOVED/u);
+      const unknownResult = firstResult(unknown.messages, 5);
+      assert.equal(unknownResult.isError, true);
+      assert.equal(deliveryReceiptFromToolResult(unknownResult).payloadSha256.length, 64);
     } finally {
       await handle.close();
     }
@@ -1526,21 +1551,146 @@ describe("HTTP MCP transport safety", () => {
       );
 
       assert.equal(read.response.status, 200);
-      firstResult(read.messages, 2);
+      const readResult = firstResult(read.messages, 2);
+      const receipt = deliveryReceiptFromToolResult(readResult);
+      assert.equal(receipt.correlationId.length > 0, true);
+      assert.equal(receipt.payloadSha256.length, 64);
+      assert.equal((readResult._meta as Record<string, unknown> | undefined)?.champcityDeliveryReceipt, undefined);
+      assert.ok(Array.isArray(readResult.content));
+      assert.equal((readResult.structuredContent as Record<string, unknown>).champcityDeliveryReceipt, receipt);
+
+      const preAckStatus = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: {
+            name: "diagnostics_toolbox",
+            arguments: {
+              action: "result_delivery_status",
+              params: {
+                correlationId: receipt.correlationId,
+                resultAttemptId: receipt.resultAttemptId
+              }
+            }
+          }
+        },
+        sessionHeaders
+      );
+      assert.equal(preAckStatus.response.status, 200);
+      const preAckPayload = textResultPayload(preAckStatus.messages, 3);
+      const preAckResult = preAckPayload.result as Record<string, unknown>;
+      assert.equal(preAckResult.queryScope, "result_attempt");
+      assert.equal(preAckResult.classification, "RESPONSE_FINISHED_UNACKNOWLEDGED");
+      assert.equal(preAckResult.resultAttemptId, receipt.resultAttemptId);
+      assert.equal((preAckResult.resultDimensions as Record<string, unknown>).payloadSha256, receipt.payloadSha256);
+
+      const ack = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "tools/call",
+          params: {
+            name: "diagnostics_toolbox",
+            arguments: {
+              action: "acknowledge_tool_result",
+              params: {
+                correlationId: receipt.correlationId,
+                resultAttemptId: receipt.resultAttemptId,
+                payloadSha256: receipt.payloadSha256
+              }
+            }
+          }
+        },
+        sessionHeaders
+      );
+      assert.equal(ack.response.status, 200);
+      const ackPayload = textResultPayload(ack.messages, 4).result as Record<string, unknown>;
+      assert.equal(ackPayload.status, "acknowledged");
+      assert.equal(ackPayload.acknowledgementRecorded, true);
+
+      const duplicateAck = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 5,
+          method: "tools/call",
+          params: {
+            name: "diagnostics_toolbox",
+            arguments: {
+              action: "acknowledge_tool_result",
+              params: {
+                correlationId: receipt.correlationId,
+                resultAttemptId: receipt.resultAttemptId,
+                payloadSha256: receipt.payloadSha256
+              }
+            }
+          }
+        },
+        sessionHeaders
+      );
+      assert.equal(duplicateAck.response.status, 200);
+      const duplicateAckPayload = textResultPayload(duplicateAck.messages, 5).result as Record<string, unknown>;
+      assert.equal(duplicateAckPayload.status, "already_acknowledged");
+      assert.equal(duplicateAckPayload.idempotent, true);
+
+      const postAckStatus = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: 6,
+          method: "tools/call",
+          params: {
+            name: "diagnostics_toolbox",
+            arguments: {
+              action: "result_delivery_status",
+              params: {
+                resultAttemptId: receipt.resultAttemptId
+              }
+            }
+          }
+        },
+        sessionHeaders
+      );
+      assert.equal(postAckStatus.response.status, 200);
+      const postAckPayload = textResultPayload(postAckStatus.messages, 6).result as Record<string, unknown>;
+      assert.equal(postAckPayload.classification, "CLIENT_ACKNOWLEDGED");
+      assert.equal((postAckPayload.acknowledgement as Record<string, unknown>).acknowledged, true);
+
       const calls = readRecentToolCalls(config, { publicToolName: "repo_toolbox" }).calls;
       assert.equal(calls.length, 1);
       const call = calls[0];
-      assert.equal(call.classification, "RESPONSE_COMPLETED");
-      assert.deepEqual(new Set(call.stages), new Set([
+      assert.equal(call.classification, "CLIENT_ACKNOWLEDGED");
+      assert.ok(call.events.every((event) => event.jsonRpcId === 2));
+      const acknowledgementEvent = call.events.find((event) => event.stage === "client_result_acknowledged");
+      assert.ok(acknowledgementEvent);
+      assert.equal(acknowledgementEvent.jsonRpcId, 2);
+      assert.equal(acknowledgementEvent.resultAttemptId, receipt.resultAttemptId);
+      assert.equal(acknowledgementEvent.resultTelemetrySchemaVersion, 1);
+      assert.equal(acknowledgementEvent.payloadSha256, receipt.payloadSha256);
+      for (const stage of [
         "http_received",
         "dispatch_started",
         "toolbox_entered",
         "helper_started",
         "helper_allowed",
+        "result_materialized",
+        "result_serialized",
         "tool_result_returned",
+        "http_response_finished",
         "http_response_completed"
-      ]));
+      ]) {
+        assert.ok(call.stages.includes(stage as never), `Expected ${stage}`);
+      }
       assert.equal(new Set(call.events.map((event) => event.correlationId)).size, 1);
+      const acknowledgementCall = readRecentToolCalls(config, { publicToolName: "diagnostics_toolbox", limit: 50 }).calls.find((entry) =>
+        entry.events.some((event) => event.jsonRpcId === 4)
+      );
+      assert.ok(acknowledgementCall);
+      assert.ok(acknowledgementCall.events.every((event) => event.jsonRpcId === 4));
+      assert.equal(acknowledgementCall.stages.includes("client_result_acknowledged"), false);
       const serializedTrace = JSON.stringify(call);
       assert.doesNotMatch(serializedTrace, /# Alpha|should-not-appear/u);
       assert.doesNotMatch(serializedTrace, new RegExp(tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
@@ -1548,6 +1698,421 @@ describe("HTTP MCP transport safety", () => {
 
       const auditEntries = fs.readFileSync(config.auditLogPath, "utf8").trim().split(/\r?\n/u).map((line) => JSON.parse(line) as { toolName?: string; correlationId?: string; result?: string });
       assert.ok(auditEntries.some((entry) => entry.toolName === "read_project_file" && entry.correlationId === call.correlationId && entry.result === "allow"));
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("preserves substantive payloads when ChatGPT selects structuredContent as model-visible output", async () => {
+    fs.writeFileSync(path.join(tempRoot, "alpha.md"), "# Alpha\n", "utf8");
+    fs.mkdirSync(path.join(tempRoot, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, "docs", "range.md"), "line-1\nline-2-is-long-enough-to-split\nline-3\n", "utf8");
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    async function callTool(id: number, name: string, args: Record<string, unknown>, headers: Record<string, string>) {
+      const response = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: {
+            name,
+            arguments: args
+          }
+        },
+        headers
+      );
+      assert.equal(response.response.status, 200);
+      return firstResult(response.messages, id);
+    }
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read");
+      const readFile = await callTool(
+        2,
+        "repo_toolbox",
+        { action: "read_file", params: { relativePath: "alpha.md" } },
+        sessionHeaders
+      );
+      const readFileStructured = modelVisibleStructuredPayloadFromToolResult(readFile);
+      const readFileResult = readFileStructured.result as Record<string, unknown>;
+      const receipt = deliveryReceiptFromToolResult(readFile);
+      assert.equal(readFileStructured.toolbox, "repo_toolbox");
+      assert.equal(readFileStructured.action, "read_file");
+      assert.equal(readFileStructured.ok, true);
+      assert.equal(readFileResult.relativePath, "alpha.md");
+      assert.equal(readFileResult.content, "# Alpha\n");
+      assert.equal(readFileStructured.champcityDeliveryReceipt, receipt);
+      assert.ok(Array.isArray(readFile.content));
+
+      const status = await callTool(3, "repo_toolbox", { action: "status" }, sessionHeaders);
+      const statusStructured = modelVisibleStructuredPayloadFromToolResult(status);
+      assert.equal(statusStructured.toolbox, "repo_toolbox");
+      assert.equal(statusStructured.action, "status");
+      assert.equal(statusStructured.ok, true);
+      assert.equal(typeof statusStructured.result, "object");
+
+      const describe = await callTool(
+        4,
+        "diagnostics_toolbox",
+        { action: "describe_toolbox_action", params: { toolboxName: "repo_toolbox", actionName: "read_text_chunk" } },
+        sessionHeaders
+      );
+      const describeStructured = modelVisibleStructuredPayloadFromToolResult(describe);
+      const describeResult = describeStructured.result as { contract?: { responseSerializerMode?: string } };
+      assert.equal(describeStructured.action, "describe_toolbox_action");
+      assert.equal(describeResult.contract?.responseSerializerMode, "bounded-text-v1");
+
+      const deliveryStatus = await callTool(
+        5,
+        "diagnostics_toolbox",
+        { action: "result_delivery_status", params: { resultAttemptId: receipt.resultAttemptId } },
+        sessionHeaders
+      );
+      const deliveryStatusStructured = modelVisibleStructuredPayloadFromToolResult(deliveryStatus);
+      const deliveryStatusResult = deliveryStatusStructured.result as Record<string, unknown>;
+      assert.equal(deliveryStatusStructured.action, "result_delivery_status");
+      assert.equal(deliveryStatusResult.status, "found");
+      assert.equal(deliveryStatusResult.resultAttemptId, receipt.resultAttemptId);
+
+      const acknowledgement = await callTool(
+        6,
+        "diagnostics_toolbox",
+        {
+          action: "acknowledge_tool_result",
+          params: {
+            correlationId: receipt.correlationId,
+            resultAttemptId: receipt.resultAttemptId,
+            payloadSha256: receipt.payloadSha256
+          }
+        },
+        sessionHeaders
+      );
+      const acknowledgementStructured = modelVisibleStructuredPayloadFromToolResult(acknowledgement);
+      const acknowledgementResult = acknowledgementStructured.result as Record<string, unknown>;
+      assert.equal(acknowledgementStructured.action, "acknowledge_tool_result");
+      assert.equal(acknowledgementResult.status, "acknowledged");
+      assert.equal(acknowledgementResult.acknowledgementRecorded, true);
+
+      const bounded = await callTool(
+        7,
+        "repo_toolbox",
+        { action: "read_text_lines", params: { relativePath: "docs/range.md", startLine: 2, maximumLines: 2, maximumBytes: 12 } },
+        sessionHeaders
+      );
+      const boundedStructured = modelVisibleStructuredPayloadFromToolResult(bounded);
+      const boundedResult = boundedStructured.result as Record<string, unknown>;
+      const boundedContent = bounded.content as Array<{ text?: string }>;
+      assert.equal(boundedStructured.action, "read_text_lines");
+      assert.equal(boundedResult.content, boundedContent[1]?.text);
+      assert.equal(boundedResult.complete, false);
+      assert.equal(typeof boundedResult.nextCursor, "string");
+      assert.equal(typeof boundedResult.sourceSha256, "string");
+      assert.equal(typeof boundedResult.range, "object");
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("enforces bounded cursor contracts and telemetry through public HTTP MCP calls", async () => {
+    fs.mkdirSync(path.join(tempRoot, "docs"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempRoot, "docs", "range.md"),
+      "line-1\nline-2-is-long-enough-to-split\nline-3\nline-4-must-not-return\n",
+      "utf8"
+    );
+    fs.writeFileSync(path.join(tempRoot, "docs", "other.md"), "other\n", "utf8");
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
+      host: "127.0.0.1",
+      port: 0,
+      version: "0.1.0-test",
+      allowNonlocalHttp: false,
+      allowUnauthLocalHttp: false
+    });
+
+    async function callTool(id: number, name: string, args: Record<string, unknown>, headers: Record<string, string>) {
+      const response = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: {
+            name,
+            arguments: args
+          }
+        },
+        headers
+      );
+      assert.equal(response.response.status, 200);
+      return firstResult(response.messages, id);
+    }
+
+    function parseToolboxPayload(result: Record<string, unknown>): { ok?: boolean; error?: { details?: { classification?: string } } } {
+      return JSON.parse(((result.content as Array<{ text?: string }>)[0]?.text ?? "{}")) as {
+        ok?: boolean;
+        error?: { details?: { classification?: string } };
+      };
+    }
+
+    function assertNoSourceTextItem(result: Record<string, unknown>): void {
+      const content = result.content as Array<{ text?: string }>;
+      assert.equal(content.some((entry) => entry.text?.includes("line-2-is-long-enough-to-split")), false);
+      assert.equal(content.some((entry) => entry.text?.includes("line-3")), false);
+    }
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read");
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const first = await callTool(
+        20,
+        "repo_toolbox",
+        {
+          action: "read_text_lines",
+          params: { relativePath: "docs/range.md", startLine: 2, maximumLines: 2, maximumBytes: 12 }
+        },
+        sessionHeaders
+      );
+      const firstContent = first.content as Array<{ text?: string }>;
+      const firstStructured = first.structuredContent as { nextCursor?: string; complete?: boolean };
+      const receipt = deliveryReceiptFromToolResult(first);
+      assert.equal(firstStructured.complete, false);
+      assert.ok(firstStructured.nextCursor);
+
+      let cursor: string | undefined = firstStructured.nextCursor;
+      let reconstructed = firstContent[1]?.text ?? "";
+      let id = 21;
+      while (cursor) {
+        const next = await callTool(
+          id,
+          "repo_toolbox",
+          {
+            action: "read_text_lines",
+            params: { cursor, maximumBytes: 12 }
+          },
+          sessionHeaders
+        );
+        reconstructed += ((next.content as Array<{ text?: string }>)[1]?.text ?? "");
+        cursor = (next.structuredContent as { nextCursor?: string | null }).nextCursor ?? undefined;
+        id += 1;
+      }
+      assert.equal(reconstructed, "line-2-is-long-enough-to-split\nline-3\n");
+      assert.equal(reconstructed.includes("line-4-must-not-return"), false);
+
+      const repeatedIdentifiers = await callTool(
+        30,
+        "repo_toolbox",
+        {
+          action: "read_text_lines",
+          params: { cursor: firstStructured.nextCursor, relativePath: "docs/range.md", startLine: 2, maximumLines: 2, maximumBytes: 12 }
+        },
+        sessionHeaders
+      );
+      assert.equal((repeatedIdentifiers.content as Array<{ text?: string }>)[1]?.text, "ng-enough-to");
+
+      const wrongAction = await callTool(
+        31,
+        "repo_toolbox",
+        {
+          action: "read_text_chunk",
+          params: { cursor: firstStructured.nextCursor }
+        },
+        sessionHeaders
+      );
+      const wrongPayload = parseToolboxPayload(wrongAction);
+      assert.equal(wrongPayload.ok, false);
+      assert.equal(wrongPayload.error?.details?.classification, "contract_rejection");
+
+      const conflictingStartLine = await callTool(
+        32,
+        "repo_toolbox",
+        {
+          action: "read_text_lines",
+          params: { cursor: firstStructured.nextCursor, startLine: 3, maximumBytes: 12 }
+        },
+        sessionHeaders
+      );
+      const conflictingStartLinePayload = parseToolboxPayload(conflictingStartLine);
+      assert.equal(conflictingStartLinePayload.ok, false);
+      assert.equal(conflictingStartLinePayload.error?.details?.classification, "contract_rejection");
+      assertNoSourceTextItem(conflictingStartLine);
+
+      const conflictingMaximumLines = await callTool(
+        33,
+        "repo_toolbox",
+        {
+          action: "read_text_lines",
+          params: { cursor: firstStructured.nextCursor, maximumLines: 3, maximumBytes: 12 }
+        },
+        sessionHeaders
+      );
+      const conflictingMaximumLinesPayload = parseToolboxPayload(conflictingMaximumLines);
+      assert.equal(conflictingMaximumLinesPayload.ok, false);
+      assert.equal(conflictingMaximumLinesPayload.error?.details?.classification, "contract_rejection");
+      assertNoSourceTextItem(conflictingMaximumLines);
+
+      const sameHardEndDifferentIdentifiers = await callTool(
+        34,
+        "repo_toolbox",
+        {
+          action: "read_text_lines",
+          params: { cursor: firstStructured.nextCursor, startLine: 1, maximumLines: 3, maximumBytes: 12 }
+        },
+        sessionHeaders
+      );
+      const sameHardEndDifferentIdentifiersPayload = parseToolboxPayload(sameHardEndDifferentIdentifiers);
+      assert.equal(sameHardEndDifferentIdentifiersPayload.ok, false);
+      assert.equal(sameHardEndDifferentIdentifiersPayload.error?.details?.classification, "contract_rejection");
+      assertNoSourceTextItem(sameHardEndDifferentIdentifiers);
+
+      const conflictingPath = await callTool(
+        35,
+        "repo_toolbox",
+        {
+          action: "read_text_lines",
+          params: { cursor: firstStructured.nextCursor, relativePath: "docs/other.md", maximumBytes: 12 }
+        },
+        sessionHeaders
+      );
+      const conflictingPathPayload = parseToolboxPayload(conflictingPath);
+      assert.equal(conflictingPathPayload.ok, false);
+      assert.equal(conflictingPathPayload.error?.details?.classification, "contract_rejection");
+      assertNoSourceTextItem(conflictingPath);
+
+      const validAfterRejectedConflict = await callTool(
+        36,
+        "repo_toolbox",
+        {
+          action: "read_text_lines",
+          params: { cursor: firstStructured.nextCursor, maximumBytes: 12 }
+        },
+        sessionHeaders
+      );
+      assert.equal((validAfterRejectedConflict.content as Array<{ text?: string }>)[1]?.text, "ng-enough-to");
+
+      const rejectedIds = [32, 33, 34, 35];
+      const calls = readRecentToolCalls(config, { since, publicToolName: "repo_toolbox" }).calls;
+      for (const rejectedId of rejectedIds) {
+        const rejectedCall = calls.find((call) => call.events.some((event) => event.jsonRpcId === rejectedId));
+        assert.ok(rejectedCall, `Expected trace for rejected JSON-RPC id ${rejectedId}`);
+        assert.equal(rejectedCall.classification, "APP_CONTRACT_REJECTED");
+      }
+
+      const status = await callTool(
+        37,
+        "diagnostics_toolbox",
+        {
+          action: "result_delivery_status",
+          params: { resultAttemptId: receipt.resultAttemptId }
+        },
+        sessionHeaders
+      );
+      const statusPayload = JSON.parse(((status.content as Array<{ text?: string }>)[0]?.text ?? "{}")) as { result?: { resultDimensions?: Record<string, unknown> } };
+      assert.equal(statusPayload.result?.resultDimensions?.serializerName, "bounded-text-v1");
+      assert.equal(statusPayload.result?.resultDimensions?.truncated, true);
+      assert.equal(statusPayload.result?.resultDimensions?.chunked, true);
+      assert.equal(statusPayload.result?.resultDimensions?.sourceRangeStart, 7);
+      assert.equal(statusPayload.result?.resultDimensions?.continuationPresent, true);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("returns a measured safe error attempt when public result serialization fails", async () => {
+    const privateText = "PRIVATE_NONSERIALIZABLE_PAYLOAD should-not-persist access_token=fixture-secret C:\\Users\\fixture\\secret.md";
+    const config = testConfig({ writeMode: "off" });
+    const handle = await runHttpTransport(
+      createScopedMcpServerFactory(config, {
+        serializationFailureFixture: () => {
+          const cyclicStructuredContent: { self?: unknown; privateText: string } = { privateText };
+          cyclicStructuredContent.self = cyclicStructuredContent;
+          return {
+            mcpContent: [
+              {
+                type: "text" as const,
+                text: privateText
+              }
+            ],
+            structuredContent: cyclicStructuredContent
+          };
+        }
+      }),
+      config,
+      {
+        host: "127.0.0.1",
+        port: 0,
+        version: "0.1.0-test",
+        allowNonlocalHttp: false,
+        allowUnauthLocalHttp: false
+      }
+    );
+
+    try {
+      const sessionHeaders = await initializeOAuthMcpSession(handle.url, "files.read");
+      const since = new Date(Date.now() - 1_000).toISOString();
+      const result = await postMcp(
+        handle.url,
+        {
+          jsonrpc: "2.0",
+          id: "serialization-failure-A",
+          method: "tools/call",
+          params: {
+            name: "diagnostics_toolbox",
+            arguments: {
+              action: "__test_nonserializable_result"
+            }
+          }
+        },
+        sessionHeaders
+      );
+
+      assert.equal(result.response.status, 200);
+      const safeErrorResult = firstResult(result.messages, "serialization-failure-A");
+      assert.equal(safeErrorResult.isError, true);
+      const safeReceipt = deliveryReceiptFromToolResult(safeErrorResult);
+
+      const call = readRecentToolCalls(config, { since, limit: 50 }).calls.find((entry) =>
+        entry.publicTool === "diagnostics_toolbox" && entry.events.some((event) => event.jsonRpcId === "serialization-failure-A")
+      );
+      assert.ok(call);
+      assert.equal(call.classification, "CORRELATION_AGGREGATE");
+      assert.ok(call.events.every((event) => event.jsonRpcId === "serialization-failure-A"));
+      assert.equal(call.attempts?.length, 2);
+
+      const failedAttempt = call.attempts?.find((attempt) => attempt.resultAttemptId !== safeReceipt.resultAttemptId);
+      const safeAttempt = call.attempts?.find((attempt) => attempt.resultAttemptId === safeReceipt.resultAttemptId);
+      assert.ok(failedAttempt);
+      assert.ok(safeAttempt);
+      assert.equal(failedAttempt.classification, "APP_EXECUTION_ERROR");
+      assert.equal(safeAttempt.classification, "APP_EXECUTION_ERROR");
+
+      const failedEvents = call.events.filter((event) => event.resultAttemptId === failedAttempt.resultAttemptId);
+      assert.ok(failedEvents.some((event) => event.stage === "result_materialized"));
+      assert.ok(failedEvents.some((event) => event.stage === "tool_result_returned" && event.result === "error"));
+      assert.equal(failedEvents.some((event) => event.stage === "result_serialized"), false);
+      assert.equal(failedEvents.some((event) => event.stage === "http_response_finished"), false);
+      assert.equal(failedEvents.some((event) => event.stage === "client_result_acknowledged"), false);
+
+      const safeEvents = call.events.filter((event) => event.resultAttemptId === safeReceipt.resultAttemptId);
+      assert.ok(safeEvents.some((event) => event.stage === "result_serialized" && event.result === "allow"));
+      assert.ok(safeEvents.some((event) => event.stage === "tool_result_returned" && event.result === "error" && event.errorCode === "UNKNOWN_ERROR"));
+      assert.ok(safeEvents.some((event) => event.stage === "http_response_finished"));
+      assert.equal(safeReceipt.payloadSha256, safeEvents.find((event) => event.stage === "result_serialized")?.payloadSha256);
+
+      const auditLog = fs.existsSync(config.auditLogPath) ? fs.readFileSync(config.auditLogPath, "utf8") : "";
+      for (const serialized of [JSON.stringify(call), auditLog, JSON.stringify(result.messages)]) {
+        assert.doesNotMatch(serialized, /PRIVATE_NONSERIALIZABLE_PAYLOAD|fixture-secret|secret\.md/u);
+        assert.doesNotMatch(serialized, /at .*\.ts|at .*\.js/u);
+      }
     } finally {
       await handle.close();
     }
@@ -1620,7 +2185,7 @@ describe("HTTP MCP transport safety", () => {
         new Set(calls.flatMap((call) => call.events.map((event) => event.jsonRpcId)).filter((id) => id !== undefined)),
         new Set([12, 13])
       );
-      assert.ok(calls.every((call) => call.classification === "RESPONSE_COMPLETED"));
+      assert.ok(calls.every((call) => call.classification === "RESPONSE_FINISHED_UNACKNOWLEDGED"));
       assert.ok(calls.every((call) => call.stages.includes("http_received")));
       assert.ok(calls.every((call) => call.stages.includes("dispatch_started")));
     } finally {
@@ -1712,7 +2277,7 @@ describe("HTTP MCP transport safety", () => {
     }
   });
 
-  it("classifies missing files.read HTTP scope denial as APP_POLICY_DENIED without dispatch stages", async () => {
+  it("classifies missing files.read HTTP scope denial as APP_AUTHORIZATION_DENIED without dispatch stages", async () => {
     const config = testConfig({ writeMode: "off" });
     const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
       host: "127.0.0.1",
@@ -1743,8 +2308,10 @@ describe("HTTP MCP transport safety", () => {
       assert.equal(denied.response.status, 403);
 
       const call = readRecentToolCalls(config, { publicToolName: "repo_toolbox" }).calls[0];
-      assert.equal(call.classification, "APP_POLICY_DENIED");
-      assert.deepEqual(new Set(call.stages), new Set(["http_received", "http_response_completed"]));
+      assert.equal(call.classification, "APP_AUTHORIZATION_DENIED");
+      assert.ok(call.stages.includes("http_received"));
+      assert.ok(call.stages.includes("http_response_finished"));
+      assert.ok(call.stages.includes("http_response_completed"));
       assert.ok(call.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED" && event.result === "deny"));
       assert.equal(call.stages.includes("dispatch_started"), false);
       assert.equal(call.stages.includes("toolbox_entered"), false);
@@ -1789,8 +2356,10 @@ describe("HTTP MCP transport safety", () => {
       assert.equal(denied.response.status, 403);
 
       const call = readRecentToolCalls(config, { publicToolName: "workspace_write_attached_image" }).calls[0];
-      assert.equal(call.classification, "APP_POLICY_DENIED");
-      assert.deepEqual(new Set(call.stages), new Set(["http_received", "http_response_completed"]));
+      assert.equal(call.classification, "APP_AUTHORIZATION_DENIED");
+      assert.ok(call.stages.includes("http_received"));
+      assert.ok(call.stages.includes("http_response_finished"));
+      assert.ok(call.stages.includes("http_response_completed"));
       assert.ok(call.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED"));
     } finally {
       await handle.close();
@@ -1854,8 +2423,10 @@ describe("HTTP MCP transport safety", () => {
 
         const call = readRecentToolCalls(config, { publicToolName: testCase.name }).calls.find((entry) => entry.events.some((event) => event.jsonRpcId === testCase.id));
         assert.ok(call);
-        assert.equal(call.classification, "APP_POLICY_DENIED");
-        assert.deepEqual(new Set(call.stages), new Set(["http_received", "http_response_completed"]));
+        assert.equal(call.classification, "APP_AUTHORIZATION_DENIED");
+        assert.ok(call.stages.includes("http_received"));
+        assert.ok(call.stages.includes("http_response_finished"));
+        assert.ok(call.stages.includes("http_response_completed"));
         assert.ok(call.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED" && /files\.write/u.test(String(event.errorMessage))));
       }
     } finally {
@@ -1916,7 +2487,7 @@ describe("HTTP MCP transport safety", () => {
       assert.ok(readCall);
       assert.ok(writeCall);
       assert.equal(readCall.classification, "RECEIVED_NOT_DISPATCHED");
-      assert.equal(writeCall.classification, "APP_POLICY_DENIED");
+      assert.equal(writeCall.classification, "APP_AUTHORIZATION_DENIED");
       assert.equal(readCall.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED" || /files\.write/u.test(String(event.errorMessage))), false);
       assert.ok(writeCall.events.some((event) => event.errorCode === "OAUTH_SCOPE_DENIED" && /repo_toolbox\.write_markdown_artifact/u.test(String(event.errorMessage))));
       assert.ok(calls.every((call) => !call.stages.includes("dispatch_started")));
@@ -2016,7 +2587,7 @@ describe("HTTP MCP transport safety", () => {
 
       const calls = readRecentToolCalls(config, { since, limit: 50 }).calls.filter((call) => call.events.some((event) => event.jsonRpcId === "duplicate-string-id"));
       assert.equal(calls.length, 2);
-      assert.ok(calls.every((call) => call.classification === "APP_POLICY_DENIED"));
+      assert.ok(calls.every((call) => call.classification === "APP_CONTRACT_REJECTED"));
       assert.ok(calls.every((call) => call.stages.includes("http_received")));
       assert.ok(calls.every((call) => call.stages.includes("http_response_completed")));
       assert.ok(calls.every((call) => call.events.some((event) => event.errorCode === "INVALID_INPUT" && event.errorMessage === "Duplicate JSON-RPC request ID in batch.")));
@@ -2056,7 +2627,7 @@ describe("HTTP MCP transport safety", () => {
 
       const calls = readRecentToolCalls(config, { since, limit: 50 }).calls.filter((call) => call.events.some((event) => event.jsonRpcId === 77));
       assert.equal(calls.length, 2);
-      assert.ok(calls.every((call) => call.classification === "APP_POLICY_DENIED"));
+      assert.ok(calls.every((call) => call.classification === "APP_CONTRACT_REJECTED"));
       assert.ok(calls.every((call) => call.events.some((event) => event.errorCode === "INVALID_INPUT" && event.errorMessage === "Duplicate JSON-RPC request ID in batch.")));
       assert.ok(calls.every((call) => !call.stages.includes("dispatch_started") && !call.stages.includes("toolbox_entered") && !call.stages.includes("tool_result_returned")));
     } finally {
@@ -2103,7 +2674,7 @@ describe("HTTP MCP transport safety", () => {
       const uniqueCall = calls.find((call) => call.events.some((event) => event.jsonRpcId === "unique-authorized-sibling"));
       assert.equal(duplicateCalls.length, 2);
       assert.ok(uniqueCall);
-      assert.ok(duplicateCalls.every((call) => call.classification === "APP_POLICY_DENIED"));
+      assert.ok(duplicateCalls.every((call) => call.classification === "APP_CONTRACT_REJECTED"));
       assert.equal(uniqueCall.classification, "RECEIVED_NOT_DISPATCHED");
       assert.equal(uniqueCall.events.some((event) => event.errorCode === "INVALID_INPUT" || /Duplicate JSON-RPC request ID/u.test(String(event.errorMessage))), false);
       assert.ok(calls.every((call) => !call.stages.includes("dispatch_started") && !call.stages.includes("toolbox_entered") && !call.stages.includes("tool_result_returned")));
@@ -2235,7 +2806,7 @@ describe("HTTP MCP transport safety", () => {
         const call = calls.find((entry) => entry.events.some((event) => event.jsonRpcId === id));
         assert.ok(call, `Expected call for ${id}`);
         assert.ok(call.events.every((event) => event.jsonRpcId === id));
-        assert.equal(call.classification, "RESPONSE_COMPLETED");
+        assert.equal(call.classification, "RESPONSE_FINISHED_UNACKNOWLEDGED");
       }
     } finally {
       await handle.close();
@@ -2276,7 +2847,7 @@ describe("HTTP MCP transport safety", () => {
         const call = calls.find((entry) => entry.events.some((event) => event.jsonRpcId === id));
         assert.ok(call, `Expected call for ${id}`);
         assert.ok(call.events.every((event) => event.jsonRpcId === id));
-        assert.equal(call.classification, "RESPONSE_COMPLETED");
+        assert.equal(call.classification, "RESPONSE_FINISHED_UNACKNOWLEDGED");
       }
     } finally {
       await handle.close();
@@ -2315,7 +2886,7 @@ describe("HTTP MCP transport safety", () => {
         const call = calls.find((entry) => entry.correlationId === payload.selectedCorrelationId);
         assert.ok(call, `Expected persisted trace for ${id}`);
         assert.ok(call.events.every((event) => event.jsonRpcId === id));
-        assert.equal(call.classification, "RESPONSE_COMPLETED");
+        assert.equal(call.classification, "RESPONSE_FINISHED_UNACKNOWLEDGED");
       }
     } finally {
       await handle.close();
@@ -2375,7 +2946,7 @@ describe("HTTP MCP transport safety", () => {
         const call = calls.find((entry) => entry.correlationId === payload.selectedCorrelationId);
         assert.ok(call, `Expected persisted trace for ${id}`);
         assert.ok(call.events.every((event) => event.jsonRpcId === id));
-        assert.equal(call.classification, "RESPONSE_COMPLETED");
+        assert.equal(call.classification, "RESPONSE_FINISHED_UNACKNOWLEDGED");
       }
     } finally {
       await handle.close();
@@ -2502,6 +3073,84 @@ describe("HTTP MCP transport safety", () => {
     }
   });
 
+  it("records a real HTTP close before finish as CONNECTION_CLOSED_BEFORE_FINISH", async () => {
+    const config = testConfig({ writeMode: "off" });
+    const release = deferred();
+    let dispatchedCorrelationId: string | undefined;
+    const handle = await runHttpTransport(
+      createTraceEchoServerFactory(config, {
+        onDispatch: (context) => {
+          dispatchedCorrelationId = context?.correlationId;
+        },
+        waitForRelease: async () => release.promise
+      }),
+      config,
+      {
+        host: "127.0.0.1",
+        port: 0,
+        version: "0.1.0-test",
+        allowNonlocalHttp: false,
+        allowUnauthLocalHttp: true
+      }
+    );
+
+    try {
+      const body = JSON.stringify({
+        jsonrpc: "2.0",
+        id: "close-before-finish",
+        method: "tools/call",
+        params: {
+          name: "trace_echo",
+          arguments: { action: "pause" }
+        }
+      });
+      let clientRequest!: http.ClientRequest;
+      const requestDone = new Promise<void>((resolve) => {
+        const requestUrl = new URL(handle.url);
+        clientRequest = http.request(
+          requestUrl,
+          {
+            method: "POST",
+            headers: {
+              ...mcpHeaders(),
+              "content-length": String(Buffer.byteLength(body, "utf8"))
+            }
+          },
+          (res) => {
+            res.resume();
+            res.once("end", resolve);
+          }
+        );
+        clientRequest.once("error", () => resolve());
+        clientRequest.end(body);
+      });
+
+      while (!dispatchedCorrelationId) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert.ok(dispatchedCorrelationId);
+      clientRequest.destroy();
+      await requestDone;
+
+      let call = readRecentToolCalls(config, { correlationId: dispatchedCorrelationId }).calls[0];
+      for (let attempt = 0; attempt < 50 && !call?.stages.includes("http_connection_closed"); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        call = readRecentToolCalls(config, { correlationId: dispatchedCorrelationId }).calls[0];
+      }
+
+      assert.ok(call);
+      assert.equal(call.classification, "CONNECTION_CLOSED_BEFORE_FINISH");
+      const closeEvent = call.events.find((event) => event.stage === "http_connection_closed");
+      assert.ok(closeEvent);
+      assert.equal(closeEvent.closeBeforeFinish, true);
+      assert.equal(call.stages.includes("http_response_finished"), false);
+      release.resolve();
+    } finally {
+      release.resolve();
+      await handle.close();
+    }
+  });
+
   it("assigns distinct correlation IDs to concurrent tool calls", async () => {
     const config = testConfig({ writeMode: "off" });
     const handle = await runHttpTransport(createScopedMcpServerFactory(config), config, {
@@ -2554,7 +3203,7 @@ describe("HTTP MCP transport safety", () => {
       const concurrentCalls = calls.filter((call) => call.publicTool === "browser_toolbox" || call.publicTool === "knowledge_toolbox");
       assert.equal(concurrentCalls.length, 2);
       assert.equal(new Set(concurrentCalls.map((call) => call.correlationId)).size, 2);
-      assert.ok(concurrentCalls.every((call) => call.classification === "RESPONSE_COMPLETED"));
+      assert.ok(concurrentCalls.every((call) => call.classification === "RESPONSE_FINISHED_UNACKNOWLEDGED"));
     } finally {
       await handle.close();
     }
@@ -2593,7 +3242,7 @@ describe("HTTP MCP transport safety", () => {
       assert.match(JSON.stringify(invalid.messages), /Unsupported toolbox action/u);
 
       const invalidCall = readRecentToolCalls(config, { publicToolName: "repo_toolbox", since }).calls[0];
-      assert.equal(invalidCall.classification, "APP_POLICY_DENIED");
+      assert.equal(invalidCall.classification, "APP_CONTRACT_REJECTED");
 
       const diagnostic = await postMcp(
         handle.url,
@@ -2619,7 +3268,7 @@ describe("HTTP MCP transport safety", () => {
       const diagnosticResult = firstResult(diagnostic.messages, 3);
       const diagnosticText = JSON.parse((diagnosticResult.content as Array<{ text: string }>)[0].text) as { result: { calls: Array<{ classification: string; correlationId: string }> } };
       assert.deepEqual(diagnosticText.result.calls.map((call) => call.correlationId), [invalidCall.correlationId]);
-      assert.equal(diagnosticText.result.calls[0].classification, "APP_POLICY_DENIED");
+      assert.equal(diagnosticText.result.calls[0].classification, "APP_CONTRACT_REJECTED");
 
       const invalidQuery = await postMcp(
         handle.url,
@@ -3081,7 +3730,7 @@ describe("HTTP MCP transport safety", () => {
       assert.match(JSON.stringify(write.messages), /files\.write/u);
       const call = readRecentToolCalls(config, { publicToolName: "repo_toolbox" }).calls.find((entry) => entry.events.some((event) => event.jsonRpcId === 2));
       assert.ok(call);
-      assert.equal(call.classification, "APP_POLICY_DENIED");
+      assert.equal(call.classification, "APP_AUTHORIZATION_DENIED");
       assert.equal(call.stages.includes("dispatch_started"), false);
     } finally {
       await handle.close();
@@ -3142,6 +3791,13 @@ describe("HTTP MCP transport safety", () => {
       );
       assert.equal(write.response.status, 200);
       assert.match(JSON.stringify(write.messages), /writeMode docs, patch, or elevated/u);
+      const errorResult = firstResult(write.messages, 2);
+      const receipt = deliveryReceiptFromToolResult(errorResult);
+      assert.equal(receipt.payloadSha256.length, 64);
+      const call = readRecentToolCalls(config, { publicToolName: "repo_toolbox" }).calls.find((entry) => entry.events.some((event) => event.jsonRpcId === 2));
+      assert.ok(call);
+      assert.equal(call.classification, "APP_AUTHORIZATION_DENIED");
+      assert.ok(call.stages.includes("result_serialized"));
     } finally {
       await handle.close();
     }

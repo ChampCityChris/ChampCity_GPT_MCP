@@ -6,6 +6,7 @@ export interface AuditLogEntry {
   toolName: string;
   action?: string;
   correlationId?: string;
+  resultAttemptId?: string;
   workspaceId?: string;
   root?: string;
   branch?: string;
@@ -22,6 +23,7 @@ export interface AuditLogEntry {
   reconciliationMode?: string;
   durationMs?: number;
   sha256?: string;
+  acknowledgementMethod?: string;
 }
 
 export async function writeAuditLog(auditLogPath: string, entry: AuditLogEntry): Promise<void> {

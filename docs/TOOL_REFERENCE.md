@@ -66,7 +66,7 @@ The public schema stays stable, but action-specific server-side validation is st
 
 Workspace routing is stateless per call. Use `diagnostics_toolbox` with `action: "list_workspaces"` to discover safe server-defined workspace IDs such as `champcity_gpt`, then pass the chosen ID on project-specific toolbox calls. `workspaceId: "default"` is accepted only when deterministic: a single workspace is configured, or `defaultWorkspaceId` is explicitly configured. With multiple workspaces and no explicit default, project-specific calls fail with `WORKSPACE_REQUIRED` and safe available workspace IDs.
 
-Workspace write policy is server-configured and never caller supplied. `git_required` is the default and keeps artifact persistence, patch workflow, and Git workflows tied to a confirmed Git repository. `artifact_only` is explicit planning mode; it permits only Markdown/JSON artifact persistence under configured `artifactWriteRoots`, defaulting to `planning`, and denies patch and Git workflows. The special artifact root `.` is allowed only when explicitly configured and diagnostics report a warning.
+Workspace authority is server-configured and never caller supplied. A ChampCity workspace is an allowed project directory, not necessarily a Git repository; workspace IDs identify served projects and do not need to match the MCP service repository. Legacy `writePolicy` values remain accepted as compatibility inputs: `git_required` no longer requires Git for reads, searches, artifact persistence, or general diagnostics, while `artifact_only` preserves configured artifact-root limits and disables Git mutation. Future configs may use `workspaceCapabilities` with `artifactPersistence`, `patchWorkflow`, `gitOperations`, and `releaseOperations`. Git capabilities are optional and isolated.
 
 Toolbox calls return:
 
@@ -181,13 +181,43 @@ Initial actions:
 - `status`
 - `list_files`
 - `read_file`
+- `inspect_text_file`
+- `read_text_chunk`
+- `read_text_lines`
+- `read_markdown_section`
 - `search_files`
 - `write_markdown_artifact`
 - `write_json_artifact`
 - `propose_patch`
 - `apply_approved_patch`
 
-Read actions route through the selected workspace and existing file safety policy. `write_markdown_artifact` and `write_json_artifact` require `files.write` plus write mode `docs`, `patch`, or `elevated`. In `artifact_only` workspaces they are limited to configured artifact roots and do not invoke Git. JSON writes only accept repository-relative `.json` paths, parse and normalize JSON, block local/generated/risky paths, and audit writes. Patch actions wrap the existing proposal/apply implementations without accepting public caller-supplied roots; they always require a Git-backed workspace and are denied in `artifact_only`.
+Read actions route through the selected workspace and existing file safety policy without requiring Git. `write_markdown_artifact` and `write_json_artifact` require `files.write` plus write mode `docs`, `patch`, or `elevated`; artifact persistence depends on allowed roots, write mode, OAuth scope, file policy, artifact-root policy, overwrite rules, and evidence controls, not Git. In `artifact_only` workspaces artifact writes are limited to configured artifact roots. JSON writes only accept workspace-relative `.json` paths, parse and normalize JSON, block local/generated/risky paths, and audit writes. Patch actions wrap the existing proposal/apply implementations without accepting public caller-supplied roots; they require the explicit patch capability and Git-backed source-code safeguards.
+
+Bounded text projection:
+
+- Public text content items default to 8,192 UTF-8 bytes and are hard-capped at 16,384 UTF-8 bytes.
+- `read_file` returns complete inline content only at or below 16,384 bytes. Larger files return metadata plus the first bounded chunk as MCP text content, `contentComplete: false`, and a continuation cursor for `read_text_chunk`.
+- `inspect_text_file` returns metadata, SHA-256, line count, line-ending classification, maximum line byte length, and a bounded Markdown heading index. It intentionally omits body text.
+- `read_text_chunk` continues by opaque server-issued cursor or starts with `relativePath`.
+- `read_text_lines` returns exact one-based line ranges without hidden ellipses.
+- `read_markdown_section` reads a `sectionId` returned by `inspect_text_file`, includes nested headings, and stops before the next equal-or-higher heading.
+- Cursors are integrity-protected and bound to workspace, normalized path, source SHA-256, offset, and optional section. Stale source changes require re-inspection.
+- Bounded delivery is exact source delivery, not summarization, encoding, redaction, or obfuscation. It reduces the blast radius of host-side safety false positives but cannot guarantee OpenAI host acceptance.
+
+Example inspect/chunk sequence:
+
+```json
+{ "action": "inspect_text_file", "workspaceId": "champcity_gpt", "params": { "relativePath": "planning/report.md" } }
+{ "action": "read_text_chunk", "workspaceId": "champcity_gpt", "params": { "cursor": "<recommendedFirstCursor>" } }
+{ "action": "read_text_chunk", "workspaceId": "champcity_gpt", "params": { "cursor": "<nextCursor>", "maximumBytes": 4096 } }
+```
+
+Example line and section reads:
+
+```json
+{ "action": "read_text_lines", "params": { "relativePath": "src/file.ts", "startLine": 42, "maximumLines": 20 } }
+{ "action": "read_markdown_section", "params": { "relativePath": "docs/plan.md", "sectionId": "sec-..." } }
+```
 
 `list_files` accepts a repository-relative `relativePath`, normalizes Windows and POSIX separators, keeps the final path inside the selected workspace, and returns repository-relative file paths plus diagnostics. Diagnostics distinguish missing paths, non-directory paths, readable empty directories, filter misses, and traversal/read failures; failures are not reported as unexplained empty results. Globs are evaluated against the repository path, the path relative to the requested directory, and the basename so nested directory listings work with simple patterns such as `*.md`.
 
@@ -208,7 +238,7 @@ Initial actions:
 - `integrate_to_dev`
 - `inspect_history`
 
-The toolbox does not accept arbitrary git commands, reset, rebase, stash, branch delete, force push, checkout path, or raw branch-name controls. Mutating actions require `files.write`, write mode `elevated`, and a Git-backed workspace regardless of legacy `requireGitRoot`. `artifact_only` workspaces receive structured policy denial. `prepare_work_branch` delegates to the safe `prepare_git_work_branch` behavior. `integrate_to_dev` is a guarded internal action under `git_toolbox`, not a top-level public MCP tool.
+The toolbox does not accept arbitrary git commands, reset, rebase, stash, branch delete, force push, checkout path, or raw branch-name controls. Git absence is localized to Git actions as `not_git_repository`/`GIT_CAPABILITY_UNAVAILABLE` and does not affect repository reads or artifact persistence. Mutating actions require `files.write`, write mode `elevated`, and a Git-backed workspace regardless of legacy `requireGitRoot`. `artifact_only` workspaces receive structured policy denial for mutation. `prepare_work_branch` delegates to the safe `prepare_git_work_branch` behavior. `integrate_to_dev` is a guarded internal action under `git_toolbox`, not a top-level public MCP tool.
 
 `inspect_history` is read-only and accepts a strict `operation` enum: `log`, `show_commit`, `diff_refs`, `file_history`, `blame`, `merge_base`, or `check_ancestry`. Each operation constructs one fixed Git subcommand and validates bounded counts, refs, line ranges, and repository-relative paths. It disables pagers, external diff helpers, color, interactive prompts, and credential prompts. It never accepts arbitrary Git options or subcommands.
 
@@ -236,6 +266,8 @@ Initial actions:
 - `read_image_artifact`
 - `list_artifacts`
 - `read_artifact_by_id`
+- `inspect_artifact_text`
+- `read_artifact_text_chunk`
 - `latest_artifact`
 - `artifact_pair_status`
 - `current_action_context`
@@ -250,9 +282,11 @@ The retired action names `save_architect_interview_output`, `save_project_planni
 
 `list_artifacts` discovers artifacts from structured registry records when present, then JSON sidecars, structured Markdown front matter, documented repository path conventions, and file metadata. It accepts `phaseId`, `artifactType`, `artifactTypes`, `workCardId`, `status`, `statuses`, `pathPrefix`, `recordKind`, `includeDerived`, `includeSidecars`, `sourceOnly`, `limit`, and `cursor`. Filters use AND semantics. Each result includes a non-authoritative `recordKind` of `source`, `sidecar`, or `derived`; this is classification for review ergonomics, not an authority ranking. The prior complete inventory view remains the default. Results sort by `modifiedAt` descending, then `artifactId` ascending for stable ties. `limit` defaults to `50`, is capped at `200`, and page metadata plus `nextCursor` are returned when more records remain.
 
-`read_artifact_by_id` reads one artifact by stable `artifactId`, registry ID, or pair ID. It accepts `component: "preferred" | "markdown" | "json" | "both"`, defaulting to `preferred`. Markdown is bounded and explicitly reports truncation. JSON is parsed only when the full bounded JSON file can be read; oversized JSON returns metadata and hash without malformed partial JSON.
+`read_artifact_by_id` reads one artifact by stable `artifactId`, registry ID, or pair ID. It accepts `component: "preferred" | "markdown" | "json" | "both"`, defaulting to `preferred`. Markdown at or below the inline threshold may return full content. Larger Markdown returns bounded projection metadata, a `textHandle`, and the first bounded chunk as MCP content; full text is not duplicated into structured metadata. JSON is parsed only when the full bounded JSON file can be read; oversized JSON returns metadata and hash without malformed partial JSON.
 
-`latest_artifact` accepts the same structured filters as `list_artifacts` plus `includeContent`. It uses the exact same ordering as `list_artifacts` and returns the first match; it never relies on filename or directory enumeration order.
+`inspect_artifact_text` and `read_artifact_text_chunk` resolve an artifact ID to its preferred Markdown component and delegate to the same bounded text projection protocol used by `repo_toolbox`. If a returned artifact `textHandle.relativePath` is available, callers may continue through `repo_toolbox.read_text_chunk` with the returned cursor.
+
+`latest_artifact` accepts the same structured filters as `list_artifacts` plus `includeContent`. It uses the exact same ordering as `list_artifacts` and returns the first match; it never relies on filename or directory enumeration order. With `includeContent: true`, large Markdown uses the same bounded first-chunk projection as `read_artifact_by_id`.
 
 `artifact_pair_status` reports Markdown, JSON, registry, identity, and payload-hash status separately. It computes raw SHA-256 over the exact bytes on disk, compares stored component hashes when present, reports invalid JSON, missing pair components, registry path or identity mismatches, and leaves all repair or hash rewriting to future explicit write actions. Canonical payload hashing reports `not_configured` unless an authoritative canonicalizer is present; raw JSON stringification is not substituted.
 
@@ -286,7 +320,10 @@ Initial actions:
 - `oauth_scope_status`
 - `chatgpt_discovery_status`
 - `recent_tool_calls`
+- `acknowledge_tool_result`
+- `result_delivery_status`
 - `list_workspaces`
+- `workspace_safety_status`
 - `public_safety_status`
 - `project_validation`
 - `mcp_server_startup`
@@ -295,9 +332,11 @@ Initial actions:
 - `electron_development_startup`
 - `electron_packaged_startup`
 
-Diagnostics are redacted and include runtime package version, selected workspace package version, package-version match status, runtime/source commit hints when safely available, branch, runtime start time where available, registered tool count, registered tool-name hash, registered toolbox names, workspace-routing summary, observed OAuth scope booleans, local write mode, local write-mode booleans, latest discovery counts when a discovery trace is available, and recent correlated MCP tool-call trace summaries. `runtime_status` warns when the running MCP package version differs from the selected workspace package version; package, promote, restart, and reconnect the runtime before relying on current source behavior. `list_workspaces` returns safe catalog metadata only: workspace IDs, labels, repository name when available, branch when safely readable, default marker, expected-remote match status, `writePolicy`, Git detected yes/no, relative `artifactWriteRoots`, artifact-persistence capability/reason, Git-mutation capability/reason, and safe warnings. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, raw credential stores, or absolute roots are returned.
+Diagnostics are redacted and separate ChampCity GPT service-runtime provenance from target-workspace metadata. `runtime_status` may report runtime package version, runtime source commit, packaged/development mode, and service-repository alignment only when the selected workspace is the ChampCity GPT service repository; unrelated target workspaces report alignment as `not_applicable`. `list_workspaces` returns safe catalog metadata only: workspace IDs, labels, optional repository metadata, default marker, expected-remote match status, legacy write policy, capability summaries, Git detected yes/no as informational metadata, relative `artifactWriteRoots`, and safe warnings. `workspace_safety_status` checks registration, allowed-root containment, path/file policy readiness, write mode, OAuth scope state, artifact roots, audit/trace storage, filesystem read capability, artifact persistence, patch capability, and optional Git capabilities without requiring Git. `public_safety_status` is a deprecated alias for `workspace_safety_status`; use `git_toolbox.readiness_summary` for source-control readiness. No OAuth tokens, refresh tokens, authorization codes, client secrets, code verifiers, local config dumps, private tunnel tokens, cookies, raw credential stores, or absolute roots are returned.
 
-`recent_tool_calls` accepts optional `params.limit` (default 20, minimum 1, maximum 50), `params.since` as a strict ISO-8601 timestamp, `params.correlationId`, and `params.publicToolName`. It reads only the redacted MCP tool-call trace and returns deterministic classifications: `NO_SERVER_RECEIPT_EVIDENCE`, `RECEIVED_NOT_DISPATCHED`, `DISPATCHED_NOT_EXECUTED`, `APP_POLICY_DENIED`, `APP_EXECUTION_ERROR`, `RESULT_RETURNED`, `RESPONSE_COMPLETED`, or `TRANSPORT_ERROR`. Valid dispatch correlation is bound by the MCP SDK JSON-RPC request ID supplied as handler metadata. Malformed `tools/call` requests receive receipt evidence before SDK rejection. Toolbox action scope requirements come from one canonical policy registry; OAuth scope denials classify as `APP_POLICY_DENIED` without fabricated dispatch stages, and mixed batches keep call-specific denial evidence. String JSON-RPC IDs are sanitized and capped at 128 characters, and arbitrary absolute paths in diagnostic strings are redacted while route fields such as `/mcp` and `/health` remain route values. Tool-call, discovery, and HTTP transport diagnostics use shared field-aware redaction. Missing receipt evidence means only that no matching server receipt evidence was found.
+`recent_tool_calls` accepts optional `params.limit` (default 20, minimum 1, maximum 50), `params.since` as a strict ISO-8601 timestamp, `params.correlationId`, and `params.publicToolName`. It reads only the redacted MCP tool-call trace and returns deterministic classifications: `NO_SERVER_RECEIPT_EVIDENCE`, `RECEIVED_NOT_DISPATCHED`, `DISPATCHED_NOT_EXECUTED`, `APP_CONTRACT_REJECTED`, `APP_POLICY_DENIED`, `APP_AUTHORIZATION_DENIED`, `APP_EXECUTION_ERROR`, `RESULT_MATERIALIZED`, `RESULT_SERIALIZED`, `RESPONSE_FINISHED_UNACKNOWLEDGED`, `CLIENT_ACKNOWLEDGED`, `CONNECTION_CLOSED_BEFORE_FINISH`, or `TRANSPORT_ERROR`. Valid dispatch correlation is bound by the MCP SDK JSON-RPC request ID supplied as handler metadata. Malformed or unsupported actions are contract errors, not safety-policy denials. OAuth scope denials classify as authorization denials. HTTP `finish` means Node handed response bytes to the transport stack; it is not client acknowledgement and does not prove ChatGPT accepted, exposed, or consumed the result.
+
+`acknowledge_tool_result` accepts `params.correlationId`, `params.resultAttemptId`, `params.payloadSha256`, and optional `params.acknowledgementContext: "content_consumed" | "metadata_consumed" | "retry_requested"`. It records a diagnostic receipt only; it is telemetry, not an approval control, and it does not retrieve, unlock, or reveal hidden payload content or imply OpenAI approved the content under every internal policy. `result_delivery_status` looks up safe result-delivery metadata by exact `correlationId` or `resultAttemptId`. Result telemetry never retains document text, prompt text, patch text, artifact bodies, credentials, raw URLs, or absolute paths. Result hashes identify serialized bytes without revealing content. Live OpenAI/ChatGPT host safety decisions remain outside the MCP server's direct observability.
 
 `get_write_access_status` also includes a nested diagnostics block when called through MCP so older visible tool surfaces can report runtime, scope, and tool-count state.
 

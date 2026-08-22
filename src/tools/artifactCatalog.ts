@@ -4,19 +4,33 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+
 import { type AppConfig } from "../config.js";
 import { getFilePolicyDenial, isLikelyTextBuffer } from "../security/filePolicy.js";
 import { assertSafeRelativePath, isPathInside, toRootRelativePath } from "../security/pathPolicy.js";
 import { AppError } from "../utils/errors.js";
 import { resolveWorkspace } from "../workspaces.js";
 import { resolveRepoPath, walkRepoFiles } from "./repoTraversal.js";
+import {
+  TEXT_PROJECTION_DEFAULT_CHUNK_BYTES,
+  TEXT_PROJECTION_HARD_CONTENT_ITEM_BYTES,
+  TEXT_PROJECTION_INLINE_THRESHOLD_BYTES,
+  TEXT_PROJECTION_MAX_SOURCE_BYTES,
+  boundedTextContentItems,
+  boundedTextStructuredContent,
+  inlineTextReadResult,
+  inspectTextProjectionSource,
+  loadTextProjectionSource,
+  readTextChunk,
+  readTextProjectionCursorBinding
+} from "./textProjection.js";
 
 const MAX_SCAN_FILES = 3000;
 const MAX_SCAN_DEPTH = 12;
 const MAX_METADATA_BYTES = 1_000_000;
 const MAX_MARKDOWN_CONTENT_BYTES = 250_000;
 const MAX_JSON_CONTENT_BYTES = 500_000;
-const MARKDOWN_TRUNCATE_BYTES = 200_000;
 const ARTIFACT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const FILTER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const EXCLUDED_DIRS = new Set([
@@ -52,6 +66,30 @@ const AWAITING_ARCHITECT_REVIEW = new Set([
 type MetadataSource = "registry" | "json_sidecar" | "structured_header" | "derived_path";
 type IdSource = "registry" | "sidecar" | "structured_metadata" | "derived";
 type ArtifactRecordKind = "source" | "sidecar" | "derived";
+const BOUNDED_ARTIFACT_TEXT_PAYLOAD = Symbol("champcity.boundedArtifactTextPayload");
+
+export interface BoundedArtifactTextPayload {
+  structuredContent: Record<string, unknown>;
+  mcpContent: CallToolResult["content"];
+}
+
+type BoundedArtifactCarrier = {
+  [BOUNDED_ARTIFACT_TEXT_PAYLOAD]?: BoundedArtifactTextPayload;
+};
+
+export function takeBoundedArtifactTextPayload(value: unknown): BoundedArtifactTextPayload | undefined {
+  return value && typeof value === "object"
+    ? (value as BoundedArtifactCarrier)[BOUNDED_ARTIFACT_TEXT_PAYLOAD]
+    : undefined;
+}
+
+function attachBoundedArtifactTextPayload<T extends Record<string, unknown>>(value: T, payload: BoundedArtifactTextPayload): T {
+  Object.defineProperty(value, BOUNDED_ARTIFACT_TEXT_PAYLOAD, {
+    value: payload,
+    enumerable: false
+  });
+  return value;
+}
 
 export interface ArtifactCatalogRecord {
   artifactId: string;
@@ -105,6 +143,23 @@ export interface ReadArtifactInput {
   workspaceId: string;
   artifactId: string;
   component?: "preferred" | "markdown" | "json" | "both";
+}
+
+export interface InspectArtifactTextInput {
+  workspaceId: string;
+  artifactId: string;
+  includeHeadingIndex?: boolean;
+  maximumHeadings?: number;
+}
+
+export interface ReadArtifactTextChunkInput {
+  workspaceId: string;
+  artifactId?: string;
+  cursor?: string;
+  maximumBytes?: number;
+  maximumLines?: number;
+  expectedSourceSha256?: string;
+  priorResultAttemptId?: string;
 }
 
 export interface LatestArtifactInput extends ArtifactFilters {
@@ -919,23 +974,62 @@ async function fileBytesAndHash(root: string, relativePath: string): Promise<{ a
   };
 }
 
-async function readMarkdown(root: string, relativePath: string) {
-  const file = await fileBytesAndHash(root, relativePath);
-  const maxBytes = Math.min(file.bytes, MARKDOWN_TRUNCATE_BYTES);
-  const handle = await fs.open(file.absolutePath, "r");
-  try {
-    const buffer = Buffer.alloc(maxBytes);
-    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+async function readMarkdown(root: string, workspaceId: string, relativePath: string, config: AppConfig, artifactId?: string) {
+  const source = await loadTextProjectionSource(config, {
+    workspaceId,
+    root,
+    relativePath,
+    maxBytes: MAX_MARKDOWN_CONTENT_BYTES
+  });
+  if (source.sizeBytes <= TEXT_PROJECTION_INLINE_THRESHOLD_BYTES) {
+    const inline = inlineTextReadResult(source);
     return {
       path: relativePath,
-      content: buffer.subarray(0, bytesRead).toString("utf8"),
-      bytes: file.bytes,
-      sha256: file.sha256,
-      truncated: file.bytes > maxBytes
+      content: inline.content,
+      bytes: inline.sizeBytes,
+      sha256: inline.sha256,
+      truncated: false,
+      contentComplete: true,
+      inlineThresholdBytes: inline.inlineThresholdBytes
     };
-  } finally {
-    await handle.close();
   }
+
+  const chunk = await readTextChunk(config, {
+    workspaceId,
+    root,
+    relativePath,
+    maximumBytes: TEXT_PROJECTION_DEFAULT_CHUNK_BYTES,
+    expectedSourceSha256: source.sourceSha256,
+    maxBytes: MAX_MARKDOWN_CONTENT_BYTES,
+    ...(artifactId
+      ? {
+          operationMode: "artifact_text" as const,
+          artifactId,
+          artifactComponent: "markdown" as const
+        }
+      : {})
+  });
+
+  return attachBoundedArtifactTextPayload({
+    path: relativePath,
+    bytes: source.sizeBytes,
+    sha256: source.sourceSha256,
+    truncated: true,
+    contentComplete: false,
+    inlineThresholdBytes: TEXT_PROJECTION_INLINE_THRESHOLD_BYTES,
+    recommendedNextAction: artifactId ? "artifact_toolbox.read_artifact_text_chunk" : "repo_toolbox.read_text_chunk",
+    textHandle: {
+      workspaceId,
+      relativePath: source.relativePath,
+      sourceSha256: source.sourceSha256,
+      nextCursor: chunk.nextCursor,
+      preferredContinuation: artifactId ? "artifact_toolbox.read_artifact_text_chunk" : "repo_toolbox.read_text_chunk"
+    },
+    firstChunk: boundedTextStructuredContent(chunk)
+  }, {
+      structuredContent: boundedTextStructuredContent(chunk),
+      mcpContent: boundedTextContentItems(chunk)
+  });
 }
 
 async function readJson(root: string, relativePath: string) {
@@ -971,6 +1065,47 @@ async function readJson(root: string, relativePath: string) {
       truncated: false
     };
   }
+}
+
+function jsonComponentSummary(json: Awaited<ReturnType<typeof readJson>>): Record<string, unknown> {
+  return {
+    path: json.path,
+    bytes: json.bytes,
+    sha256: json.sha256,
+    validJson: json.validJson,
+    truncated: json.truncated
+  };
+}
+
+function boundedBothJsonComponent(json: Awaited<ReturnType<typeof readJson>>): Record<string, unknown> {
+  if ("tooLarge" in json) {
+    return {
+      ...jsonComponentSummary(json),
+      status: "deferred",
+      contentDeferred: true,
+      deferralReason: "json_component_too_large",
+      recommendedAction: "read_artifact_by_id",
+      recommendedComponent: "json"
+    };
+  }
+
+  const serialized = JSON.stringify(json);
+  if (Buffer.byteLength(serialized, "utf8") > TEXT_PROJECTION_HARD_CONTENT_ITEM_BYTES) {
+    return {
+      ...jsonComponentSummary(json),
+      status: "deferred",
+      contentDeferred: true,
+      deferralReason: "json_component_exceeds_safe_inline_limit",
+      recommendedAction: "read_artifact_by_id",
+      recommendedComponent: "json"
+    };
+  }
+
+  return {
+    status: "inlined",
+    contentDeferred: false,
+    ...json
+  };
 }
 
 async function ensureReadableText(root: string, relativePath: string, maxBytes: number): Promise<boolean> {
@@ -1048,8 +1183,7 @@ async function fileManifestEntry(root: string, relativePath: string, artifact: A
   }
 }
 
-async function readFullTextEntry(root: string, relativePath: string, sizeBytes: number, maxBundleBytes: number) {
-  const absolutePath = path.join(root, ...relativePath.split("/"));
+async function readFullTextEntry(config: AppConfig, workspaceId: string, root: string, relativePath: string, sizeBytes: number, maxBundleBytes: number) {
   if (sizeBytes > maxBundleBytes) {
     return {
       path: relativePath,
@@ -1060,7 +1194,7 @@ async function readFullTextEntry(root: string, relativePath: string, sizeBytes: 
     };
   }
 
-  const readable = await ensureReadableText(root, relativePath, maxBundleBytes);
+  const readable = await ensureReadableText(root, relativePath, Math.min(maxBundleBytes, TEXT_PROJECTION_MAX_SOURCE_BYTES));
   if (!readable) {
     return {
       path: relativePath,
@@ -1071,15 +1205,34 @@ async function readFullTextEntry(root: string, relativePath: string, sizeBytes: 
     };
   }
 
-  return {
+  const source = await loadTextProjectionSource(config, {
+    workspaceId,
+    root,
+    relativePath,
+    maxBytes: Math.min(maxBundleBytes, TEXT_PROJECTION_MAX_SOURCE_BYTES)
+  });
+  const chunk = await readTextChunk(config, {
+    workspaceId,
+    root,
+    relativePath: source.relativePath,
+    maximumBytes: TEXT_PROJECTION_DEFAULT_CHUNK_BYTES,
+    expectedSourceSha256: source.sourceSha256,
+    maxBytes: Math.min(maxBundleBytes, TEXT_PROJECTION_MAX_SOURCE_BYTES)
+  });
+
+  return attachBoundedArtifactTextPayload({
     path: relativePath,
-    readStatus: "read",
-    contentComplete: true,
+    readStatus: "bounded_projection",
+    contentComplete: chunk.complete,
     sizeBytes,
-    boundary: `----- BEGIN ${relativePath} -----`,
-    content: await fs.readFile(absolutePath, "utf8"),
-    endBoundary: `----- END ${relativePath} -----`
-  };
+    sourceSha256: source.sourceSha256,
+    firstChunk: boundedTextStructuredContent(chunk),
+    nextCursor: chunk.nextCursor,
+    retryAction: chunk.retryAction
+  }, {
+    structuredContent: boundedTextStructuredContent(chunk),
+    mcpContent: boundedTextContentItems(chunk)
+  });
 }
 
 export async function exportPlanningCorpus(input: ExportPlanningCorpusInput, config: AppConfig) {
@@ -1130,16 +1283,21 @@ export async function exportPlanningCorpus(input: ExportPlanningCorpusInput, con
   const successfullyHashed = allManifestEntries.filter((entry) => entry.readStatus === "hashed").length;
 
   const fullText: unknown[] = [];
+  const fullTextContent: CallToolResult["content"] = [];
   let fullTextBytes = 0;
   let successfullyRead = 0;
   if (input.includeFullText) {
     for (const entry of pageItems) {
       const nextBytes = entry.file.sizeBytes;
-      const textEntry = await readFullTextEntry(catalog.root, entry.file.rootRelativePath, nextBytes, maxBundleBytes - fullTextBytes);
+      const textEntry = await readFullTextEntry(config, input.workspaceId, catalog.root, entry.file.rootRelativePath, nextBytes, maxBundleBytes - fullTextBytes);
       fullText.push(textEntry);
-      if ((textEntry as { readStatus?: string }).readStatus === "read") {
+      const boundedPayload = takeBoundedArtifactTextPayload(textEntry);
+      if (boundedPayload) {
+        fullTextContent.push(...boundedPayload.mcpContent);
+      }
+      if ((textEntry as { readStatus?: string }).readStatus === "bounded_projection") {
         successfullyRead += 1;
-        fullTextBytes += nextBytes;
+        fullTextBytes += (textEntry as { firstChunk?: { returnedByteCount?: number } }).firstChunk?.returnedByteCount ?? 0;
       }
     }
   }
@@ -1161,7 +1319,7 @@ export async function exportPlanningCorpus(input: ExportPlanningCorpusInput, con
     maxBundleBytes
   };
 
-  return {
+  const response = {
     status: "ok",
     request,
     manifestId: hashRequestId({ ...request, discovered: walked.files.map((file) => file.rootRelativePath) }),
@@ -1195,6 +1353,21 @@ export async function exportPlanningCorpus(input: ExportPlanningCorpusInput, con
     ...(input.includeFullText ? { fullText, fullTextBytes } : {}),
     warnings: catalog.warnings
   };
+
+  if (input.includeFullText) {
+    return attachBoundedArtifactTextPayload(response, {
+      structuredContent: response,
+      mcpContent: [
+        {
+          type: "text",
+          text: `Planning corpus export: ${manifest.length} manifest entries, ${fullTextContent.length / 2} bounded text chunks, ${fullTextBytes} source bytes delivered.`
+        },
+        ...fullTextContent
+      ]
+    });
+  }
+
+  return response;
 }
 
 export async function listArtifacts(input: ListArtifactsInput, config: AppConfig) {
@@ -1246,6 +1419,7 @@ export async function readArtifactById(input: ReadArtifactInput, config: AppConf
     artifact: artifactDetails(record),
     warnings
   };
+  let markdownBoundedPayload: BoundedArtifactTextPayload | undefined;
 
   const includeMarkdown = component === "markdown" || component === "both" || (component === "preferred" && Boolean(record.markdownPath));
   const includeJson = component === "json" || component === "both" || (component === "preferred" && !record.markdownPath && Boolean(record.jsonPath));
@@ -1258,7 +1432,12 @@ export async function readArtifactById(input: ReadArtifactInput, config: AppConf
     if (!readable) {
       return { status: "content_too_large", artifact: artifactDetails(record), warnings };
     }
-    response.markdown = await readMarkdown(catalog.root, record.markdownPath);
+    const markdown = await readMarkdown(catalog.root, input.workspaceId, record.markdownPath, config, record.artifactId);
+    response.markdown = markdown;
+    const boundedPayload = takeBoundedArtifactTextPayload(markdown);
+    if (boundedPayload) {
+      markdownBoundedPayload = boundedPayload;
+    }
   }
 
   if (includeJson) {
@@ -1267,23 +1446,159 @@ export async function readArtifactById(input: ReadArtifactInput, config: AppConf
     }
     const json = await readJson(catalog.root, record.jsonPath);
     if ("tooLarge" in json) {
-      return {
-        status: "content_too_large",
-        artifact: artifactDetails(record),
-        json: {
-          path: json.path,
-          bytes: json.bytes,
-          sha256: json.sha256,
-          validJson: false,
-          truncated: true
-        },
-        warnings
-      };
+      if (markdownBoundedPayload && component === "both") {
+        response.json = boundedBothJsonComponent(json);
+      } else {
+        return {
+          status: "content_too_large",
+          artifact: artifactDetails(record),
+          json: {
+            path: json.path,
+            bytes: json.bytes,
+            sha256: json.sha256,
+            validJson: false,
+            truncated: true
+          },
+          warnings
+        };
+      }
+    } else if (markdownBoundedPayload && component === "both") {
+      response.json = boundedBothJsonComponent(json);
+    } else {
+      response.json = json;
     }
-    response.json = json;
+  }
+
+  if (markdownBoundedPayload) {
+    attachBoundedArtifactTextPayload(response, {
+      structuredContent: {
+        ...markdownBoundedPayload.structuredContent,
+        artifact: artifactDetails(record),
+        artifactAction: "read_artifact_by_id",
+        requestedComponent: component,
+        components: {
+          markdown: {
+            status: "bounded",
+            path: record.markdownPath,
+            contentComplete: false,
+            textProjection: markdownBoundedPayload.structuredContent
+          },
+          ...(includeJson
+            ? {
+                json: response.json ?? {
+                  status: "component_not_found",
+                  contentDeferred: true
+                }
+              }
+            : {})
+        }
+      },
+      mcpContent: markdownBoundedPayload.mcpContent
+    });
   }
 
   return response;
+}
+
+function preferredArtifactTextPath(record: ArtifactCatalogRecord): string | undefined {
+  return record.markdownPath;
+}
+
+export async function inspectArtifactText(input: InspectArtifactTextInput, config: AppConfig) {
+  validateArtifactId(input.artifactId);
+  const catalog = await buildCatalog(input.workspaceId, config);
+  const record = findByArtifactId(catalog.records, input.artifactId);
+  if (!record) {
+    return { status: "artifact_not_found", warnings: catalog.warnings };
+  }
+  const relativePath = preferredArtifactTextPath(record);
+  if (!relativePath) {
+    return {
+      status: "text_component_not_found",
+      artifact: artifactDetails(record),
+      warnings: catalog.warnings
+    };
+  }
+  const source = await loadTextProjectionSource(config, {
+    workspaceId: input.workspaceId,
+    root: catalog.root,
+    relativePath,
+    maxBytes: MAX_MARKDOWN_CONTENT_BYTES
+  });
+  return {
+    status: "ok",
+    artifact: artifactDetails(record),
+    textProjection: inspectTextProjectionSource(config, source, {
+      includeHeadingIndex: input.includeHeadingIndex,
+      maximumHeadings: input.maximumHeadings
+    }),
+    warnings: catalog.warnings
+  };
+}
+
+export async function readArtifactTextChunk(input: ReadArtifactTextChunkInput, config: AppConfig) {
+  const catalog = await buildCatalog(input.workspaceId, config);
+  const cursorBinding = input.cursor ? readTextProjectionCursorBinding(config, input.cursor) : undefined;
+  if (cursorBinding && cursorBinding.mode !== "artifact_text") {
+    throw new AppError("INVALID_INPUT", "Artifact text cursor cannot be used outside read_artifact_text_chunk.", {
+      classification: "contract_rejection",
+      cursorMode: cursorBinding.mode
+    });
+  }
+  if (cursorBinding && input.artifactId && cursorBinding.artifactId !== input.artifactId) {
+    throw new AppError("INVALID_INPUT", "Artifact text cursor artifactId conflicts with the request.", {
+      classification: "contract_rejection",
+      cursorArtifactId: cursorBinding.artifactId,
+      requestArtifactId: input.artifactId
+    });
+  }
+  let relativePath: string | undefined;
+  let artifact: ReturnType<typeof artifactDetails> | undefined;
+  const artifactId = input.artifactId ?? cursorBinding?.artifactId;
+  if (artifactId) {
+    validateArtifactId(artifactId);
+    const record = findByArtifactId(catalog.records, artifactId);
+    if (!record) {
+      return { status: "artifact_not_found", warnings: catalog.warnings };
+    }
+    relativePath = preferredArtifactTextPath(record);
+    artifact = artifactDetails(record);
+    if (!relativePath) {
+      return {
+        status: "text_component_not_found",
+        artifact,
+        warnings: catalog.warnings
+      };
+    }
+  }
+
+  const chunk = await readTextChunk(config, {
+    workspaceId: input.workspaceId,
+    root: catalog.root,
+    ...(relativePath ? { relativePath } : {}),
+    cursor: input.cursor,
+    maximumBytes: input.maximumBytes,
+    maximumLines: input.maximumLines,
+    expectedSourceSha256: input.expectedSourceSha256,
+    priorResultAttemptId: input.priorResultAttemptId,
+    maxBytes: MAX_MARKDOWN_CONTENT_BYTES,
+    operationMode: "artifact_text",
+    ...(artifactId ? { artifactId, artifactComponent: "markdown" as const } : {})
+  });
+
+  return attachBoundedArtifactTextPayload({
+    status: "ok",
+    ...(artifact ? { artifact } : {}),
+    textProjection: boundedTextStructuredContent(chunk),
+    warnings: catalog.warnings
+  }, {
+    structuredContent: {
+      ...boundedTextStructuredContent(chunk),
+      ...(artifact ? { artifact } : {}),
+      artifactAction: "read_artifact_text_chunk"
+    },
+    mcpContent: boundedTextContentItems(chunk)
+  });
 }
 
 export async function latestArtifact(input: LatestArtifactInput, config: AppConfig) {
@@ -1310,6 +1625,24 @@ export async function latestArtifact(input: LatestArtifactInput, config: AppConf
   };
   if (input.includeContent) {
     const read = await readArtifactById({ workspaceId: input.workspaceId, artifactId: record.artifactId, component: "preferred" }, config);
+    const boundedPayload = takeBoundedArtifactTextPayload(read);
+    if (boundedPayload) {
+      response.content = {
+        component: "markdown",
+        bounded: true,
+        contentComplete: false,
+        textProjection: boundedPayload.structuredContent
+      };
+      attachBoundedArtifactTextPayload(response, {
+        structuredContent: {
+          ...boundedPayload.structuredContent,
+          artifact: artifactDetails(record),
+          artifactAction: "latest_artifact"
+        },
+        mcpContent: boundedPayload.mcpContent
+      });
+      return response;
+    }
     if ("markdown" in read && read.markdown) {
       const markdown = read.markdown as { content: string; truncated: boolean };
       response.content = { component: "markdown", value: markdown.content, truncated: markdown.truncated };

@@ -1,7 +1,7 @@
 import { AppConfig } from "../config.js";
 import { AuditLogEntry, writeAuditLog } from "../security/auditLog.js";
 import { getCurrentToolCallTraceContext, recordToolCallTrace } from "../server/toolCallTrace.js";
-import { isPolicyDeniedErrorCode } from "../utils/errorClassification.js";
+import { classifyAppErrorCode } from "../utils/errorClassification.js";
 import { getErrorMessage, serializeError } from "../utils/errors.js";
 
 type AuditMeta = Omit<AuditLogEntry, "timestamp" | "result" | "reason">;
@@ -50,13 +50,14 @@ export async function withAudit<T>(
     return output;
   } catch (error) {
     const structuredError = serializeError(error);
+    const classification = classifyAppErrorCode(structuredError.code);
     recordToolCallTrace(config, {
       stage: "helper_denied",
       publicTool: context?.publicTool,
       action: context?.action ?? auditMeta.action,
       workspaceId: context?.workspaceId ?? auditMeta.workspaceId,
       requestedPath: auditMeta.normalizedRelativePath ?? auditMeta.requestedPath,
-      result: isPolicyDeniedErrorCode(structuredError.code) ? "deny" : "error",
+      result: classification === "execution" || classification === "transport" ? "error" : "deny",
       errorMessage: structuredError.message,
       errorCode: structuredError.code
     });

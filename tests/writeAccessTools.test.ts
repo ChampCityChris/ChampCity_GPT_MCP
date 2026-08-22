@@ -316,7 +316,7 @@ describe("write approval token enforcement", () => {
     assert.equal(json.writePolicy, "git_required");
     await assert.rejects(
       () => applyApprovedPatch({ root: tempRoot, patch: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n" }, config),
-      (error: unknown) => (error as { code?: string }).code === "GIT_REQUIRED"
+      (error: unknown) => (error as { code?: string }).code === "GIT_CAPABILITY_UNAVAILABLE"
     );
   });
 

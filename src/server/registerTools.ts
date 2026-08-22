@@ -49,6 +49,7 @@ import {
 import { writeAuditLog } from "../security/auditLog.js";
 import { sanitizeDiagnosticText } from "../security/diagnosticRedaction.js";
 import { serializeError, AppError } from "../utils/errors.js";
+import { createMeasuredToolResponse, materializeToolResult } from "./resultTelemetry.js";
 import {
   isToolCallTraceIdentityMismatchError,
   recordToolCallTrace,
@@ -564,6 +565,7 @@ const CHATGPT_SCHEMA_KEYS_TO_DROP = new Set(["default", "minLength", "maxLength"
 export interface ToolExposureOptions {
   scope?: string;
   id?: string | number | null;
+  serializationFailureFixture?: () => unknown;
 }
 
 export interface InvalidToolSchemaDiagnostic {
@@ -937,35 +939,14 @@ function serializeMcpToolsListPayloadWithoutRecursing(exposedTools: readonly unk
   );
 }
 
-function hasMcpContent(data: unknown): data is {
-  mcpContent: CallToolResult["content"];
-  structuredContent?: Record<string, unknown>;
-} {
-  return Boolean(data && typeof data === "object" && Array.isArray((data as { mcpContent?: unknown }).mcpContent));
-}
-
 export function toolResponse(data: unknown): CallToolResult {
-  if (hasMcpContent(data)) {
-    return {
-      content: data.mcpContent,
-      ...(data.structuredContent ? { structuredContent: data.structuredContent } : {})
-    };
-  }
-
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: JSON.stringify(data, null, 2)
-      }
-    ]
-  };
+  return materializeToolResult(data);
 }
 
-function toolErrorResponse(error: unknown) {
+function toolErrorData(error: unknown) {
   return {
     isError: true,
-    content: [
+    mcpContent: [
       {
         type: "text" as const,
         text: JSON.stringify({ error: serializeError(error) }, null, 2)
@@ -1120,8 +1101,25 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
           result: "allow"
         });
 
-        const tracedResponse = (data: unknown): CallToolResult => {
-          const result = responseResult(data);
+        const tracedResponse = (data: unknown, resultOverride?: { result: "allow" | "deny" | "error"; errorCode?: string; errorMessage?: string }): CallToolResult => {
+          const result = resultOverride ?? responseResult(data);
+          let response: CallToolResult;
+          try {
+            response = createMeasuredToolResponse(config, data);
+          } catch (error) {
+            const serialized = serializeError(error);
+            recordToolCallTrace(config, {
+              stage: "tool_result_returned",
+              publicTool: toolName,
+              action: action ?? toolboxActionFromArgs(args),
+              workspaceId,
+              requestedPath,
+              result: "error",
+              errorCode: serialized.code,
+              errorMessage: serialized.message
+            });
+            throw error;
+          }
           recordToolCallTrace(config, {
             stage: "tool_result_returned",
             publicTool: toolName,
@@ -1132,7 +1130,7 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
             errorCode: result.errorCode,
             errorMessage: result.errorMessage
           });
-          return toolResponse(data);
+          return response;
         };
 
         try {
@@ -1144,6 +1142,9 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
 
           assertWriteToolEnabled(toolName, config);
           const toolboxContext = () => createToolboxRuntimeContext(config, exposureOptions);
+          if (exposureOptions.serializationFailureFixture && toolName === "diagnostics_toolbox" && action === "__test_nonserializable_result") {
+            return tracedResponse(exposureOptions.serializationFailureFixture());
+          }
 
           switch (toolName) {
             case WORKSPACE_WRITE_ATTACHED_IMAGE_TOOL_NAME:
@@ -1163,21 +1164,18 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
             case "knowledge_toolbox":
               return tracedResponse(await knowledgeToolbox(args, config, toolboxContext()));
             default:
-              return toolErrorResponse(new Error(`Unknown tool: ${toolName}`));
+              return tracedResponse(
+                toolErrorData(new Error(`Unknown tool: ${toolName}`)),
+                { result: "error", errorCode: "UNKNOWN_ERROR", errorMessage: `Unknown tool: ${toolName}` }
+              );
           }
         } catch (error) {
           const serialized = serializeError(error);
-          recordToolCallTrace(config, {
-            stage: "tool_result_returned",
-            publicTool: toolName,
-            action,
-            workspaceId,
-            requestedPath,
+          return tracedResponse(toolErrorData(error), {
             result: "error",
             errorCode: serialized.code,
             errorMessage: serialized.message
           });
-          return toolErrorResponse(error);
         }
       });
     } catch (error) {
@@ -1193,7 +1191,7 @@ export function registerTools(server: Server, config: AppConfig, exposureOptions
           const message = logError instanceof Error ? logError.message : String(logError);
           console.warn(`Failed to write MCP trace identity diagnostic: ${sanitizeDiagnosticText(message)}`);
         }
-        return toolErrorResponse(new AppError("INVALID_INPUT", "HTTP tool-call trace identity mismatch."));
+        return materializeToolResult(toolErrorData(new AppError("INVALID_INPUT", "HTTP tool-call trace identity mismatch.")));
       }
 
       throw error;

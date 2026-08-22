@@ -8,6 +8,11 @@ import { z } from "zod";
 import { type AppConfig } from "../config.js";
 import { getOAuthEndpointPaths, scopeIncludes } from "../oauth.js";
 import { readLastMcpDiscoveryTrace } from "../server/discoveryTrace.js";
+import {
+  ACKNOWLEDGEMENT_CONTEXTS,
+  acknowledgeToolResult,
+  resultDeliveryStatus
+} from "../server/resultDeliveryTrace.js";
 import { readRecentToolCalls, recordToolCallTrace, updateCurrentToolCallTraceContext } from "../server/toolCallTrace.js";
 import { serializeError, AppError } from "../utils/errors.js";
 import { runGit } from "../utils/git.js";
@@ -16,10 +21,13 @@ import {
   artifactPairStatus,
   currentActionContext,
   exportPlanningCorpus,
+  inspectArtifactText,
   latestArtifact,
   listArtifacts,
   readArtifactById,
-  reviewQueue
+  readArtifactTextChunk,
+  reviewQueue,
+  takeBoundedArtifactTextPayload
 } from "./artifactCatalog.js";
 import { getBuilderReportIndex, getBuilderReportSummary } from "./builderReportFacade.js";
 import { applyApprovedPatch } from "./applyApprovedPatch.js";
@@ -31,17 +39,33 @@ import { prepareGitWorkBranch } from "./gitWorkflow/prepareGitWorkBranch.js";
 import { pushCurrentBranch } from "./gitWorkflow/pushCurrentBranch.js";
 import { safeStageChanges } from "./gitWorkflow/safeStageChanges.js";
 import {
-  getChangeSetReadinessSummary,
   getReleaseArtifactSummary,
   getReleasePublicationSummary,
   getWorkspaceStatusSummary
 } from "./publicSafeFacade.js";
+import { getGeneralWorkspaceStatus, getWorkspaceSafetyStatus } from "./workspaceStatusFacade.js";
 import { gitDiff } from "./gitDiff.js";
 import { listProjectFiles } from "./listProjectFiles.js";
 import { proposePatch } from "./proposePatch.js";
 import { readProjectFile } from "./readProjectFile.js";
 import { MAX_IMAGE_ARTIFACT_BYTES, readImageArtifact } from "./readImageArtifact.js";
 import { searchProjectFiles } from "./searchProjectFiles.js";
+import {
+  TEXT_PROJECTION_DEFAULT_CHUNK_BYTES,
+  TEXT_PROJECTION_DEFAULT_MAX_HEADINGS,
+  TEXT_PROJECTION_DEFAULT_MAX_LINES,
+  TEXT_PROJECTION_HARD_CONTENT_ITEM_BYTES,
+  TEXT_PROJECTION_HARD_MAX_HEADINGS,
+  TEXT_PROJECTION_HARD_MAX_LINES,
+  TEXT_PROJECTION_INLINE_THRESHOLD_BYTES,
+  boundedTextContentItems,
+  boundedTextStructuredContent,
+  inspectTextProjectionSource,
+  loadTextProjectionSource,
+  readMarkdownSection,
+  readTextChunk,
+  readTextLines
+} from "./textProjection.js";
 import { writeJsonArtifact } from "./writeJsonArtifact.js";
 import { writeMarkdownArtifact } from "./writeMarkdownArtifact.js";
 import { CreateMarkdownArtifactParamsSchema, createMarkdownArtifact } from "./createMarkdownArtifact.js";
@@ -82,7 +106,11 @@ import {
   SUPPORTED_INTEGRATION_ACTIONS,
   SUPPORTED_KNOWLEDGE_ACTIONS,
   SUPPORTED_REPO_ACTIONS,
+  SUPPORTED_TOOLBOX_ACTIONS,
   TOOLBOX_TOOL_NAMES,
+  UNSUPPORTED_ACTION_ALTERNATIVES,
+  getToolboxActionContract,
+  listToolboxActionContracts,
   type ToolboxName
 } from "./toolboxActionPolicy.js";
 
@@ -108,7 +136,7 @@ export interface RuntimeScopeToolDiagnostics {
     packageVersion: string | "unknown";
     runtimePackageVersion: string | "unknown";
     selectedWorkspacePackageVersion: string | "unknown";
-    packageVersionMatch: boolean | "unknown";
+    packageVersionMatch: boolean | "unknown" | "not_applicable";
     commit: string | "unknown";
     runtimeSourceCommit: string | "unknown";
     selectedWorkspaceHead: string | "unknown";
@@ -117,6 +145,18 @@ export interface RuntimeScopeToolDiagnostics {
     runtimeDriftDetected: boolean;
     warnings: string[];
     workspaceRouting: WorkspaceDiagnostics;
+    serviceRuntime: {
+      packageVersion: string | "unknown";
+      sourceCommit: string | "unknown";
+      mode: "packaged" | "development";
+      provenance: string;
+    };
+    targetWorkspace: {
+      workspaceId: string | "unknown";
+      packageVersion: string | "unknown";
+      head: string | "unknown";
+      alignment: "checked" | "not_applicable" | "unknown";
+    };
   };
   oauth: {
     filesReadGranted: boolean | "unknown";
@@ -175,6 +215,51 @@ const RepoReadFileParamsSchema = z
     maxBytes: z.number().int().positive().max(500_000).default(200_000)
   })
   .strict();
+const RepoInspectTextFileParamsSchema = z
+  .object({
+    relativePath: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH),
+    includeHeadingIndex: z.boolean().optional(),
+    maximumHeadings: z.number().int().positive().max(TEXT_PROJECTION_HARD_MAX_HEADINGS).default(TEXT_PROJECTION_DEFAULT_MAX_HEADINGS)
+  })
+  .strict();
+const RepoReadTextChunkParamsSchema = z
+  .object({
+    relativePath: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH).optional(),
+    cursor: z.string().min(1).max(4096).optional(),
+    maximumBytes: z.number().int().positive().max(TEXT_PROJECTION_HARD_CONTENT_ITEM_BYTES).default(TEXT_PROJECTION_DEFAULT_CHUNK_BYTES),
+    maximumLines: z.number().int().positive().max(TEXT_PROJECTION_HARD_MAX_LINES).default(TEXT_PROJECTION_DEFAULT_MAX_LINES),
+    expectedSourceSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    priorResultAttemptId: z.string().min(1).max(128).optional(),
+    maxBytes: z.number().int().positive().max(500_000).default(200_000)
+  })
+  .strict()
+  .refine((value) => Boolean(value.relativePath || value.cursor), "relativePath or cursor is required.");
+const RepoReadTextLinesParamsSchema = z
+  .object({
+    relativePath: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH).optional(),
+    cursor: z.string().min(1).max(4096).optional(),
+    startLine: z.number().int().positive().optional(),
+    maximumLines: z.number().int().positive().max(TEXT_PROJECTION_HARD_MAX_LINES).optional(),
+    maximumBytes: z.number().int().positive().max(TEXT_PROJECTION_HARD_CONTENT_ITEM_BYTES).default(TEXT_PROJECTION_DEFAULT_CHUNK_BYTES),
+    expectedSourceSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    priorResultAttemptId: z.string().min(1).max(128).optional(),
+    maxBytes: z.number().int().positive().max(500_000).default(200_000)
+  })
+  .strict()
+  .refine((value) => Boolean(value.cursor || value.relativePath && value.startLine && value.maximumLines), "cursor or relativePath/startLine/maximumLines is required.");
+const RepoReadMarkdownSectionParamsSchema = z
+  .object({
+    relativePath: z.string().min(1).max(MAX_RELATIVE_PATH_LENGTH).optional(),
+    sectionId: z.string().min(1).max(160).optional(),
+    cursor: z.string().min(1).max(4096).optional(),
+    maximumBytes: z.number().int().positive().max(TEXT_PROJECTION_HARD_CONTENT_ITEM_BYTES).default(TEXT_PROJECTION_DEFAULT_CHUNK_BYTES),
+    maximumLines: z.number().int().positive().max(TEXT_PROJECTION_HARD_MAX_LINES).default(TEXT_PROJECTION_DEFAULT_MAX_LINES),
+    expectedSourceSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    priorResultAttemptId: z.string().min(1).max(128).optional(),
+    maxBytes: z.number().int().positive().max(500_000).default(200_000)
+  })
+  .strict()
+  .refine((value) => Boolean(value.sectionId || value.cursor), "sectionId or cursor is required.");
 const RepoSearchFilesParamsSchema = z
   .object({
     query: z.string().min(1).max(MAX_QUERY_LENGTH),
@@ -347,6 +432,24 @@ const ReadArtifactByIdParamsSchema = z
     component: z.enum(["preferred", "markdown", "json", "both"]).default("preferred")
   })
   .strict();
+const InspectArtifactTextParamsSchema = z
+  .object({
+    artifactId: z.string().min(1).max(128),
+    includeHeadingIndex: z.boolean().optional(),
+    maximumHeadings: z.number().int().positive().max(TEXT_PROJECTION_HARD_MAX_HEADINGS).default(TEXT_PROJECTION_DEFAULT_MAX_HEADINGS)
+  })
+  .strict();
+const ReadArtifactTextChunkParamsSchema = z
+  .object({
+    artifactId: z.string().min(1).max(128).optional(),
+    cursor: z.string().min(1).max(4096).optional(),
+    maximumBytes: z.number().int().positive().max(TEXT_PROJECTION_HARD_CONTENT_ITEM_BYTES).default(TEXT_PROJECTION_DEFAULT_CHUNK_BYTES),
+    maximumLines: z.number().int().positive().max(TEXT_PROJECTION_HARD_MAX_LINES).default(TEXT_PROJECTION_DEFAULT_MAX_LINES),
+    expectedSourceSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    priorResultAttemptId: z.string().min(1).max(128).optional()
+  })
+  .strict()
+  .refine((value) => Boolean(value.artifactId || value.cursor), "artifactId or cursor is required.");
 const LatestArtifactParamsSchema = ArtifactFilterParamsSchema.extend({
   includeContent: z.boolean().default(false)
 }).strict();
@@ -371,6 +474,27 @@ const RecentToolCallsParamsSchema = z
     since: StrictIsoTimestampSchema.optional(),
     correlationId: z.string().min(1).max(128).optional(),
     publicToolName: z.string().min(1).max(128).optional()
+  })
+  .strict();
+const AcknowledgeToolResultParamsSchema = z
+  .object({
+    correlationId: z.string().min(1).max(128),
+    resultAttemptId: z.string().min(1).max(128),
+    payloadSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    acknowledgementContext: z.enum(ACKNOWLEDGEMENT_CONTEXTS).optional()
+  })
+  .strict();
+const ResultDeliveryStatusParamsSchema = z
+  .object({
+    correlationId: z.string().min(1).max(128).optional(),
+    resultAttemptId: z.string().min(1).max(128).optional()
+  })
+  .strict()
+  .refine((value) => Boolean(value.correlationId || value.resultAttemptId), "correlationId or resultAttemptId is required.");
+const DescribeToolboxActionParamsSchema = z
+  .object({
+    toolboxName: z.enum(TOOLBOX_TOOL_NAMES),
+    actionName: z.string().min(1).max(80)
   })
   .strict();
 const ReviewQueueParamsSchema = ArtifactFilterParamsSchema.extend({
@@ -511,6 +635,10 @@ function packageVersion(root: string): string | "unknown" {
   return typeof value === "string" && value.trim() ? value : "unknown";
 }
 
+function isPackagedApplicationRoot(value: string): boolean {
+  return /(?:^|[\\/])app\.asar(?:$|[\\/])/iu.test(path.resolve(value));
+}
+
 function comparePackageVersions(
   runtimePackageVersion: string | "unknown",
   selectedWorkspacePackageVersion: string | "unknown"
@@ -522,24 +650,38 @@ function comparePackageVersions(
   return runtimePackageVersion === selectedWorkspacePackageVersion;
 }
 
+function targetGitInspectionAllowed(config: AppConfig, selectedWorkspaceId: string | undefined): boolean {
+  try {
+    return resolveWorkspaceAuthority(selectedWorkspaceId, config, "git_inspection").allowed;
+  } catch {
+    return false;
+  }
+}
+
 export async function buildRuntimeScopeToolDiagnostics(
   config: AppConfig,
   context: ToolboxRuntimeContext,
-  selectedWorkspaceRoot = config.defaultWorkspaceRoot ?? config.repoRoot
+  selectedWorkspaceRoot = config.defaultWorkspaceRoot ?? config.repoRoot,
+  selectedWorkspaceId: string | undefined = undefined
 ): Promise<RuntimeScopeToolDiagnostics> {
+  const allowTargetGitInspection = targetGitInspectionAllowed(config, selectedWorkspaceId);
   const [runtimeSourceCommit, branch, selectedWorkspaceHead] = await Promise.all([
     runtimeGitOutputOptional(config.repoRoot, ["rev-parse", "--short", "HEAD"]),
     runtimeGitOutputOptional(config.repoRoot, ["branch", "--show-current"]),
-    runtimeGitOutputOptional(selectedWorkspaceRoot, ["rev-parse", "--short", "HEAD"])
+    allowTargetGitInspection ? runtimeGitOutputOptional(selectedWorkspaceRoot, ["rev-parse", "--short", "HEAD"]) : Promise.resolve("unknown" as const)
   ]);
   const runtimePackageVersion = packageVersion(config.repoRoot);
   const selectedWorkspacePackageVersion = packageVersion(selectedWorkspaceRoot);
-  const packageVersionMatch = comparePackageVersions(runtimePackageVersion, selectedWorkspacePackageVersion);
+  const selectedIsServiceRepository =
+    selectedWorkspaceId === "champcity_gpt" ||
+    path.resolve(selectedWorkspaceRoot) === path.resolve(config.repoRoot);
+  const servicePackageVersionMatch = comparePackageVersions(runtimePackageVersion, selectedWorkspacePackageVersion);
+  const packageVersionMatch = selectedIsServiceRepository ? servicePackageVersionMatch : "not_applicable";
   const runtimeDriftDetected = packageVersionMatch === false;
   const warnings = [
     ...(runtimeDriftDetected
       ? [
-          "The active MCP runtime package version does not match the selected ChampCity_GPT workspace version. Package, promote, restart, and reconnect the runtime before relying on current source behavior."
+          "The active MCP runtime package version does not match the ChampCity GPT service repository version. Package, promote, restart, and reconnect the runtime before relying on current source behavior."
         ]
       : []),
     ...(config.configWarnings ?? [])
@@ -558,7 +700,19 @@ export async function buildRuntimeScopeToolDiagnostics(
       startedAt: TOOLBOX_RUNTIME_STARTED_AT,
       runtimeDriftDetected,
       warnings,
-      workspaceRouting: getWorkspaceDiagnostics(config)
+      workspaceRouting: getWorkspaceDiagnostics(config),
+      serviceRuntime: {
+        packageVersion: runtimePackageVersion,
+        sourceCommit: runtimeSourceCommit,
+        mode: isPackagedApplicationRoot(config.repoRoot) ? "packaged" : "development",
+        provenance: "ChampCity GPT MCP runtime"
+      },
+      targetWorkspace: {
+        workspaceId: selectedWorkspaceId ?? "unknown",
+        packageVersion: selectedWorkspacePackageVersion,
+        head: selectedWorkspaceHead,
+        alignment: selectedIsServiceRepository ? "checked" : "not_applicable"
+      }
     },
     oauth: {
       filesReadGranted: context.callerScope ? scopeIncludes(context.callerScope, "files.read") : "unknown",
@@ -576,16 +730,24 @@ export async function buildRuntimeScopeToolDiagnostics(
 }
 
 function supportedActionError(toolbox: ToolboxName, action: string, supportedActions: readonly string[]): ToolboxResult {
+  const alternatives = UNSUPPORTED_ACTION_ALTERNATIVES[`${toolbox}.${action}`] ?? [];
   return {
     toolbox,
     action,
     ok: false,
     error: serializeError(
       new AppError("INVALID_INPUT", "Unsupported toolbox action.", {
-        supportedActions
+        classification: "contract_rejection",
+        toolbox,
+        action,
+        supportedActions,
+        alternatives
       })
     ),
-    recommendedNextSteps: [`Use one of: ${supportedActions.join(", ")}.`]
+    recommendedNextSteps: [
+      `Use one of: ${supportedActions.join(", ")}.`,
+      ...alternatives.map((alternative) => `Alternative: ${alternative}.`)
+    ]
   };
 }
 
@@ -637,6 +799,14 @@ function okWithMcpContent(
   };
 }
 
+function artifactOk(toolbox: "artifact_toolbox", action: string, result: Record<string, unknown>): ToolboxResult {
+  const boundedPayload = takeBoundedArtifactTextPayload(result);
+  if (!boundedPayload) {
+    return ok(toolbox, action, result);
+  }
+  return okWithMcpContent(toolbox, action, boundedPayload.structuredContent, boundedPayload.mcpContent);
+}
+
 function failed(toolbox: ToolboxName, action: string, error: unknown, supportedActions?: readonly string[]): ToolboxResult {
   const structuredError =
     error instanceof z.ZodError
@@ -655,6 +825,18 @@ function failed(toolbox: ToolboxName, action: string, error: unknown, supportedA
     error: serializeError(structuredError),
     ...(supportedActions ? { recommendedNextSteps: [`Use one of: ${supportedActions.join(", ")}.`] } : {})
   };
+}
+
+function gitCapabilityUnavailableResult(toolbox: "git_toolbox", action: string, workspaceId: string, reasonCode = "GIT_CAPABILITY_UNAVAILABLE"): ToolboxResult {
+  return ok(toolbox, action, {
+    status: "not_git_repository",
+    reasonCode,
+    capability: "git_inspection",
+    workspaceId,
+    operation: action,
+    generalWorkspaceOperationsUnaffected: true,
+    recommendedNextAction: "repo_toolbox.status"
+  });
 }
 
 async function runToolboxAction(
@@ -741,14 +923,64 @@ export async function repoToolbox(rawInput: unknown, config: AppConfig, context:
     switch (input.action) {
       case "status":
         EmptyParamsSchema.parse(input.params);
-        return ok("repo_toolbox", input.action, await getWorkspaceStatusSummary({ workspaceId: input.workspaceId }, config));
+        return ok("repo_toolbox", input.action, await getGeneralWorkspaceStatus({ workspaceId: input.workspaceId }, config, {
+          callerScope: context.callerScope,
+          writeToolsHiddenByLocalMode: context.writeToolNamesBlockedByLocalMode
+        }));
       case "list_files": {
         const params = RepoListFilesParamsSchema.parse(input.params);
         return ok("repo_toolbox", input.action, withoutRoot(await listProjectFiles({ root, ...params }, config)));
       }
       case "read_file": {
         const params = RepoReadFileParamsSchema.parse(input.params);
-        return ok("repo_toolbox", input.action, await readProjectFile({ root, ...params }, config));
+        const result = await readProjectFile({ root, workspaceId: input.workspaceId, ...params }, config);
+        if (result.contentComplete) {
+          return ok("repo_toolbox", input.action, result);
+        }
+        const chunk = await readTextChunk(config, {
+          workspaceId: input.workspaceId,
+          root,
+          relativePath: result.relativePath,
+          maximumBytes: TEXT_PROJECTION_DEFAULT_CHUNK_BYTES,
+          expectedSourceSha256: result.sha256,
+          maxBytes: params.maxBytes
+        });
+        return okWithMcpContent(
+          "repo_toolbox",
+          input.action,
+          {
+            ...boundedTextStructuredContent(chunk),
+            readFileCompatibilityMode: true,
+            contentComplete: false,
+            inlineThresholdBytes: TEXT_PROJECTION_INLINE_THRESHOLD_BYTES,
+            recommendedNextAction: "read_text_chunk"
+          },
+          boundedTextContentItems(chunk)
+        );
+      }
+      case "inspect_text_file": {
+        const params = RepoInspectTextFileParamsSchema.parse(input.params);
+        const source = await loadTextProjectionSource(config, {
+          workspaceId: input.workspaceId,
+          root,
+          relativePath: params.relativePath
+        });
+        return ok("repo_toolbox", input.action, inspectTextProjectionSource(config, source, params));
+      }
+      case "read_text_chunk": {
+        const params = RepoReadTextChunkParamsSchema.parse(input.params);
+        const chunk = await readTextChunk(config, { workspaceId: input.workspaceId, root, ...params });
+        return okWithMcpContent("repo_toolbox", input.action, boundedTextStructuredContent(chunk), boundedTextContentItems(chunk));
+      }
+      case "read_text_lines": {
+        const params = RepoReadTextLinesParamsSchema.parse(input.params);
+        const chunk = await readTextLines(config, { workspaceId: input.workspaceId, root, ...params });
+        return okWithMcpContent("repo_toolbox", input.action, boundedTextStructuredContent(chunk), boundedTextContentItems(chunk));
+      }
+      case "read_markdown_section": {
+        const params = RepoReadMarkdownSectionParamsSchema.parse(input.params);
+        const chunk = await readMarkdownSection(config, { workspaceId: input.workspaceId, root, ...params });
+        return okWithMcpContent("repo_toolbox", input.action, boundedTextStructuredContent(chunk), boundedTextContentItems(chunk));
       }
       case "search_files": {
         const params = RepoSearchFilesParamsSchema.parse(input.params);
@@ -779,6 +1011,7 @@ export async function repoToolbox(rawInput: unknown, config: AppConfig, context:
 export async function gitToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
   return runToolboxAction("git_toolbox", rawInput, SUPPORTED_GIT_ACTIONS, config, context, async (input) => {
     const root = resolveWorkspaceRoot(input.workspaceId, config);
+    const gitInspectionAuthority = () => resolveWorkspaceAuthority(input.workspaceId, config, "git_inspection");
     const assertGitBacked = () => {
       assertWorkspaceAuthorityAllowed(resolveWorkspaceAuthority(input.workspaceId, config, "git_mutation"));
     };
@@ -786,9 +1019,17 @@ export async function gitToolbox(rawInput: unknown, config: AppConfig, context: 
     switch (input.action) {
       case "status":
         EmptyParamsSchema.parse(input.params);
+        const statusAuthority = gitInspectionAuthority();
+        if (!statusAuthority.allowed) {
+          return gitCapabilityUnavailableResult("git_toolbox", input.action, input.workspaceId, statusAuthority.denialReason);
+        }
         return ok("git_toolbox", input.action, await getWorkspaceStatusSummary({ workspaceId: input.workspaceId }, config));
       case "diff": {
         const params = GitDiffParamsSchema.parse(input.params);
+        const diffAuthority = gitInspectionAuthority();
+        if (!diffAuthority.allowed) {
+          return gitCapabilityUnavailableResult("git_toolbox", input.action, input.workspaceId, diffAuthority.denialReason);
+        }
         return ok("git_toolbox", input.action, await gitDiff({ root, ...params }, config));
       }
       case "prepare_work_branch": {
@@ -827,6 +1068,10 @@ export async function gitToolbox(rawInput: unknown, config: AppConfig, context: 
       }
       case "inspect_history": {
         const params = GitInspectParamsSchema.parse(input.params) as GitInspectionInput;
+        const inspectAuthority = gitInspectionAuthority();
+        if (!inspectAuthority.allowed) {
+          return gitCapabilityUnavailableResult("git_toolbox", input.action, input.workspaceId, inspectAuthority.denialReason);
+        }
         return architectResult("git_toolbox", input.action, await runGitInspection(root, params));
       }
       default:
@@ -903,11 +1148,19 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
       }
       case "read_artifact_by_id": {
         const params = ReadArtifactByIdParamsSchema.parse(input.params);
-        return ok("artifact_toolbox", input.action, await readArtifactById({ workspaceId: input.workspaceId, ...params }, config));
+        return artifactOk("artifact_toolbox", input.action, await readArtifactById({ workspaceId: input.workspaceId, ...params }, config) as Record<string, unknown>);
+      }
+      case "inspect_artifact_text": {
+        const params = InspectArtifactTextParamsSchema.parse(input.params);
+        return ok("artifact_toolbox", input.action, await inspectArtifactText({ workspaceId: input.workspaceId, ...params }, config));
+      }
+      case "read_artifact_text_chunk": {
+        const params = ReadArtifactTextChunkParamsSchema.parse(input.params);
+        return artifactOk("artifact_toolbox", input.action, await readArtifactTextChunk({ workspaceId: input.workspaceId, ...params }, config) as Record<string, unknown>);
       }
       case "latest_artifact": {
         const params = LatestArtifactParamsSchema.parse(input.params);
-        return ok("artifact_toolbox", input.action, await latestArtifact({ workspaceId: input.workspaceId, ...params }, config));
+        return artifactOk("artifact_toolbox", input.action, await latestArtifact({ workspaceId: input.workspaceId, ...params }, config) as Record<string, unknown>);
       }
       case "artifact_pair_status": {
         const params = ArtifactPairStatusParamsSchema.parse(input.params);
@@ -919,7 +1172,7 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
       }
       case "export_planning_corpus": {
         const params = ExportPlanningCorpusParamsSchema.parse(input.params);
-        return ok("artifact_toolbox", input.action, await exportPlanningCorpus({ workspaceId: input.workspaceId, ...params }, config));
+        return artifactOk("artifact_toolbox", input.action, await exportPlanningCorpus({ workspaceId: input.workspaceId, ...params }, config) as Record<string, unknown>);
       }
       case "review_queue": {
         const params = ReviewQueueParamsSchema.parse(input.params);
@@ -933,17 +1186,45 @@ export async function artifactToolbox(rawInput: unknown, config: AppConfig, cont
 
 export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, context: ToolboxRuntimeContext): Promise<ToolboxResult> {
   return runToolboxAction("diagnostics_toolbox", rawInput, SUPPORTED_DIAGNOSTICS_ACTIONS, config, context, async (input) => {
-    if (input.action !== "project_validation" && input.action !== "recent_tool_calls") {
+    if (
+      input.action !== "project_validation" &&
+      input.action !== "recent_tool_calls" &&
+      input.action !== "acknowledge_tool_result" &&
+      input.action !== "result_delivery_status" &&
+      input.action !== "describe_toolbox_action"
+    ) {
       EmptyParamsSchema.parse(input.params);
     }
     const selectedWorkspaceRoot =
-      input.action !== "list_workspaces" && input.action !== "recent_tool_calls" ? resolveWorkspaceRoot(input.workspaceId, config) : undefined;
+      input.action !== "list_workspaces" &&
+      input.action !== "recent_tool_calls" &&
+      input.action !== "acknowledge_tool_result" &&
+      input.action !== "result_delivery_status" &&
+      input.action !== "describe_toolbox_action"
+        ? resolveWorkspaceRoot(input.workspaceId, config)
+        : undefined;
 
-    const diagnostics = await buildRuntimeScopeToolDiagnostics(config, context, selectedWorkspaceRoot);
+    if (input.action === "workspace_safety_status") {
+      return ok("diagnostics_toolbox", input.action, await getWorkspaceSafetyStatus({ workspaceId: input.workspaceId }, config, {
+        callerScope: context.callerScope,
+        writeToolsHiddenByLocalMode: context.writeToolNamesBlockedByLocalMode
+      }));
+    }
+    if (input.action === "public_safety_status") {
+      return ok("diagnostics_toolbox", input.action, await getWorkspaceSafetyStatus({ workspaceId: input.workspaceId, deprecatedAlias: "public_safety_status" }, config, {
+        callerScope: context.callerScope,
+        writeToolsHiddenByLocalMode: context.writeToolNamesBlockedByLocalMode
+      }));
+    }
+
+    const diagnostics = await buildRuntimeScopeToolDiagnostics(config, context, selectedWorkspaceRoot, input.workspaceId);
     switch (input.action) {
       case "runtime_status":
         return ok("diagnostics_toolbox", input.action, diagnostics.runtime, diagnostics.runtime.warnings);
-      case "write_access_status":
+      case "write_access_status": {
+        const catalog = await listWorkspaceCatalog(config, {
+          oauthFilesWriteGranted: diagnostics.oauth.filesWriteGranted
+        });
         return ok("diagnostics_toolbox", input.action, {
           writeMode: config.writeMode,
           writeModeSource: config.writeModeSource,
@@ -951,10 +1232,11 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
           patchWritesAllowed: config.patchWritesAllowed,
           elevatedOperationsAllowed: config.elevatedOperationsAllowed,
           writeToolsHiddenByLocalMode: context.writeToolNamesBlockedByLocalMode,
-          workspaceWriteAuthority: (await listWorkspaceCatalog(config)).workspaces.map((workspace) => ({
+          workspaceWriteAuthority: catalog.workspaces.map((workspace) => ({
             workspaceId: workspace.workspaceId,
             writePolicy: workspace.writePolicy,
             gitDetected: workspace.gitDetected,
+            capabilities: workspace.capabilities,
             artifactWriteRoots: workspace.artifactWriteRoots,
             artifactPersistenceAvailable: workspace.artifactPersistenceAvailable,
             artifactPersistenceReason: workspace.artifactPersistenceReason,
@@ -963,6 +1245,7 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
             warnings: workspace.warnings
           }))
         });
+      }
       case "tool_exposure_status":
         return ok("diagnostics_toolbox", input.action, {
           registeredToolCount: diagnostics.tools.registeredToolCount,
@@ -998,10 +1281,18 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
         const params = RecentToolCallsParamsSchema.parse(input.params);
         return ok("diagnostics_toolbox", input.action, readRecentToolCalls(config, params));
       }
+      case "acknowledge_tool_result": {
+        const params = AcknowledgeToolResultParamsSchema.parse(input.params);
+        return ok("diagnostics_toolbox", input.action, await acknowledgeToolResult(config, params));
+      }
+      case "result_delivery_status": {
+        const params = ResultDeliveryStatusParamsSchema.parse(input.params);
+        return ok("diagnostics_toolbox", input.action, resultDeliveryStatus(config, params));
+      }
       case "list_workspaces":
-        return ok("diagnostics_toolbox", input.action, await listWorkspaceCatalog(config));
-      case "public_safety_status":
-        return ok("diagnostics_toolbox", input.action, await getChangeSetReadinessSummary({ workspaceId: input.workspaceId, targetBranch: "feature" }, config));
+        return ok("diagnostics_toolbox", input.action, await listWorkspaceCatalog(config, {
+          oauthFilesWriteGranted: diagnostics.oauth.filesWriteGranted
+        }));
       case "project_validation": {
         const params = ProjectValidationParamsSchema.parse(input.params);
         return architectResult(
@@ -1024,9 +1315,13 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
           diagnostics_toolbox: [
             "project_validation",
             "recent_tool_calls",
+            "acknowledge_tool_result",
+            "result_delivery_status",
             "mcp_server_startup",
             "mcp_tool_registration",
             "mcp_tool_inventory",
+            "describe_toolbox_action",
+            "workspace_safety_status",
             "electron_development_startup",
             "electron_packaged_startup"
           ],
@@ -1060,14 +1355,29 @@ export async function diagnosticsToolbox(rawInput: unknown, config: AppConfig, c
             data: {
               registeredTools: buildMcpToolInventory(context.registeredToolDefinitions),
               toolboxActions: {
+                repo_toolbox: [...SUPPORTED_REPO_ACTIONS],
                 artifact_toolbox: [...SUPPORTED_ARTIFACT_ACTIONS],
                 diagnostics_toolbox: [...SUPPORTED_DIAGNOSTICS_ACTIONS],
+                browser_toolbox: [...SUPPORTED_BROWSER_ACTIONS],
                 git_toolbox: [...SUPPORTED_GIT_ACTIONS],
+                integration_toolbox: [...SUPPORTED_INTEGRATION_ACTIONS],
                 knowledge_toolbox: [...SUPPORTED_KNOWLEDGE_ACTIONS]
-              }
+              },
+              toolboxActionContracts: listToolboxActionContracts()
             }
           })
         );
+      }
+      case "describe_toolbox_action": {
+        const params = DescribeToolboxActionParamsSchema.parse(input.params);
+        const contract = getToolboxActionContract(params.toolboxName, params.actionName);
+        if (!contract) {
+          return supportedActionError(params.toolboxName, params.actionName, SUPPORTED_TOOLBOX_ACTIONS[params.toolboxName]);
+        }
+        return ok("diagnostics_toolbox", input.action, {
+          status: "ok",
+          contract
+        });
       }
       case "electron_development_startup":
         return architectResult(

@@ -111,10 +111,10 @@ describe("workspace registry", () => {
     assert.equal(catalog.workspaces[0]?.remoteMatchesExpected, "unknown");
     assert.equal(catalog.workspaces[0]?.writePolicy, "git_required");
     assert.equal(catalog.workspaces[0]?.gitDetected, false);
-    assert.equal(catalog.workspaces[0]?.artifactPersistenceAvailable, true);
-    assert.doesNotMatch(catalog.workspaces[0]?.artifactPersistenceReason ?? "", /git|GIT_REQUIRED/i);
+    assert.equal(catalog.workspaces[0]?.artifactPersistenceAvailable, false);
+    assert.equal(catalog.workspaces[0]?.artifactPersistenceReason, "ARTIFACT_PERSISTENCE_PREREQUISITE_UNMET");
     assert.equal(catalog.workspaces[0]?.gitMutationAvailable, false);
-    assert.equal(catalog.workspaces[0]?.gitMutationReason, "GIT_REQUIRED");
+    assert.match(catalog.workspaces[0]?.gitMutationReason ?? "", /GIT_CAPABILITY_UNAVAILABLE/u);
     assert.equal(catalog.diagnostics.defaultWorkspaceId, "workspace_a");
     assert.equal(diagnostics.defaultWorkspaceIsExplicit, true);
     assert.doesNotMatch(serialized, new RegExp(tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
@@ -131,9 +131,57 @@ describe("workspace registry", () => {
     assert.equal(resolved.writePolicy, "artifact_only");
     assert.deepEqual(resolved.artifactWriteRoots, ["planning"]);
     assert.equal(resolved.legacyRequireGitRootDeprecated, true);
-    assert.equal(catalog.workspaces[0]?.artifactPersistenceAvailable, true);
+    assert.equal(catalog.workspaces[0]?.capabilityConfig.workspaceCapabilities.artifactPersistence, "enabled");
+    assert.equal(catalog.workspaces[0]?.artifactPersistenceAvailable, false);
     assert.equal(catalog.workspaces[0]?.gitMutationAvailable, false);
     assert.ok(catalog.workspaces[0]?.warnings.some((warning) => /deprecated/i.test(warning)));
+  });
+
+  it("preserves explicit workspace capabilities in catalog compatibility metadata and authoritative summaries", async () => {
+    const workspaceA = path.join(tempRoot, "Workspace_A");
+    fs.mkdirSync(path.join(workspaceA, ".git"), { recursive: true });
+    const config = testConfig([workspaceA], {
+      workspaces: [
+        {
+          workspaceId: "workspace_a",
+          label: "Workspace A",
+          root: workspaceA,
+          source: "configured",
+          workspaceCapabilities: {
+            artifactPersistence: "disabled",
+            patchWorkflow: "disabled",
+            gitOperations: "disabled",
+            releaseOperations: "disabled"
+          }
+        }
+      ],
+      defaultWorkspaceId: "workspace_a"
+    });
+
+    const catalog = await listWorkspaceCatalog(config);
+    const workspace = catalog.workspaces[0];
+
+    assert.equal(workspace?.branch, "unknown");
+    assert.deepEqual(workspace?.capabilityConfig.workspaceCapabilities, {
+      artifactPersistence: "disabled",
+      patchWorkflow: "disabled",
+      gitOperations: "disabled",
+      releaseOperations: "disabled"
+    });
+    assert.equal(workspace?.capabilities.artifactPersistence.available, false);
+    assert.equal(workspace?.capabilities.artifactPersistence.reasonCode, "ARTIFACT_PERSISTENCE_DISABLED");
+    assert.equal(workspace?.capabilities.patchWorkflow.available, false);
+    assert.equal(workspace?.capabilities.patchWorkflow.reasonCode, "PATCH_WORKFLOW_DISABLED");
+    assert.equal(workspace?.capabilities.gitInspection.available, false);
+    assert.equal(workspace?.capabilities.gitInspection.reasonCode, "GIT_OPERATIONS_DISABLED");
+    assert.equal(workspace?.capabilities.gitMutation.reasonCode, "GIT_OPERATIONS_DISABLED");
+    assert.equal(workspace?.capabilities.releaseInspection.available, false);
+    assert.equal(workspace?.capabilities.releaseInspection.reasonCode, "RELEASE_OPERATIONS_DISABLED");
+    assert.equal(workspace?.capabilities.releasePublication.reasonCode, "RELEASE_OPERATIONS_DISABLED");
+    assert.equal(workspace?.artifactPersistenceAvailable, false);
+    assert.equal(workspace?.artifactPersistenceReason, "ARTIFACT_PERSISTENCE_DISABLED");
+    assert.equal(workspace?.gitMutationAvailable, false);
+    assert.equal(workspace?.gitMutationReason, "GIT_OPERATIONS_DISABLED");
   });
 
   it("keeps legacy requireGitRoot false Git repositories git_required", () => {

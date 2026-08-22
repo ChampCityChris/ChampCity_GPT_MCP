@@ -179,6 +179,21 @@ function makeConfig(root: string, auditRoot: string, writeMode: WriteMode, overr
     patchWritesAllowed: mode.patchWritesAllowed,
     elevatedOperationsAllowed: mode.elevatedOperationsAllowed,
     writeApprovalToken: { source: "none" },
+    ...(overrides.workspaces
+      ? {}
+      : {
+          workspaces: [
+            {
+              workspaceId: "champcity_gpt",
+              label: "ChampCity GPT",
+              root: normalizedRoot,
+              source: "configured" as const,
+              remote: "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git"
+            }
+          ],
+          defaultWorkspaceId: "champcity_gpt",
+          defaultWorkspaceIdSource: "single-workspace" as const
+        }),
     ...overrides
   };
 }

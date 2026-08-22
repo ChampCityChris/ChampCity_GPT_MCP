@@ -169,6 +169,36 @@ describe("config loading", () => {
     assert.deepEqual(config.workspaces?.[0]?.artifactWriteRoots, ["planning"]);
   });
 
+  it("loads future-facing workspace capability configuration without rewriting legacy policy", () => {
+    writeLocalConfig({
+      workspaces: [
+        {
+          workspaceId: "planning_workspace",
+          label: "Planning Workspace",
+          root: localRoot,
+          writePolicy: "git_required",
+          workspaceCapabilities: {
+            artifactPersistence: "enabled",
+            patchWorkflow: "disabled",
+            gitOperations: "disabled",
+            releaseOperations: "disabled"
+          }
+        }
+      ],
+      defaultWorkspaceId: "planning_workspace"
+    });
+
+    const config = loadConfig({}, tempRoot);
+
+    assert.equal(config.workspaces?.[0]?.writePolicy, "git_required");
+    assert.deepEqual(config.workspaces?.[0]?.workspaceCapabilities, {
+      artifactPersistence: "enabled",
+      patchWorkflow: "disabled",
+      gitOperations: "disabled",
+      releaseOperations: "disabled"
+    });
+  });
+
   it("rejects unsafe artifact write root configuration and warns for explicit dot", () => {
     for (const artifactWriteRoots of [[".."], ["/tmp"], ["C:\\temp"], ["https://example.com/path"], ["plan*"], ["config"]]) {
       writeLocalConfig({

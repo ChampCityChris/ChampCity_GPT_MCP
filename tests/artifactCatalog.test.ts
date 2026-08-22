@@ -188,6 +188,16 @@ describe("artifact catalog toolbox actions", () => {
     writeFile("docs/artifacts/json-only.json", `${JSON.stringify({ artifactId: "ART-JSON", artifactType: "data_pack", value: 1 })}\n`);
     writeFile("docs/artifacts/bad.json", "{\"artifactId\":\"ART-BAD\",", "2026-01-02T00:00:00.000Z");
     writeFile("docs/artifacts/large.json", `${JSON.stringify({ artifactId: "ART-LARGE", payload: "x".repeat(510_000) })}\n`);
+    writeFile("docs/artifacts/bounded-both.md", `# Bounded Both\n\n${"Bounded markdown body.\n".repeat(1200)}`);
+    writeFile(
+      "docs/artifacts/bounded-both.json",
+      `${JSON.stringify({
+        artifactId: "ART-BOUNDED-BOTH",
+        artifactType: "builder_report",
+        markdownPath: "docs/artifacts/bounded-both.md",
+        value: 2
+      })}\n`
+    );
 
     const preferred = await call("read_artifact_by_id", { artifactId: "ART-READ" });
     const both = await call("read_artifact_by_id", { artifactId: "ART-READ", component: "both" });
@@ -195,6 +205,7 @@ describe("artifact catalog toolbox actions", () => {
     const missing = await call("read_artifact_by_id", { artifactId: "ART-JSON", component: "markdown" });
     const invalid = await call("read_artifact_by_id", { artifactId: "ART-BAD", component: "json" });
     const large = await call("read_artifact_by_id", { artifactId: "ART-LARGE", component: "json" });
+    const boundedBoth = await call("read_artifact_by_id", { artifactId: "ART-BOUNDED-BOTH", component: "both" });
 
     assert.equal((preferred.result as { status?: string }).status, "ok");
     assert.match(((preferred.result as { markdown?: { content?: string } }).markdown?.content ?? ""), /Readable/u);
@@ -204,6 +215,10 @@ describe("artifact catalog toolbox actions", () => {
     assert.equal((missing.result as { status?: string }).status, "component_not_found");
     assert.equal((invalid.result as { json?: { validJson?: boolean } }).json?.validJson, false);
     assert.equal((large.result as { status?: string }).status, "content_too_large");
+    assert.equal(boundedBoth.ok, true);
+    assert.ok(boundedBoth.mcpContent);
+    assert.equal((boundedBoth.structuredContent as { components?: { json?: { status?: string; value?: { value?: number } } } }).components?.json?.status, "inlined");
+    assert.equal((boundedBoth.structuredContent as { components?: { json?: { value?: { value?: number } } } }).components?.json?.value?.value, 2);
     assertNoAbsolutePath(both);
   });
 
@@ -310,7 +325,11 @@ describe("artifact catalog toolbox actions", () => {
     assert.equal(manifestOnly.ok, true);
     assert.equal((manifestOnly.result as { counts?: { totalDiscoveredFilesystemFileCount?: number } }).counts?.totalDiscoveredFilesystemFileCount, 4);
     assert.ok((manifestOnly.result as { manifest?: Array<{ path?: string; sha256?: string }> }).manifest?.some((entry) => entry.path === "planning/alpha.md" && entry.sha256 === sha256(alpha)));
-    assert.equal((page1.result as { fullText?: Array<{ path?: string; readStatus?: string }> }).fullText?.some((entry) => entry.path === "planning/alpha.md" && entry.readStatus === "read"), true);
+    const page1FullText = (page1.result as { fullText?: Array<{ path?: string; readStatus?: string; content?: string }> }).fullText ?? [];
+    assert.equal(page1FullText.some((entry) => entry.path === "planning/alpha.md" && entry.readStatus === "bounded_projection"), true);
+    assert.equal(page1FullText.some((entry) => typeof entry.content === "string"), false);
+    assert.ok(page1.mcpContent);
+    assert.ok((page1.mcpContent as Array<{ text?: string }>).some((entry) => entry.text === alpha));
     assert.equal((page2.result as { fullText?: Array<{ path?: string; readStatus?: string }> }).fullText?.some((entry) => entry.path === "planning/binary.bin" && entry.readStatus === "unsupported"), true);
     assert.equal((sidecars.result as { manifest?: Array<{ path?: string }> }).manifest?.some((entry) => entry.path === "planning/beta.json"), true);
     assert.equal(denied.ok, false);

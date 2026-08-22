@@ -6,6 +6,7 @@ import path from "node:path";
 import { z } from "zod";
 
 import { type AppConfig } from "../config.js";
+import { assertWorkspaceAuthorityAllowed, resolveWorkspaceAuthority } from "../workspaceAuthority.js";
 import { AppError } from "../utils/errors.js";
 import { runGit, type ProcessResult } from "../utils/git.js";
 import { DEFAULT_WORKSPACE_ID, WORKSPACE_ID_MAX_LENGTH, WORKSPACE_ID_PATTERN, resolveWorkspace as resolveRegisteredWorkspace } from "../workspaces.js";
@@ -46,6 +47,13 @@ interface WorkspaceContext {
   workspaceId: string;
   workspaceLabel: string;
   root: string;
+}
+
+interface GitWorkspaceContext extends WorkspaceContext {
+  git: {
+    available: boolean;
+    reasonCode: "GIT_INSPECTION_AVAILABLE";
+  };
 }
 
 interface StatusEntry {
@@ -131,17 +139,46 @@ function relativeReleasePath(fileName: string): string {
   return `release/${fileName}`;
 }
 
-function resolveWorkspaceContext(workspaceId: string, config: AppConfig): WorkspaceContext {
+export function resolveFilesystemWorkspaceContext(workspaceId: string, config: AppConfig): WorkspaceContext {
   const workspace = resolveRegisteredWorkspace(workspaceId, config);
-
-  if (!fs.existsSync(path.join(workspace.root, ".git"))) {
-    throw new AppError("GIT_REQUIRED", "Configured workspace is not a git repository.");
-  }
 
   return {
     workspaceId: workspace.workspaceId,
     workspaceLabel: workspace.label,
     root: workspace.root
+  };
+}
+
+export function resolveGitWorkspaceContext(workspaceId: string, config: AppConfig): GitWorkspaceContext {
+  const workspace = resolveFilesystemWorkspaceContext(workspaceId, config);
+  assertWorkspaceAuthorityAllowed(resolveWorkspaceAuthority(workspace.workspaceId, config, "git_inspection"));
+
+  if (!fs.existsSync(path.join(workspace.root, ".git"))) {
+    throw new AppError("GIT_CAPABILITY_UNAVAILABLE", "Git inspection is unavailable because the selected workspace is not a Git repository.", {
+      workspaceId: workspace.workspaceId,
+      capability: "git_inspection"
+    });
+  }
+
+  return {
+    ...workspace,
+    git: {
+      available: true,
+      reasonCode: "GIT_INSPECTION_AVAILABLE"
+    }
+  };
+}
+
+export function resolveReleaseWorkspaceContext(workspaceId: string, config: AppConfig): GitWorkspaceContext {
+  const workspace = resolveFilesystemWorkspaceContext(workspaceId, config);
+  assertWorkspaceAuthorityAllowed(resolveWorkspaceAuthority(workspace.workspaceId, config, "release_inspection"));
+
+  return {
+    ...workspace,
+    git: {
+      available: true,
+      reasonCode: "GIT_INSPECTION_AVAILABLE"
+    }
   };
 }
 
@@ -426,7 +463,7 @@ function safeFailureMessage(error: unknown): string {
 export async function getWorkspaceStatusSummary(rawInput: unknown, config: AppConfig) {
   return withAudit(config, { toolName: "get_workspace_status_summary" }, async (updateAudit) => {
     const input = WorkspaceInputSchema.parse(rawInput);
-    const workspace = resolveWorkspaceContext(input.workspaceId, config);
+    const workspace = resolveGitWorkspaceContext(input.workspaceId, config);
     const [{ branch, status, entries }, repoName] = await Promise.all([currentStatusEntries(workspace.root), repositoryName(workspace.root)]);
     const relativeChangedPaths = parseStatusPaths(status);
 
@@ -457,7 +494,7 @@ export async function getWorkspaceStatusSummary(rawInput: unknown, config: AppCo
 export async function getChangeSetReadinessSummary(rawInput: unknown, config: AppConfig) {
   return withAudit(config, { toolName: "get_change_set_readiness_summary" }, async (updateAudit) => {
     const input = ChangeSetReadinessInputSchema.parse(rawInput);
-    const workspace = resolveWorkspaceContext(input.workspaceId, config);
+    const workspace = resolveGitWorkspaceContext(input.workspaceId, config);
     const [{ branch, entries }, staged, unstaged, stagedScan, workingTreeScan] = await Promise.all([
       currentStatusEntries(workspace.root),
       stagedFiles(workspace.root),
@@ -515,7 +552,7 @@ export async function getChangeSetReadinessSummary(rawInput: unknown, config: Ap
 export async function getReleaseArtifactSummary(rawInput: unknown, config: AppConfig) {
   return withAudit(config, { toolName: "get_release_artifact_summary" }, async (updateAudit) => {
     const input = ReleaseArtifactInputSchema.parse(rawInput);
-    const workspace = resolveWorkspaceContext(input.workspaceId, config);
+    const workspace = resolveReleaseWorkspaceContext(input.workspaceId, config);
     const releaseVersion = normalizeReleaseVersion(input.releaseVersion);
     const definition = releaseArtifactDefinition(workspace.root, releaseVersion);
     const artifactPath = path.join(workspace.root, "release", definition.expectedArtifactName);
@@ -560,7 +597,7 @@ export async function getReleaseArtifactSummary(rawInput: unknown, config: AppCo
 export async function getReleasePublicationSummary(rawInput: unknown, config: AppConfig) {
   return withAudit(config, { toolName: "get_release_publication_summary" }, async (updateAudit) => {
     const input = ReleasePublicationInputSchema.parse(rawInput);
-    const workspace = resolveWorkspaceContext(input.workspaceId, config);
+    const workspace = resolveReleaseWorkspaceContext(input.workspaceId, config);
     const repo = parseGitHubCoordinates(await repositoryName(workspace.root));
     const warnings: string[] = [];
     const blockers: string[] = [];

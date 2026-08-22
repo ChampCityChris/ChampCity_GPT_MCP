@@ -42,7 +42,7 @@ function trace(
   config: AppConfig,
   correlationId: string,
   stages: ToolCallTraceStage[],
-  options: { result?: "allow" | "deny" | "error"; errorCode?: string; errorMessage?: string; timestamp?: string } = {}
+  options: { result?: "allow" | "deny" | "error"; errorCode?: string; errorMessage?: string; timestamp?: string; closeBeforeFinish?: boolean } = {}
 ): void {
   stages.forEach((stage, index) => {
     recordToolCallTrace(config, {
@@ -53,7 +53,8 @@ function trace(
       action: "read_file",
       result: stage === "tool_result_returned" ? options.result ?? "allow" : "allow",
       errorCode: stage === "tool_result_returned" || stage === "helper_denied" || stage === "transport_error" ? options.errorCode : undefined,
-      errorMessage: options.errorMessage
+      errorMessage: options.errorMessage,
+      closeBeforeFinish: stage === "http_connection_closed" ? options.closeBeforeFinish ?? true : undefined
     });
   });
 }
@@ -68,37 +69,56 @@ describe("MCP tool-call trace diagnostics", () => {
     const config = testConfig();
     trace(config, "received", ["http_received"]);
     trace(config, "dispatched", ["http_received", "dispatch_started"]);
+    trace(config, "contract", ["http_received", "dispatch_started", "tool_result_returned"], {
+      result: "deny",
+      errorCode: "INVALID_INPUT"
+    });
     trace(config, "policy", ["http_received", "dispatch_started", "tool_result_returned"], {
       result: "deny",
       errorCode: "PATH_DENIED"
+    });
+    trace(config, "authorization", ["http_received", "dispatch_started", "tool_result_returned"], {
+      result: "deny",
+      errorCode: "OAUTH_SCOPE_DENIED"
     });
     trace(config, "execution", ["http_received", "dispatch_started", "helper_denied", "tool_result_returned"], {
       result: "error",
       errorCode: "UNKNOWN_ERROR"
     });
     trace(config, "result", ["http_received", "dispatch_started", "tool_result_returned"]);
-    trace(config, "completed", ["http_received", "dispatch_started", "tool_result_returned", "http_response_completed"]);
+    trace(config, "materialized", ["http_received", "dispatch_started", "result_materialized"]);
+    trace(config, "serialized", ["http_received", "dispatch_started", "result_materialized", "result_serialized"]);
+    trace(config, "completed", ["http_received", "dispatch_started", "result_materialized", "result_serialized", "http_response_finished"]);
+    trace(config, "acknowledged", ["http_received", "dispatch_started", "result_materialized", "result_serialized", "http_response_finished", "client_result_acknowledged"]);
+    trace(config, "closed-before-finish", ["http_received", "dispatch_started", "result_materialized", "result_serialized", "http_connection_closed"]);
     trace(config, "transport", ["http_received", "transport_error"], { result: "error", errorCode: "TRANSPORT_ERROR" });
 
     const classifications = new Map(readRecentToolCalls(config, { limit: 50 }).calls.map((call) => [call.correlationId, call.classification]));
     assert.equal(classifications.get("received"), "RECEIVED_NOT_DISPATCHED");
     assert.equal(classifications.get("dispatched"), "DISPATCHED_NOT_EXECUTED");
+    assert.equal(classifications.get("contract"), "APP_CONTRACT_REJECTED");
     assert.equal(classifications.get("policy"), "APP_POLICY_DENIED");
+    assert.equal(classifications.get("authorization"), "APP_AUTHORIZATION_DENIED");
     assert.equal(classifications.get("execution"), "APP_EXECUTION_ERROR");
     assert.equal(classifications.get("result"), "RESULT_RETURNED");
-    assert.equal(classifications.get("completed"), "RESPONSE_COMPLETED");
+    assert.equal(classifications.get("materialized"), "RESULT_MATERIALIZED");
+    assert.equal(classifications.get("serialized"), "RESULT_SERIALIZED");
+    assert.equal(classifications.get("completed"), "RESPONSE_FINISHED_UNACKNOWLEDGED");
+    assert.equal(classifications.get("acknowledged"), "CLIENT_ACKNOWLEDGED");
+    assert.equal(classifications.get("closed-before-finish"), "CONNECTION_CLOSED_BEFORE_FINISH");
     assert.equal(classifications.get("transport"), "TRANSPORT_ERROR");
   });
 
   it("classifies every defined AppErrorCode through the shared authority", () => {
-    const expected: Record<AppErrorCode, "policy" | "execution" | "transport"> = {
-      INVALID_INPUT: "policy",
+    const expected: Record<AppErrorCode, "contract" | "policy" | "authorization" | "execution" | "transport"> = {
+      INVALID_INPUT: "contract",
       PATH_DENIED: "policy",
       FILE_DENIED: "policy",
       PATCH_DENIED: "policy",
       COMMAND_DENIED: "policy",
-      APPROVAL_REQUIRED: "policy",
+      APPROVAL_REQUIRED: "authorization",
       GIT_REQUIRED: "policy",
+      GIT_CAPABILITY_UNAVAILABLE: "execution",
       WORKSPACE_POLICY_DENIED: "policy",
       TARGET_OUTSIDE_ARTIFACT_ROOTS: "policy",
       PROCESS_FAILED: "execution",
@@ -127,7 +147,8 @@ describe("MCP tool-call trace diagnostics", () => {
     assert.equal(classifyAppErrorCode("VERIFICATION_FAILED"), "execution");
     assert.equal(classifyAppErrorCode("PROCESS_FAILED"), "execution");
     assert.equal(classifyAppErrorCode("UNKNOWN_FUTURE_CODE"), "execution");
-    assert.equal(isPolicyDeniedErrorCode("OAUTH_SCOPE_DENIED"), true);
+    assert.equal(classifyAppErrorCode("OAUTH_SCOPE_DENIED"), "authorization");
+    assert.equal(isPolicyDeniedErrorCode("OAUTH_SCOPE_DENIED"), false);
   });
 
   it("applies default limit, since filtering, and no-receipt evidence wording", () => {

@@ -98,7 +98,15 @@ function testConfig(): AppConfig {
   return {
     repoRoot: tempRoot,
     allowedRoots: [tempRoot],
-    workspaces: [{ workspaceId: "fixture_repo", label: "Fixture Repo", root: tempRoot, source: "configured" }],
+    workspaces: [
+      {
+        workspaceId: "fixture_repo",
+        label: "Fixture Repo",
+        root: tempRoot,
+        source: "configured",
+        remote: "https://github.com/ChampCityChris/ChampCity_GPT_MCP.git"
+      }
+    ],
     auditLogPath: path.join(auditRoot, "audit.log"),
     requireGitRoot: true,
     allowedCommands: [],
@@ -183,6 +191,51 @@ describe("public-safe facade tools", () => {
     assert.equal(result.releaseOutputPolicy.finalArtifactRequired, true);
     assert.equal(result.releaseOutputPolicy.intermediateArtifactsAccepted, false);
     assertNoLocalUserPath(result);
+  });
+
+  it("release summaries reject release-disabled workspaces through authority", async () => {
+    initRepo("dev");
+    writeReleaseProjectConfig();
+    const config: AppConfig = {
+      ...testConfig(),
+      workspaces: [
+        {
+          workspaceId: "fixture_repo",
+          label: "Fixture Repo",
+          root: tempRoot,
+          source: "configured",
+          workspaceCapabilities: {
+            releaseOperations: "disabled"
+          }
+        }
+      ]
+    };
+    const originalFetch = globalThis.fetch;
+    let fetchCalled = false;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await assert.rejects(
+        () => getReleaseArtifactSummary({ releaseVersion: "v0.1.2" }, config),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, "WORKSPACE_POLICY_DENIED");
+          return true;
+        }
+      );
+      await assert.rejects(
+        () => getReleasePublicationSummary({ tagName: "v0.1.2", includeAssets: true }, config),
+        (error: unknown) => {
+          assert.equal((error as { code?: string }).code, "WORKSPACE_POLICY_DENIED");
+          return true;
+        }
+      );
+      assert.equal(fetchCalled, false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("get_release_publication_summary looks up a tag and returns sanitized asset metadata", async () => {

@@ -390,43 +390,150 @@ function responseKind(statusCode: number, contentType: string): McpDiscoveryTrac
   return "wrong-content-type";
 }
 
-function recordToolCallHttpResponse(
-  config: AppConfig,
-  context: ToolCallTraceContext | undefined,
-  res: ServerResponse,
-  transportRoute: string,
-  result?: Pick<Parameters<typeof recordToolCallTrace>[1], "result" | "errorCode" | "errorMessage">
-): void {
-  if (!context) {
-    return;
-  }
+const TOOL_CALL_HTTP_LIFECYCLE_STATE = Symbol("toolCallHttpLifecycleState");
 
-  recordToolCallTrace(config, {
-    correlationId: context.correlationId,
-    stage: "http_response_completed",
-    jsonRpcId: context.jsonRpcId,
-    publicTool: context.publicTool,
-    action: context.action,
-    workspaceId: context.workspaceId,
-    requestedPath: context.requestedPath,
-    httpStatus: res.statusCode,
-    durationMs: Date.now() - context.startedAt,
-    responseRoute: transportRoute,
-    responseKind: responseKind(res.statusCode, responseContentType(res)),
-    ...result
-  });
+interface ToolCallHttpLifecycleState {
+  contexts: readonly ToolCallTraceContext[];
+  transportRoute: string;
+  bytesWrittenAtAttach?: number;
+  finishObserved: boolean;
+  closeObserved: boolean;
+  resultForContext?: ToolCallHttpLifecycleResult | ((context: ToolCallTraceContext) => ToolCallHttpLifecycleResult | undefined);
 }
 
-function recordToolCallHttpResponses(
+type LifecycleResponse = ServerResponse & {
+  [TOOL_CALL_HTTP_LIFECYCLE_STATE]?: ToolCallHttpLifecycleState;
+};
+
+type ToolCallHttpLifecycleResult = Pick<Parameters<typeof recordToolCallTrace>[1], "result" | "errorCode" | "errorMessage">;
+
+function contentLengthHeader(res: ServerResponse): number | undefined {
+  const value = res.getHeader("content-length");
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.round(value));
+  }
+
+  if (typeof value === "string" && /^\d+$/u.test(value)) {
+    return Number.parseInt(value, 10);
+  }
+
+  return undefined;
+}
+
+function socketBytesWrittenDelta(res: ServerResponse, start: number | undefined): number | undefined {
+  const current = res.socket?.bytesWritten;
+  if (typeof start !== "number" || typeof current !== "number" || current < start) {
+    return undefined;
+  }
+
+  return current - start;
+}
+
+function recordToolCallHttpLifecycleEvent(
+  config: AppConfig,
+  state: ToolCallHttpLifecycleState,
+  res: ServerResponse,
+  stage: "http_response_finished" | "http_response_completed" | "http_connection_closed" | "transport_error",
+  extra: Partial<Parameters<typeof recordToolCallTrace>[1]> = {}
+): void {
+  for (const context of state.contexts) {
+    const contextResult = typeof state.resultForContext === "function" ? state.resultForContext(context) : state.resultForContext;
+    recordToolCallTrace(config, {
+      correlationId: context.correlationId,
+      stage,
+      jsonRpcId: context.jsonRpcId,
+      publicTool: context.publicTool,
+      action: context.action,
+      workspaceId: context.workspaceId,
+      requestedPath: context.requestedPath,
+      resultAttemptId: context.resultAttemptId,
+      attemptNumber: context.attemptNumber,
+      parentResultAttemptId: context.parentResultAttemptId,
+      resultTelemetrySchemaVersion: context.resultTelemetrySchemaVersion,
+      payloadSha256: context.payloadSha256,
+      httpStatus: res.statusCode,
+      durationMs: Date.now() - context.startedAt,
+      responseRoute: state.transportRoute,
+      responseKind: responseKind(res.statusCode, responseContentType(res)),
+      responseContentType: responseContentType(res),
+      contentLengthHeader: contentLengthHeader(res),
+      socketBytesWrittenDelta: socketBytesWrittenDelta(res, state.bytesWrittenAtAttach),
+      finishObserved: state.finishObserved,
+      closeObserved: state.closeObserved,
+      closeBeforeFinish: state.closeObserved && !state.finishObserved,
+      ...contextResult,
+      ...extra
+    });
+  }
+}
+
+function attachToolCallHttpLifecycle(
   config: AppConfig,
   contexts: readonly ToolCallTraceContext[],
   res: ServerResponse,
   transportRoute: string,
-  result?: Pick<Parameters<typeof recordToolCallTrace>[1], "result" | "errorCode" | "errorMessage">
+  resultForContext?: ToolCallHttpLifecycleResult | ((context: ToolCallTraceContext) => ToolCallHttpLifecycleResult | undefined)
 ): void {
-  for (const context of contexts) {
-    recordToolCallHttpResponse(config, context, res, transportRoute, result);
+  const lifecycleResponse = res as LifecycleResponse;
+  if (contexts.length === 0 || lifecycleResponse[TOOL_CALL_HTTP_LIFECYCLE_STATE]) {
+    return;
   }
+
+  const state: ToolCallHttpLifecycleState = {
+    contexts,
+    transportRoute,
+    bytesWrittenAtAttach: res.socket?.bytesWritten,
+    finishObserved: false,
+    closeObserved: false,
+    resultForContext
+  };
+  lifecycleResponse[TOOL_CALL_HTTP_LIFECYCLE_STATE] = state;
+
+  const cleanup = (): void => {
+    res.off("finish", onFinish);
+    res.off("close", onClose);
+    res.off("error", onError);
+  };
+  const onFinish = (): void => {
+    if (state.finishObserved) {
+      return;
+    }
+    state.finishObserved = true;
+    recordToolCallHttpLifecycleEvent(config, state, res, "http_response_finished", {
+      finishObserved: true,
+      closeObserved: state.closeObserved,
+      closeBeforeFinish: false
+    });
+    recordToolCallHttpLifecycleEvent(config, state, res, "http_response_completed", {
+      finishObserved: true,
+      closeObserved: state.closeObserved,
+      closeBeforeFinish: false
+    });
+  };
+  const onClose = (): void => {
+    if (state.closeObserved) {
+      return;
+    }
+    state.closeObserved = true;
+    recordToolCallHttpLifecycleEvent(config, state, res, "http_connection_closed", {
+      closeObserved: true,
+      finishObserved: state.finishObserved,
+      closeBeforeFinish: !state.finishObserved
+    });
+    cleanup();
+  };
+  const onError = (error: Error & { code?: string }): void => {
+    recordToolCallHttpLifecycleEvent(config, state, res, "transport_error", {
+      result: "error",
+      errorCode: "TRANSPORT_ERROR",
+      errorMessage: error.message,
+      transportErrorCode: error.code
+    });
+  };
+
+  res.once("finish", onFinish);
+  res.once("close", onClose);
+  res.once("error", onError);
 }
 
 function runWithToolCallContexts<T>(contexts: readonly ToolCallTraceContext[], handler: () => T): T {
@@ -1146,8 +1253,12 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
 
         const auth = authenticateMcpRequest(req, config, options);
         if (!auth) {
+          attachToolCallHttpLifecycle(config, toolCallContexts, res, "auth-denied", {
+            result: "deny",
+            errorCode: "OAUTH_SCOPE_DENIED",
+            errorMessage: "OAuth bearer access token is required."
+          });
           unauthorized(res);
-          recordToolCallHttpResponses(config, toolCallContexts, res, "auth-denied");
           recordMcpDiscovery(
             config,
             req,
@@ -1181,18 +1292,11 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
               result: "deny",
               reason: denial
             });
-            if (duplicateCorrelationIds.size > 0) {
-              jsonRpcErrorResponse(res, 400, duplicateMessage);
-            } else {
-              forbidden(res, denial);
-            }
+            const lifecycleResultByCorrelationId = new Map<string, ToolCallHttpLifecycleResult | undefined>();
             for (const evaluation of scopeEvaluations) {
               const isDuplicate = duplicateCorrelationIds.has(evaluation.context.correlationId);
-              recordToolCallHttpResponse(
-                config,
-                evaluation.context,
-                res,
-                transportRoute,
+              lifecycleResultByCorrelationId.set(
+                evaluation.context.correlationId,
                 isDuplicate
                   ? {
                       result: "deny",
@@ -1207,6 +1311,18 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
                         errorMessage: evaluation.denialMessage ?? denial
                       }
               );
+            }
+            attachToolCallHttpLifecycle(
+              config,
+              toolCallContexts,
+              res,
+              transportRoute,
+              (context) => lifecycleResultByCorrelationId.get(context.correlationId)
+            );
+            if (duplicateCorrelationIds.size > 0) {
+              jsonRpcErrorResponse(res, 400, duplicateMessage);
+            } else {
+              forbidden(res, denial);
             }
             recordMcpDiscovery(
               config,
@@ -1235,8 +1351,8 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
         const existingSession = normalizedSessionId ? sessions.get(normalizedSessionId) : undefined;
 
         if (existingSession) {
+          attachToolCallHttpLifecycle(config, toolCallContexts, res, "stateful-session");
           await runWithToolCallContexts(toolCallContexts, () => existingSession.transport.handleRequest(req, res, parsedBody));
-          recordToolCallHttpResponses(config, toolCallContexts, res, "stateful-session");
           recordMcpDiscovery(
             config,
             req,
@@ -1257,8 +1373,8 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
         if (!normalizedSessionId && includesInitializeRequest(parsedBody)) {
           const session = createSession(auth);
           await session.server.connect(session.transport);
+          attachToolCallHttpLifecycle(config, toolCallContexts, res, "stateful-session");
           await runWithToolCallContexts(toolCallContexts, () => session.transport.handleRequest(req, res, parsedBody));
-          recordToolCallHttpResponses(config, toolCallContexts, res, "stateful-session");
           const initializedSessionId = session.transport.sessionId;
           if (initializedSessionId) {
             sessions.set(initializedSessionId, session);
@@ -1281,6 +1397,11 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
         }
 
         if (!methodAllowsMcpBody(req.method)) {
+          attachToolCallHttpLifecycle(config, toolCallContexts, res, "bad-request", {
+            result: "deny",
+            errorCode: "INVALID_INPUT",
+            errorMessage: normalizedSessionId ? "Session not found" : "Bad Request: No valid session ID provided"
+          });
           jsonRpcErrorResponse(res, normalizedSessionId ? 404 : 400, normalizedSessionId ? "Session not found" : "Bad Request: No valid session ID provided");
           recordMcpDiscovery(
             config,
@@ -1299,8 +1420,8 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
           return;
         }
 
+        attachToolCallHttpLifecycle(config, toolCallContexts, res, "stateless-compat");
         await runWithToolCallContexts(toolCallContexts, () => handleStatelessCompatRequest(auth, req, res, parsedBody));
-        recordToolCallHttpResponses(config, toolCallContexts, res, "stateless-compat");
         recordMcpDiscovery(
           config,
           req,
@@ -1322,8 +1443,12 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
     } catch (error) {
       if (isToolCallTraceIdentityMismatchError(error)) {
         await logToolCallTraceIdentityMismatch(config, req, requestPath, error);
+        attachToolCallHttpLifecycle(config, activeToolCallContexts, res, "server-error", {
+          result: "error",
+          errorCode: "INVALID_INPUT",
+          errorMessage: "HTTP tool-call trace identity mismatch."
+        });
         jsonRpcErrorResponse(res, 500, "Internal server error");
-        recordToolCallHttpResponses(config, activeToolCallContexts, res, "server-error");
         return;
       }
 
@@ -1345,8 +1470,12 @@ export async function runHttpTransport(createServer: (auth?: AuthContext) => Ser
         });
       }
       await logHttpTransportError(config, req, requestPath, error);
+      attachToolCallHttpLifecycle(config, activeToolCallContexts, res, "server-error", {
+        result: "error",
+        errorCode: "TRANSPORT_ERROR",
+        errorMessage: errorDetails(error).message
+      });
       jsonRpcErrorResponse(res, 500, "Internal server error");
-      recordToolCallHttpResponses(config, activeToolCallContexts, res, "server-error");
     }
   });
 

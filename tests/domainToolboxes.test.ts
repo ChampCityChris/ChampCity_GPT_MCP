@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { type AppConfig } from "../src/config.js";
+import { readPendingPatchStore } from "../src/pendingPatches.js";
 import { createToolboxRuntimeContext, toolResponse } from "../src/server/registerTools.js";
 import { gitStatus as legacyGitStatus } from "../src/tools/gitStatus.js";
 import {
@@ -105,6 +106,41 @@ function initRepoAt(root: string, branch: string, packageName: string, reportMar
   gitIn(root, ["commit", "-m", "Initial commit"]);
 }
 
+function installGitProcessTrap(root: string) {
+  const fakeBin = path.join(auditRoot, `fake-git-${Date.now()}`);
+  const marker = path.join(auditRoot, `git-called-${Date.now()}.txt`);
+  fs.mkdirSync(fakeBin, { recursive: true });
+  const originalPath = process.env.PATH;
+  const originalTrap = process.env.CHAMPCITY_GIT_TRAP;
+  process.env.CHAMPCITY_GIT_TRAP = marker;
+
+  if (process.platform === "win32") {
+    fs.copyFileSync(process.execPath, path.join(fakeBin, "git.exe"));
+    const trapScript = "require('node:fs').writeFileSync(process.env.CHAMPCITY_GIT_TRAP, process.argv.join(' ')); process.exit(23);\n";
+    fs.writeFileSync(path.join(root, "branch"), trapScript, "utf8");
+    fs.writeFileSync(path.join(root, "status"), trapScript, "utf8");
+    fs.writeFileSync(path.join(root, "remote"), trapScript, "utf8");
+  } else {
+    const gitPath = path.join(fakeBin, "git");
+    fs.writeFileSync(gitPath, "#!/bin/sh\nprintf '%s' \"$*\" > \"$CHAMPCITY_GIT_TRAP\"\nexit 23\n", "utf8");
+    fs.chmodSync(gitPath, 0o755);
+  }
+
+  process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+
+  return {
+    marker,
+    restore: () => {
+      process.env.PATH = originalPath;
+      if (originalTrap === undefined) {
+        delete process.env.CHAMPCITY_GIT_TRAP;
+      } else {
+        process.env.CHAMPCITY_GIT_TRAP = originalTrap;
+      }
+    }
+  };
+}
+
 function testConfig(
   writeMode: AppConfig["writeMode"] = "off",
   root = tempRoot,
@@ -174,7 +210,7 @@ describe("stable domain toolbox tools", () => {
     assert.deepEqual(runtime.warnings, []);
   });
 
-  it("diagnostics_toolbox.runtime_status warns when runtime and selected workspace package versions differ", async () => {
+  it("diagnostics_toolbox.runtime_status does not compare runtime package version to an unrelated workspace", async () => {
     initRepo();
     const workspaceRoot = path.join(auditRoot, "workspace");
     initRepoAt(workspaceRoot, "dev", "workspace-fixture");
@@ -198,16 +234,18 @@ describe("stable domain toolbox tools", () => {
       warnings?: string[];
       runtimeSourceCommit?: unknown;
       selectedWorkspaceHead?: unknown;
+      targetWorkspace?: { alignment?: unknown };
     };
     const serialized = JSON.stringify(result);
 
     assert.equal(result.ok, true);
     assert.equal(runtime.runtimePackageVersion, "0.1.2");
     assert.equal(runtime.selectedWorkspacePackageVersion, "9.9.9");
-    assert.equal(runtime.packageVersionMatch, false);
-    assert.equal(runtime.runtimeDriftDetected, true);
-    assert.ok(runtime.warnings?.some((warning) => /Package, promote, restart, and reconnect/u.test(warning)));
-    assert.equal(result.warnings?.length, 1);
+    assert.equal(runtime.packageVersionMatch, "not_applicable");
+    assert.equal(runtime.runtimeDriftDetected, false);
+    assert.deepEqual(runtime.warnings, []);
+    assert.equal(result.warnings?.length, 0);
+    assert.equal(runtime.targetWorkspace?.alignment, "not_applicable");
     assert.match(String(runtime.runtimeSourceCommit), /^[a-f0-9]{7,40}$|^unknown$/u);
     assert.match(String(runtime.selectedWorkspaceHead), /^[a-f0-9]{7,40}$|^unknown$/u);
     assert.doesNotMatch(serialized, new RegExp(tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
@@ -246,7 +284,7 @@ describe("stable domain toolbox tools", () => {
 
     assert.equal(result.ok, true);
     assert.equal(runtime.selectedWorkspacePackageVersion, "unknown");
-    assert.equal(runtime.packageVersionMatch, "unknown");
+    assert.equal(runtime.packageVersionMatch, "not_applicable");
     assert.equal(runtime.runtimeDriftDetected, false);
     assert.deepEqual(runtime.warnings, []);
   });
@@ -451,7 +489,7 @@ describe("stable domain toolbox tools", () => {
     assert.equal((repoRead.result as { relativePath?: string }).relativePath, "README.md");
     assert.match((repoRead.result as { content?: string }).content ?? "", /# Test/u);
     assert.equal(repoStatus.ok, true);
-    assert.equal((repoStatus.result as { branch?: string }).branch, "dev");
+    assert.equal((repoStatus.result as { git?: { status?: { branch?: string } } }).git?.status?.branch, "dev");
     assert.equal(gitStatusResult.ok, true);
     assert.equal((gitStatusResult.result as { branch?: string }).branch, "dev");
     assert.equal(reportSummary.ok, true);
@@ -662,6 +700,329 @@ describe("stable domain toolbox tools", () => {
     assert.match(result.error?.message ?? "", /files\.write/u);
   });
 
+  it("treats a registered non-Git workspace as valid for reads, status, safety, and artifact writes", async () => {
+    fs.mkdirSync(tempRoot, { recursive: true });
+    writeFile("planning/project-intake.md", "# Project Intake\n\nRevisionary-like planning input.\n");
+    const config: AppConfig = {
+      ...testConfig("docs"),
+      requireGitRoot: true,
+      workspaces: [
+        {
+          workspaceId: "revisionary",
+          label: "Revisionary",
+          root: tempRoot,
+          source: "configured",
+          writePolicy: "git_required"
+        }
+      ],
+      defaultWorkspaceId: "revisionary",
+      defaultWorkspaceIdSource: "local-file"
+    };
+    const readContext = context(config, "files.read");
+    const writeContext = context(config, "files.read files.write");
+
+    const read = await repoToolbox(
+      { action: "read_file", workspaceId: "revisionary", params: { relativePath: "planning/project-intake.md" } },
+      config,
+      readContext
+    );
+    const list = await repoToolbox(
+      { action: "list_files", workspaceId: "revisionary", params: { relativePath: "planning" } },
+      config,
+      readContext
+    );
+    const search = await repoToolbox(
+      { action: "search_files", workspaceId: "revisionary", params: { query: "Revisionary-like", scopePath: "planning" } },
+      config,
+      readContext
+    );
+    const status = await repoToolbox({ action: "status", workspaceId: "revisionary" }, config, readContext);
+    const runtimeStatus = await diagnosticsToolbox({ action: "runtime_status", workspaceId: "revisionary" }, config, readContext);
+    const safety = await diagnosticsToolbox({ action: "workspace_safety_status", workspaceId: "revisionary" }, config, readContext);
+    const deprecatedSafety = await diagnosticsToolbox({ action: "public_safety_status", workspaceId: "revisionary" }, config, readContext);
+    const markdown = await repoToolbox(
+      { action: "write_markdown_artifact", workspaceId: "revisionary", params: { relativePath: "planning/draft.md", content: "# Draft\n" } },
+      config,
+      writeContext
+    );
+    const json = await repoToolbox(
+      { action: "write_json_artifact", workspaceId: "revisionary", params: { relativePath: "planning/draft.json", content: "{\"ok\":true}" } },
+      config,
+      writeContext
+    );
+    const gitStatus = await gitToolbox({ action: "status", workspaceId: "revisionary" }, config, readContext);
+    const gitDiff = await gitToolbox({ action: "diff", workspaceId: "revisionary" }, config, readContext);
+    const patch = await repoToolbox(
+      {
+        action: "propose_patch",
+        workspaceId: "revisionary",
+        params: { changes: [{ relativePath: "planning/project-intake.md", originalText: "Project", replacementText: "Updated" }] }
+      },
+      { ...config, writeMode: "patch", patchWritesAllowed: true },
+      context({ ...config, writeMode: "patch", patchWritesAllowed: true }, "files.read files.write")
+    );
+
+    assert.equal(read.ok, true);
+    assert.equal(list.ok, true);
+    assert.equal(search.ok, true);
+    assert.equal(status.ok, true);
+    assert.equal((status.result as { git?: { status?: { status?: string } } }).git?.status?.status, "not_git_repository");
+    assert.equal(runtimeStatus.ok, true);
+    assert.equal((runtimeStatus.result as { targetWorkspace?: { head?: string } }).targetWorkspace?.head, "unknown");
+    assert.equal(safety.ok, true);
+    assert.equal((safety.result as { checks?: { gitCapabilitiesAreOptional?: boolean } }).checks?.gitCapabilitiesAreOptional, true);
+    assert.equal(deprecatedSafety.ok, true);
+    assert.equal((deprecatedSafety.result as { deprecation?: { replacementAction?: string } }).deprecation?.replacementAction, "workspace_safety_status");
+    assert.equal(markdown.ok, true);
+    assert.equal(json.ok, true);
+    assert.equal(gitStatus.ok, true);
+    assert.equal((gitStatus.result as { status?: string }).status, "not_git_repository");
+    assert.equal(gitDiff.ok, true);
+    assert.equal((gitDiff.result as { status?: string }).status, "not_git_repository");
+    assert.equal(patch.ok, false);
+    assert.equal(patch.error?.code, "GIT_CAPABILITY_UNAVAILABLE");
+    assert.doesNotMatch(JSON.stringify({ status: status.result, safety: safety.result, read, markdown, json }), /GIT_REQUIRED/u);
+  });
+
+  it("public toolbox diagnostics and execution honor explicit disabled workspace capabilities", async () => {
+    initRepo();
+    const config: AppConfig = {
+      ...testConfig("elevated"),
+      workspaces: [
+        {
+          workspaceId: "locked_repo",
+          label: "Locked Repo",
+          root: tempRoot,
+          source: "configured",
+          workspaceCapabilities: {
+            artifactPersistence: "disabled",
+            patchWorkflow: "disabled",
+            gitOperations: "disabled",
+            releaseOperations: "disabled"
+          }
+        }
+      ],
+      defaultWorkspaceId: "locked_repo",
+      defaultWorkspaceIdSource: "local-file"
+    };
+    const toolboxContext = context(config, "files.read files.write");
+
+    const list = await diagnosticsToolbox({ action: "list_workspaces", workspaceId: "locked_repo" }, config, toolboxContext);
+    const writeAccess = await diagnosticsToolbox({ action: "write_access_status", workspaceId: "locked_repo" }, config, toolboxContext);
+    const gitTrap = installGitProcessTrap(tempRoot);
+    let status: Awaited<ReturnType<typeof repoToolbox>> | undefined;
+    let safety: Awaited<ReturnType<typeof diagnosticsToolbox>> | undefined;
+    let gitStatus: Awaited<ReturnType<typeof gitToolbox>> | undefined;
+    try {
+      status = await repoToolbox({ action: "status", workspaceId: "locked_repo" }, config, toolboxContext);
+      safety = await diagnosticsToolbox({ action: "workspace_safety_status", workspaceId: "locked_repo" }, config, toolboxContext);
+      gitStatus = await gitToolbox({ action: "status", workspaceId: "locked_repo" }, config, toolboxContext);
+    } finally {
+      gitTrap.restore();
+    }
+    assert.ok(status);
+    assert.ok(safety);
+    assert.ok(gitStatus);
+    const write = await repoToolbox(
+      {
+        action: "write_markdown_artifact",
+        workspaceId: "locked_repo",
+        params: { relativePath: "docs/blocked.md", content: "# Blocked\n" }
+      },
+      config,
+      toolboxContext
+    );
+    const patch = await repoToolbox(
+      {
+        action: "propose_patch",
+        workspaceId: "locked_repo",
+        params: { changes: [{ relativePath: "README.md", originalText: "# Test", replacementText: "# Updated" }] }
+      },
+      config,
+      toolboxContext
+    );
+
+    const listedWorkspace = (list.result as { workspaces?: Array<{ capabilities?: Record<string, { available?: boolean; reasonCode?: string }>; artifactPersistenceAvailable?: boolean; gitMutationAvailable?: boolean }> }).workspaces?.[0];
+    const writeAuthority = (writeAccess.result as { workspaceWriteAuthority?: Array<{ capabilities?: Record<string, { available?: boolean; reasonCode?: string }>; artifactPersistenceAvailable?: boolean; gitMutationReason?: string }> }).workspaceWriteAuthority?.[0];
+    const statusResult = status.result as {
+      artifactPersistence?: { available?: boolean; reasonCode?: string };
+      patchCapability?: { available?: boolean; reasonCode?: string };
+      git?: { inspection?: { available?: boolean; reasonCode?: string }; status?: { status?: string; reasonCode?: string } };
+      release?: { inspection?: { available?: boolean; reasonCode?: string } };
+    };
+    const safetyResult = safety.result as { git?: { status?: { status?: string; reasonCode?: string } } };
+
+    assert.equal(list.ok, true);
+    assert.equal(listedWorkspace?.capabilities?.artifactPersistence.reasonCode, "ARTIFACT_PERSISTENCE_DISABLED");
+    assert.equal(listedWorkspace?.capabilities?.patchWorkflow.reasonCode, "PATCH_WORKFLOW_DISABLED");
+    assert.equal(listedWorkspace?.capabilities?.gitInspection.reasonCode, "GIT_OPERATIONS_DISABLED");
+    assert.equal(listedWorkspace?.capabilities?.releaseInspection.reasonCode, "RELEASE_OPERATIONS_DISABLED");
+    assert.equal(listedWorkspace?.artifactPersistenceAvailable, false);
+    assert.equal(listedWorkspace?.gitMutationAvailable, false);
+    assert.equal(writeAccess.ok, true);
+    assert.equal(writeAuthority?.capabilities?.artifactPersistence.reasonCode, "ARTIFACT_PERSISTENCE_DISABLED");
+    assert.equal(writeAuthority?.artifactPersistenceAvailable, false);
+    assert.equal(writeAuthority?.gitMutationReason, "GIT_OPERATIONS_DISABLED");
+    assert.equal(status.ok, true);
+    assert.equal(statusResult.artifactPersistence?.reasonCode, "ARTIFACT_PERSISTENCE_DISABLED");
+    assert.equal(statusResult.patchCapability?.reasonCode, "PATCH_WORKFLOW_DISABLED");
+    assert.equal(statusResult.git?.inspection?.reasonCode, "GIT_OPERATIONS_DISABLED");
+    assert.equal(statusResult.git?.status?.status, "git_inspection_disabled");
+    assert.equal(statusResult.git?.status?.reasonCode, "GIT_OPERATIONS_DISABLED");
+    assert.equal(statusResult.release?.inspection?.reasonCode, "RELEASE_OPERATIONS_DISABLED");
+    assert.equal(safety.ok, true);
+    assert.equal(safetyResult.git?.status?.status, "git_inspection_disabled");
+    assert.equal(safetyResult.git?.status?.reasonCode, "GIT_OPERATIONS_DISABLED");
+    assert.equal(fs.existsSync(gitTrap.marker), false);
+    assert.equal(write.ok, false);
+    assert.equal(write.error?.code, "WORKSPACE_POLICY_DENIED");
+    assert.equal(patch.ok, false);
+    assert.equal(patch.error?.code, "WORKSPACE_POLICY_DENIED");
+    assert.equal(gitStatus.ok, true);
+    assert.equal((gitStatus.result as { reasonCode?: string }).reasonCode, "WORKSPACE_POLICY_DENIED");
+  });
+
+  it("artifact_toolbox release summaries reject release-disabled workspaces before release state inspection", async () => {
+    initRepo();
+    const config: AppConfig = {
+      ...testConfig("elevated"),
+      workspaces: [
+        {
+          workspaceId: "release_disabled",
+          label: "Release Disabled",
+          root: tempRoot,
+          source: "configured",
+          workspaceCapabilities: {
+            releaseOperations: "disabled"
+          }
+        }
+      ],
+      defaultWorkspaceId: "release_disabled",
+      defaultWorkspaceIdSource: "local-file"
+    };
+    const toolboxContext = context(config, "files.read files.write");
+    const originalFetch = globalThis.fetch;
+    let fetchCalled = false;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const artifact = await artifactToolbox(
+        { action: "release_artifact_summary", workspaceId: "release_disabled", params: { releaseVersion: "v0.1.2" } },
+        config,
+        toolboxContext
+      );
+      const publication = await artifactToolbox(
+        { action: "release_publication_summary", workspaceId: "release_disabled", params: { tagName: "v0.1.2", includeAssets: true } },
+        config,
+        toolboxContext
+      );
+      const read = await repoToolbox(
+        { action: "read_file", workspaceId: "release_disabled", params: { relativePath: "README.md" } },
+        config,
+        toolboxContext
+      );
+      const status = await repoToolbox({ action: "status", workspaceId: "release_disabled" }, config, toolboxContext);
+
+      assert.equal(artifact.ok, false);
+      assert.equal(artifact.error?.code, "WORKSPACE_POLICY_DENIED");
+      assert.equal(publication.ok, false);
+      assert.equal(publication.error?.code, "WORKSPACE_POLICY_DENIED");
+      assert.equal(fetchCalled, false);
+      assert.equal(read.ok, true);
+      assert.equal(status.ok, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("artifact_toolbox release summaries reject git-disabled and non-release-capable workspaces before release probes", async () => {
+    initRepo();
+    const toolboxContextFor = (config: AppConfig) => context(config, "files.read files.write");
+    const gitDisabledConfig: AppConfig = {
+      ...testConfig("elevated"),
+      workspaces: [
+        {
+          workspaceId: "git_disabled_release",
+          label: "Git Disabled Release",
+          root: tempRoot,
+          source: "configured",
+          workspaceCapabilities: {
+            gitOperations: "disabled"
+          }
+        }
+      ],
+      defaultWorkspaceId: "git_disabled_release",
+      defaultWorkspaceIdSource: "local-file"
+    };
+    const nonReleaseConfig: AppConfig = {
+      ...testConfig("elevated"),
+      workspaces: [
+        {
+          workspaceId: "ordinary_repo",
+          label: "Ordinary Repo",
+          root: tempRoot,
+          source: "configured"
+        }
+      ],
+      defaultWorkspaceId: "ordinary_repo",
+      defaultWorkspaceIdSource: "local-file"
+    };
+    for (const config of [gitDisabledConfig, nonReleaseConfig]) {
+      const catalog = await diagnosticsToolbox({ action: "list_workspaces", workspaceId: config.defaultWorkspaceId }, config, toolboxContextFor(config));
+      const listedWorkspace = (catalog.result as { workspaces?: Array<{ capabilities?: { releaseInspection?: { available?: boolean } } }> }).workspaces?.[0];
+
+      assert.equal(catalog.ok, true);
+      assert.equal(listedWorkspace?.capabilities?.releaseInspection?.available, false);
+    }
+
+    const originalFetch = globalThis.fetch;
+    const originalExistsSync = fs.existsSync;
+    let fetchCalled = false;
+    let releasePathChecked = false;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    fs.existsSync = ((target: fs.PathLike) => {
+      const targetText = String(target).replace(/\\/gu, "/");
+      if (targetText.includes("/release/")) {
+        releasePathChecked = true;
+      }
+      return originalExistsSync(target);
+    }) as typeof fs.existsSync;
+    const gitTrap = installGitProcessTrap(tempRoot);
+
+    try {
+      for (const config of [gitDisabledConfig, nonReleaseConfig]) {
+        const artifact = await artifactToolbox(
+          { action: "release_artifact_summary", workspaceId: config.defaultWorkspaceId, params: { releaseVersion: "v0.1.2" } },
+          config,
+          toolboxContextFor(config)
+        );
+        const publication = await artifactToolbox(
+          { action: "release_publication_summary", workspaceId: config.defaultWorkspaceId, params: { tagName: "v0.1.2", includeAssets: true } },
+          config,
+          toolboxContextFor(config)
+        );
+
+        assert.equal(artifact.ok, false);
+        assert.equal(artifact.error?.code, "WORKSPACE_POLICY_DENIED");
+        assert.equal(publication.ok, false);
+        assert.equal(publication.error?.code, "WORKSPACE_POLICY_DENIED");
+      }
+      assert.equal(fetchCalled, false);
+      assert.equal(releasePathChecked, false);
+      assert.equal(fs.existsSync(gitTrap.marker), false);
+    } finally {
+      gitTrap.restore();
+      globalThis.fetch = originalFetch;
+      fs.existsSync = originalExistsSync;
+    }
+  });
+
   it("git_toolbox mutations are denied for artifact-only workspaces", async () => {
     fs.mkdirSync(path.join(tempRoot, ".git"), { recursive: true });
     const config = testConfig("elevated");
@@ -829,6 +1190,75 @@ describe("stable domain toolbox tools", () => {
     assert.equal(docsApply.ok, false);
     assert.equal(docsApply.error?.code, "APPROVAL_REQUIRED");
     assert.match(docsApply.error?.message ?? "", /writeMode patch or elevated/u);
+  });
+
+  it("repo_toolbox apply_approved_patch is denied without consuming proposals when patch workflow is disabled", async () => {
+    initRepo();
+    const enabledConfig: AppConfig = {
+      ...testConfig("patch"),
+      workspaces: [
+        {
+          workspaceId: "patch_locked",
+          label: "Patch Locked",
+          root: tempRoot,
+          source: "configured"
+        }
+      ],
+      defaultWorkspaceId: "patch_locked",
+      defaultWorkspaceIdSource: "local-file"
+    };
+    const disabledConfig: AppConfig = {
+      ...enabledConfig,
+      workspaces: [
+        {
+          workspaceId: "patch_locked",
+          label: "Patch Locked",
+          root: tempRoot,
+          source: "configured",
+          workspaceCapabilities: {
+            patchWorkflow: "disabled"
+          }
+        }
+      ]
+    };
+    const enabledContext = context(enabledConfig, "files.read files.write");
+    const disabledContext = context(disabledConfig, "files.read files.write");
+    const proposal = await repoToolbox(
+      {
+        action: "propose_patch",
+        workspaceId: "patch_locked",
+        params: {
+          changes: [{ relativePath: "README.md", originalText: "# Test", replacementText: "# Locked Patch" }]
+        }
+      },
+      enabledConfig,
+      enabledContext
+    );
+    assert.equal(proposal.ok, true);
+    const proposed = proposal.result as { patch: string; proposalId: string; patchHash: string };
+    const beforeStore = readPendingPatchStore(disabledConfig.repoRoot);
+    const beforeStatus = git(["status", "--short", "--untracked-files=all"]);
+    const beforeContent = fs.readFileSync(path.join(tempRoot, "README.md"), "utf8");
+
+    const apply = await repoToolbox(
+      {
+        action: "apply_approved_patch",
+        workspaceId: "patch_locked",
+        params: {
+          patch: proposed.patch,
+          proposalId: proposed.proposalId,
+          patchHash: proposed.patchHash
+        }
+      },
+      disabledConfig,
+      disabledContext
+    );
+
+    assert.equal(apply.ok, false);
+    assert.equal(apply.error?.code, "WORKSPACE_POLICY_DENIED");
+    assert.equal(fs.readFileSync(path.join(tempRoot, "README.md"), "utf8"), beforeContent);
+    assert.deepEqual(readPendingPatchStore(disabledConfig.repoRoot), beforeStore);
+    assert.equal(git(["status", "--short", "--untracked-files=all"]), beforeStatus);
   });
 
   it("integration_toolbox lists supported services and rejects unknown services", async () => {

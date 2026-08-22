@@ -9,7 +9,15 @@ export type WorkspaceWritePolicy = (typeof WORKSPACE_WRITE_POLICIES)[number];
 
 export const DEFAULT_ARTIFACT_WRITE_ROOTS = ["planning"] as const;
 
-export type WorkspaceOperationClass = "artifact_persistence" | "patch_workflow" | "git_mutation";
+export type WorkspaceOperationClass =
+  | "filesystem_read"
+  | "workspace_diagnostics"
+  | "artifact_persistence"
+  | "patch_workflow"
+  | "git_inspection"
+  | "git_mutation"
+  | "release_inspection"
+  | "release_publication";
 
 export interface WorkspaceAuthority {
   workspaceId: string;
@@ -20,7 +28,7 @@ export interface WorkspaceAuthority {
   legacyRequireGitRootDeprecated: boolean;
   operation: WorkspaceOperationClass;
   allowed: boolean;
-  denialReason?: "WORKSPACE_POLICY_DENIED" | "GIT_REQUIRED" | "TARGET_OUTSIDE_ARTIFACT_ROOTS";
+  denialReason?: "WORKSPACE_POLICY_DENIED" | "GIT_CAPABILITY_UNAVAILABLE" | "TARGET_OUTSIDE_ARTIFACT_ROOTS";
 }
 
 const URL_PATTERN = /^[a-z][a-z0-9+.-]*:/iu;
